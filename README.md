@@ -60,7 +60,8 @@ npm run build:browser
 npx http-server -p 3000
 ```
 
-- [cell-eater.html](examples/cell-eater.html) — Agar.io style
+- [cell-eater.html](examples/cell-eater.html) — Eat to grow
+- [snake.html](examples/snake.html) — Classic snake
 - [2d-shooter.html](examples/2d-shooter.html) — Top-down shooter
 
 ## Documentation
