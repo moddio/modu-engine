@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Cell Eater</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #111; display: flex; justify-content: center; align-items: center; height: 100vh; overflow: hidden; }
+        canvas { border: 2px solid #333; }
+    </style>
+</head>
+<body>
+    <canvas id="game" width="1400" height="900"></canvas>
+
+<script src="../dist/modu.iife.js?v=dev"></script>
+<script>
+const canvas = document.getElementById('game');
+const WIDTH = canvas.width, HEIGHT = canvas.height;
+
+// Create game with plugins
+const game = createGame();
+game.addPlugin(Simple2DRenderer, canvas);
+const physics = game.addPlugin(Physics2DSystem, { gravity: { x: 0, y: 0 } });
+window.game = game;
+
+// Game constants
+const SPEED = 5, INITIAL_RADIUS = 20, MAX_RADIUS = 150;
+const EAT_RATIO = 1.2, FOOD_GROW = 0.05, PLAYER_GROW = 0.3;
+const FOOD_COUNT = 60, MAX_FOOD = 100, FOOD_SPAWN_CHANCE = 0.05;
+
+// Color palette (fixed set to avoid unbounded string interning)
+const COLORS = [
+    '#ff6b6b', '#ff8e72', '#ffa94d', '#ffd43b', '#a9e34b', '#69db7c',
+    '#38d9a9', '#3bc9db', '#4dabf7', '#748ffc', '#9775fa', '#da77f2',
+    '#f783ac', '#e64980', '#d6336c', '#c2255c', '#ff4500', '#32cd32',
+    '#1e90ff', '#ff1493', '#00ced1', '#ffa500', '#9400d3', '#00ff7f'
+];
+
+// Define entity types - using Sprite for visuals, Body2D for physics
+game.defineEntity('cell')
+    .with(Transform2D)
+    .with(Sprite, { shape: SHAPE_CIRCLE, radius: INITIAL_RADIUS, layer: 1 })
+    .with(Body2D, { shapeType: SHAPE_CIRCLE, radius: INITIAL_RADIUS, bodyType: BODY_KINEMATIC, isSensor: true })
+    .with(Player)  // Player component marks entity as player-controlled
+    .register();
+
+game.defineEntity('food')
+    .with(Transform2D)
+    .with(Sprite, { shape: SHAPE_CIRCLE, radius: 8, layer: 0 })
+    .with(Body2D, { shapeType: SHAPE_CIRCLE, radius: 8, bodyType: BODY_STATIC })
+    .register();
+
+// Collision handler: cell eats food
+physics.onCollision('cell', 'food', (cell, food) => {
+    if (food.destroyed) return;
+    const sprite = cell.get(Sprite);
+    const foodSprite = food.get(Sprite);
+    sprite.radius = Math.min(sprite.radius + foodSprite.radius * FOOD_GROW, MAX_RADIUS);
+    cell.get(Body2D).radius = sprite.radius;
+    food.destroy();
+});
+
+// Collision handler: cell eats smaller cell
+// Called twice per collision (A,B) and (B,A), so just check if first > second
+physics.onCollision('cell', 'cell', (eater, prey) => {
+    const eaterSprite = eater.get(Sprite);
+    const preySprite = prey.get(Sprite);
+    if (eaterSprite.radius > preySprite.radius * EAT_RATIO) {
+        eaterSprite.radius = Math.min(eaterSprite.radius + preySprite.radius * PLAYER_GROW, MAX_RADIUS);
+        eater.get(Body2D).radius = eaterSprite.radius;
+        prey.destroy();
+    }
+});
+
+// Helper to spawn food
+function spawnFood() {
+    // Use palette colors to avoid unbounded string interning
+    const colorStr = COLORS[(dRandom() * COLORS.length) | 0];
+    const color = game.internString('color', colorStr);
+    game.spawn('food', {
+        x: 50 + (dRandom() * (WIDTH - 100)) | 0,
+        y: 50 + (dRandom() * (HEIGHT - 100)) | 0,
+        color
+    });
+}
+
+// Helper to spawn cell for player
+function spawnCell(clientId) {
+    // Use palette colors to avoid unbounded string interning
+    const colorStr = COLORS[(dRandom() * COLORS.length) | 0];
+    const color = game.internString('color', colorStr);
+    game.spawn('cell', {
+        x: 100 + (dRandom() * (WIDTH - 200)) | 0,
+        y: 100 + (dRandom() * (HEIGHT - 200)) | 0,
+        clientId,
+        color
+    });
+}
+
+// Movement system - uses deterministic helpers
+game.addSystem(() => {
+    for (const cell of game.query('cell')) {
+        const player = cell.get(Player);
+        const input = game.world.getInput(player.clientId);
+        if (input?.target) {
+            const sprite = cell.get(Sprite);
+            cell.moveTowardsWithStop(input.target, SPEED, sprite.radius);
+        }
+    }
+}, { phase: 'update' });
+
+// Food spawning system
+game.addSystem(() => {
+    if (game.getEntitiesByType('food').length < MAX_FOOD && dRandom() < FOOD_SPAWN_CHANCE) {
+        spawnFood();
+    }
+}, { phase: 'update' });
+
+// Input - just define actions, plugin handles the rest
+const input = game.addPlugin(InputPlugin, canvas);
+input.action('target', { type: 'vector', bindings: ['mouse'] });
+
+// Connect - no render callback needed, Simple2DRenderer handles it
+game.connect('cell-eater-ecs', {
+    onRoomCreate() {
+        for (let i = 0; i < FOOD_COUNT; i++) spawnFood();
+    },
+    onConnect(clientId) {
+        spawnCell(clientId);
+    },
+    onDisconnect(clientId) {
+        game.getEntityByClientId(clientId)?.destroy();
+    }
+});
+
+Modu.enableDebugUI(game);
+</script>
+</body>
+</html>

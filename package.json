@@ -1,0 +1,29 @@
+{
+  "name": "modu-engine",
+  "version": "1.0.0",
+  "description": "Deterministic physics engine with fixed-point math and rollback networking for multiplayer games",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "build:browser": "node build-browser.js"
+  },
+  "keywords": [
+    "physics",
+    "deterministic",
+    "rollback",
+    "netcode",
+    "multiplayer",
+    "fixed-point"
+  ],
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^25.0.3",
+    "esbuild": "^0.20.0",
+    "http-server": "^14.1.1",
+    "typescript": "^5.0.0"
+  },
+  "dependencies": {
+    "mesh-network": "file:.."
+  }
+}

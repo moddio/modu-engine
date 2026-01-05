@@ -1,0 +1,276 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Snake</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #111; display: flex; justify-content: center; align-items: center; height: 100vh; overflow: hidden; }
+        canvas { border: 2px solid #333; }
+    </style>
+</head>
+<body>
+    <canvas id="game" width="1400" height="900"></canvas>
+
+<script src="../dist/modu.iife.js?v=dev"></script>
+<script>
+const canvas = document.getElementById('game');
+const WIDTH = canvas.width, HEIGHT = canvas.height;
+
+// Constants
+const SPEED = 4;
+const HEAD_RADIUS = 16;
+const SEGMENT_RADIUS = 14;
+const INITIAL_LENGTH = 15;
+const FOOD_COUNT = 30;
+const MAX_FOOD = 50;
+const FOOD_SPAWN_CHANCE = 0.03;
+const SEGMENT_SPAWN_INTERVAL = 3;
+const TURN_SPEED = 0.15;
+
+const COLORS = [
+    '#ff6b6b', '#4dabf7', '#69db7c', '#ffd43b', '#da77f2', '#ff8e72',
+    '#38d9a9', '#748ffc', '#f783ac', '#a9e34b', '#3bc9db', '#9775fa'
+];
+
+// Create game
+const game = createGame();
+const renderer = game.addPlugin(Simple2DRenderer, canvas);
+const physics = game.addPlugin(Physics2DSystem, { gravity: { x: 0, y: 0 } });
+window.game = game;
+
+// Define components
+const SnakeHead = defineComponent('SnakeHead', {
+    length: INITIAL_LENGTH,
+    dirX: 1,
+    dirY: 0,
+    prevDirX: 1,  // Previous frame direction for interpolation
+    prevDirY: 0,
+    lastSpawnFrame: { type: 'f32', default: 0 }  // f32 to avoid fixed-point overflow
+});
+
+const SnakeSegment = defineComponent('SnakeSegment', {
+    ownerId: 0,
+    spawnFrame: { type: 'f32', default: 0 }  // f32 to avoid fixed-point overflow
+});
+
+// Define entities
+game.defineEntity('snake-head')
+    .with(Transform2D)
+    .with(Sprite, { shape: SHAPE_CIRCLE, radius: HEAD_RADIUS, layer: 2 })
+    .with(Body2D, { shapeType: SHAPE_CIRCLE, radius: HEAD_RADIUS, bodyType: BODY_KINEMATIC, isSensor: true })
+    .with(Player)
+    .with(SnakeHead)
+    .register();
+
+game.defineEntity('snake-segment')
+    .with(Transform2D)
+    .with(Sprite, { shape: SHAPE_CIRCLE, radius: SEGMENT_RADIUS, layer: 1 })
+    .with(Body2D, { shapeType: SHAPE_CIRCLE, radius: SEGMENT_RADIUS, bodyType: BODY_KINEMATIC, isSensor: true })
+    .with(SnakeSegment)
+    .register();
+
+game.defineEntity('food')
+    .with(Transform2D)
+    .with(Sprite, { shape: SHAPE_CIRCLE, radius: 8, layer: 0 })
+    .with(Body2D, { shapeType: SHAPE_CIRCLE, radius: 8, bodyType: BODY_STATIC })
+    .register();
+
+// Helper functions
+function killSnake(clientId) {
+    const head = game.world.getEntityByClientId(clientId);
+    if (!head || head.destroyed) return;
+
+    for (const seg of game.query('snake-segment')) {
+        if (seg.get(SnakeSegment).ownerId === clientId) {
+            seg.destroy();
+        }
+    }
+    head.destroy();
+}
+
+function spawnSnake(clientId) {
+    const color = game.internString('color', COLORS[(dRandom() * COLORS.length) | 0]);
+    const startX = 100 + (dRandom() * (WIDTH - 200)) | 0;
+    const startY = 100 + (dRandom() * (HEIGHT - 200)) | 0;
+
+    game.spawn('snake-head', {
+        x: startX, y: startY, clientId, color,
+        length: INITIAL_LENGTH,
+        lastSpawnFrame: game.frame
+    });
+}
+
+function spawnFood() {
+    const color = game.internString('color', COLORS[(dRandom() * COLORS.length) | 0]);
+    game.spawn('food', {
+        x: 50 + (dRandom() * (WIDTH - 100)) | 0,
+        y: 50 + (dRandom() * (HEIGHT - 100)) | 0,
+        color
+    });
+}
+
+// Collision: head hits segment (die if not own)
+physics.onCollision('snake-head', 'snake-segment', (head, segment) => {
+    if (head.destroyed || segment.destroyed) return;
+    const headClientId = head.get(Player).clientId;
+    const segOwnerId = segment.get(SnakeSegment).ownerId;
+    if (segOwnerId === headClientId) return;
+    killSnake(headClientId);
+});
+
+// Collision: head eats food (grow)
+physics.onCollision('snake-head', 'food', (head, food) => {
+    if (food.destroyed) return;
+    head.get(SnakeHead).length++;
+    food.destroy();
+});
+
+// Movement system: move heads, spawn segments
+game.addSystem(() => {
+    for (const head of game.query('snake-head')) {
+        const input = game.world.getInput(head.get(Player).clientId);
+        const sh = head.get(SnakeHead);
+        const t = head.get(Transform2D);
+
+        // Save previous direction for interpolation
+        sh.prevDirX = sh.dirX;
+        sh.prevDirY = sh.dirY;
+
+        // Get current direction (accessor auto-converts from fixed-point)
+        let dirX = sh.dirX;
+        let dirY = sh.dirY;
+
+        if (input?.target) {
+            // Calculate desired direction toward target
+            const dx = input.target.x - t.x;
+            const dy = input.target.y - t.y;
+            const len = Math.sqrt(dx * dx + dy * dy);
+            if (len > 0.1) {
+                const desiredX = dx / len;
+                const desiredY = dy / len;
+                // Gradually turn toward desired direction
+                dirX += (desiredX - dirX) * TURN_SPEED;
+                dirY += (desiredY - dirY) * TURN_SPEED;
+                // Renormalize
+                const dirLen = Math.sqrt(dirX * dirX + dirY * dirY);
+                dirX /= dirLen;
+                dirY /= dirLen;
+                // Store back (accessor auto-converts to fixed-point)
+                sh.dirX = dirX;
+                sh.dirY = dirY;
+            }
+        }
+
+        // Move in current facing direction (use moveTowards for interpolation)
+        const moveTarget = { x: t.x + dirX * 1000, y: t.y + dirY * 1000 };
+        head.moveTowards(moveTarget, SPEED);
+
+        // Spawn segment at head position every N frames
+        const frameDiff = game.frame - sh.lastSpawnFrame;
+        if (frameDiff >= SEGMENT_SPAWN_INTERVAL) {
+            const color = head.get(Sprite).color;
+            const ownerId = head.get(Player).clientId;
+            const seg = game.spawn('snake-segment', {
+                x: t.x, y: t.y,
+                color: color,
+                ownerId: ownerId,
+                spawnFrame: game.frame
+            });
+            sh.lastSpawnFrame = game.frame;
+            if (game.frame % 60 === 0) {
+                const segs = [...game.query('snake-segment')];
+                console.log(`Spawned segment: x=${t.x.toFixed(1)}, y=${t.y.toFixed(1)}, color=${color}, ownerId=${ownerId}, total=${segs.length}`);
+                if (seg) {
+                    const segSprite = seg.get(Sprite);
+                    console.log(`  Segment sprite: visible=${segSprite.visible}, radius=${segSprite.radius}, color=${segSprite.color}`);
+                }
+            }
+        }
+    }
+}, { phase: 'update' });
+
+// Tail cleanup: remove old segments
+game.addSystem(() => {
+    const headMaxAge = new Map();
+    for (const head of game.query('snake-head')) {
+        const clientId = head.get(Player).clientId;
+        const maxLength = head.get(SnakeHead).length;
+        headMaxAge.set(clientId, game.frame - (maxLength * SEGMENT_SPAWN_INTERVAL));
+    }
+
+    let destroyed = 0;
+    for (const seg of game.query('snake-segment')) {
+        const segData = seg.get(SnakeSegment);
+        const oldestAllowed = headMaxAge.get(segData.ownerId);
+        if (oldestAllowed !== undefined && segData.spawnFrame < oldestAllowed) {
+            seg.destroy();
+            destroyed++;
+        }
+    }
+    if (game.frame % 60 === 0 && destroyed > 0) {
+        console.log(`Tail cleanup destroyed ${destroyed} segments`);
+    }
+}, { phase: 'update' });
+
+// Food spawning
+game.addSystem(() => {
+    if (game.getEntitiesByType('food').length < MAX_FOOD && dRandom() < FOOD_SPAWN_CHANCE) {
+        spawnFood();
+    }
+}, { phase: 'update' });
+
+// Eyes rendering
+const originalRender = renderer.render.bind(renderer);
+renderer.render = function() {
+    originalRender();
+    const ctx = renderer.context;
+    const alpha = game.getRenderAlpha();
+
+    for (const head of game.query('snake-head')) {
+        if (head.destroyed) continue;
+        const x = head.render.interpX;
+        const y = head.render.interpY;
+        const sh = head.get(SnakeHead);
+        // Interpolate direction
+        const dirX = sh.prevDirX + (sh.dirX - sh.prevDirX) * alpha;
+        const dirY = sh.prevDirY + (sh.dirY - sh.prevDirY) * alpha;
+
+        // Two eyes spread perpendicular to direction, offset forward
+        const perpX = -dirY, perpY = dirX;  // 90 degree rotation
+        for (const side of [-1, 1]) {
+            const ex = x + dirX * 6 + perpX * 6 * side;
+            const ey = y + dirY * 6 + perpY * 6 * side;
+            ctx.fillStyle = '#fff';
+            ctx.beginPath();
+            ctx.arc(ex, ey, 5, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.fillStyle = '#000';
+            ctx.beginPath();
+            ctx.arc(ex + dirX * 2, ey + dirY * 2, 2, 0, Math.PI * 2);
+            ctx.fill();
+        }
+    }
+};
+
+// Input
+const input = game.addPlugin(InputPlugin, canvas);
+input.action('target', { type: 'vector', bindings: ['mouse'] });
+
+// Connect
+game.connect('snake-v6', {
+    onRoomCreate() {
+        for (let i = 0; i < FOOD_COUNT; i++) spawnFood();
+    },
+    onConnect(clientId) {
+        spawnSnake(clientId);
+    },
+    onDisconnect(clientId) {
+        killSnake(game.internClientId(clientId));
+    }
+});
+
+Modu.enableDebugUI(game);
+</script>
+</body>
+</html>

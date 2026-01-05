@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>2D Shooter</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #111; display: flex; justify-content: center; align-items: center; height: 100vh; overflow: hidden; }
+        canvas { border: 2px solid #333; }
+    </style>
+</head>
+<body>
+    <canvas id="game" width="1400" height="900"></canvas>
+
+<script src="../dist/modu.iife.js?v=dev"></script>
+<script>
+const canvas = document.getElementById('game');
+const WIDTH = canvas.width, HEIGHT = canvas.height;
+
+// Define game-specific components
+const Health = defineComponent('Health', { current: 100, max: 100 });
+
+// Create game with plugins
+const game = createGame();
+game.addPlugin(Simple2DRenderer, canvas);
+const physics = game.addPlugin(Physics2DSystem, { gravity: { x: 0, y: 0 } });
+window.game = game;
+
+// Game constants
+const PLAYER_SPEED = 4;
+const PLAYER_RADIUS = 20;
+const BULLET_SPEED = 12;
+const BULLET_RADIUS = 4;
+const BULLET_LIFETIME = 4500;  // 4.5 seconds
+const SHOOT_COOLDOWN = 500;    // 0.5 seconds between shots
+const RESPAWN_TIME = 3000;     // 3 seconds before respawn
+
+// Color palette
+const COLORS = [
+    '#ff6b6b', '#4dabf7', '#69db7c', '#ffd43b', '#da77f2', '#ff8e72',
+    '#38d9a9', '#748ffc', '#f783ac', '#a9e34b', '#3bc9db', '#9775fa'
+];
+
+// Define entity types
+game.defineEntity('player')
+    .with(Transform2D)
+    .with(Sprite, { shape: SHAPE_CIRCLE, radius: PLAYER_RADIUS, layer: 1 })
+    .with(Body2D, { shapeType: SHAPE_CIRCLE, radius: PLAYER_RADIUS, bodyType: BODY_KINEMATIC })
+    .with(Player)
+    .with(Health, { current: 100, max: 100 })
+    .register();
+
+game.defineEntity('bullet')
+    .with(Transform2D)
+    .with(Sprite, { shape: SHAPE_CIRCLE, radius: BULLET_RADIUS, layer: 2 })
+    .with(Body2D, { shapeType: SHAPE_CIRCLE, radius: BULLET_RADIUS, bodyType: BODY_KINEMATIC })
+    .register();
+
+game.defineEntity('wall')
+    .with(Transform2D)
+    .with(Sprite, { shape: SHAPE_RECT, layer: 0 })
+    .with(Body2D, { shapeType: SHAPE_RECT, bodyType: BODY_STATIC })
+    .register();
+
+// Collision: bullet hits player
+physics.onCollision('bullet', 'player', (bullet, player) => {
+    if (bullet.destroyed || player.destroyed) return;
+    // Don't hit the shooter
+    if (bullet.ownerId === player.get(Player).clientId) return;
+
+    const health = player.get(Health);
+    health.current -= 25;
+    bullet.destroy();
+
+    if (health.current <= 0) {
+        player.destroy();
+    }
+});
+
+// Collision: bullet hits wall
+physics.onCollision('bullet', 'wall', (bullet, wall) => {
+    if (bullet.destroyed) return;
+    bullet.destroy();
+});
+
+// Helper to spawn player
+function spawnPlayer(clientId) {
+    const colorStr = COLORS[(dRandom() * COLORS.length) | 0];
+    const color = game.internString('color', colorStr);
+    const player = game.spawn('player', {
+        x: 100 + (dRandom() * (WIDTH - 200)) | 0,
+        y: 100 + (dRandom() * (HEIGHT - 200)) | 0,
+        clientId,
+        color
+    });
+    player.shootCooldown = 0;
+    return player;
+}
+
+// Helper to spawn bullet - uses moveTowards for deterministic velocity
+function spawnBullet(x, y, target, ownerId) {
+    const bullet = game.spawn('bullet', {
+        x, y,
+        color: game.internString('color', '#ffff00')
+    });
+    bullet.moveTowards(target, BULLET_SPEED);  // Deterministic direction calculation
+    bullet.ownerId = ownerId;
+    bullet.expiresAt = game.time + BULLET_LIFETIME;
+    return bullet;
+}
+
+// Helper to spawn wall
+function spawnWall(x, y, w, h) {
+    const wall = game.spawn('wall', { x, y });
+    wall.get(Sprite).width = w;
+    wall.get(Sprite).height = h;
+    wall.get(Sprite).color = game.internString('color', '#4a5568');
+    wall.get(Body2D).width = w;
+    wall.get(Body2D).height = h;
+    return wall;
+}
+
+// Movement system - runs every frame on all clients
+game.addSystem(() => {
+    for (const player of game.query('player')) {
+        const playerComp = player.get(Player);
+        const input = game.world.getInput(playerComp.clientId);
+
+        if (input?.move) {
+            const body = player.get(Body2D);
+            body.vx = input.move.x * PLAYER_SPEED;
+            body.vy = input.move.y * PLAYER_SPEED;
+        } else {
+            player.get(Body2D).vx = 0;
+            player.get(Body2D).vy = 0;
+        }
+
+        // Shooting - use game.time for intuitive timing
+        if (input?.shoot && game.time >= player.shootCooldown && input?.target) {
+            const transform = player.get(Transform2D);
+            // Spawn bullet at player position, moveTowards handles direction
+            spawnBullet(transform.x, transform.y, input.target, playerComp.clientId);
+            player.shootCooldown = game.time + SHOOT_COOLDOWN;
+        }
+    }
+}, { phase: 'update' });
+
+// Bullet lifetime system
+game.addSystem(() => {
+    for (const bullet of game.query('bullet')) {
+        if (game.time >= bullet.expiresAt) {
+            bullet.destroy();
+        }
+    }
+}, { phase: 'update' });
+
+// Respawn system - track dead players and respawn them
+const deadPlayers = new Map(); // clientId -> respawnTime
+
+game.addSystem(() => {
+    // Check for dead players
+    for (const clientId of game.getClients()) {
+        const player = game.getEntityByClientId(clientId);
+        if (!player && !deadPlayers.has(clientId)) {
+            deadPlayers.set(clientId, game.time + RESPAWN_TIME);
+        }
+    }
+
+    // Respawn players
+    for (const [clientId, respawnTime] of deadPlayers) {
+        if (game.time >= respawnTime) {
+            spawnPlayer(clientId);
+            deadPlayers.delete(clientId);
+        }
+    }
+}, { phase: 'update' });
+
+// Input setup
+const input = game.addPlugin(InputPlugin, canvas);
+input.action('move', { type: 'vector', bindings: ['keys:wasd', 'keys:arrows'] });
+input.action('target', { type: 'vector', bindings: ['mouse'] });
+input.action('shoot', { type: 'button', bindings: ['mouse:left'] });
+
+// Connect
+game.connect('2d-shooter-v2', {
+    onRoomCreate() {
+        // Border walls
+        spawnWall(WIDTH / 2, 10, WIDTH, 20);           // Top
+        spawnWall(WIDTH / 2, HEIGHT - 10, WIDTH, 20);  // Bottom
+        spawnWall(10, HEIGHT / 2, 20, HEIGHT);         // Left
+        spawnWall(WIDTH - 10, HEIGHT / 2, 20, HEIGHT); // Right
+
+        // Some obstacles
+        spawnWall(WIDTH * 0.25, HEIGHT * 0.25, 100, 100);
+        spawnWall(WIDTH * 0.75, HEIGHT * 0.25, 100, 100);
+        spawnWall(WIDTH * 0.25, HEIGHT * 0.75, 100, 100);
+        spawnWall(WIDTH * 0.75, HEIGHT * 0.75, 100, 100);
+        spawnWall(WIDTH * 0.5, HEIGHT * 0.5, 150, 150);
+    },
+    onConnect(clientId) {
+        spawnPlayer(clientId);
+    },
+    onDisconnect(clientId) {
+        game.getEntityByClientId(clientId)?.destroy();
+        deadPlayers.delete(clientId);
+    }
+});
+
+Modu.enableDebugUI(game);
+</script>
+</body>
+</html>
