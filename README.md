@@ -1,6 +1,6 @@
 # Modu Engine
 
-**Local-first multiplayer game engine.** Your game runs instantly on the client. When you go online, it just syncs.
+**Local-first Multiplayer Game Engine.** Your game runs instantly on the client. When you go online, it just syncs.
 
 ## Why Modu?
 
