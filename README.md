@@ -6,10 +6,9 @@ Deterministic multiplayer game engine with rollback networking and fixed-point p
 
 - **Rollback Netcode**: GGPO-style client-side prediction with automatic state sync
 - **Fixed-Point Math**: 16.16 format integers for 100% cross-platform determinism
-- **2D & 3D Physics**: Rigid body simulation with circles, boxes, spheres, and collision detection
-- **OOP Entity System**: Class-based entities with `tick()` and `draw()` lifecycle methods
-- **Declarative Input**: `InputComponent` with `setCommands()` for automatic input handling
-- **Built-in Player Class**: Extends `Entity2D` with input handling out of the box
+- **ECS Architecture**: Entity-Component-System design with composable behaviors
+- **2D Physics**: Rigid body simulation with circles, boxes, and collision detection
+- **Plugin System**: Modular renderer, physics, and input plugins
 - **Deterministic RNG**: Seeded `dRandom()` for reproducible randomness
 - **Late Joiner Sync**: Automatic snapshot-based synchronization for players joining mid-game
 - **Zero External Dependencies**: Pure TypeScript, no runtime dependencies
@@ -20,265 +19,269 @@ Deterministic multiplayer game engine with rollback networking and fixed-point p
 npm install modu-engine
 ```
 
+Or use the CDN:
+
+```html
+<script src="https://cdn.moduengine.com/modu.min.js"></script>
+```
+
 ## Quick Start
 
 ```html
 <canvas id="game" width="800" height="600"></canvas>
-<script src="modu.iife.js"></script>
+<script src="https://cdn.moduengine.com/modu.min.js"></script>
 <script>
-const game = Modu.init({ physics: '2d', gravity: { x: 0, y: 0 } });
-const renderer = new CanvasRenderer('#game');
-const WIDTH = renderer.width, HEIGHT = renderer.height;
+const canvas = document.getElementById('game');
+const game = createGame();
+game.addPlugin(Simple2DRenderer, canvas);
 
-function createPlayer(clientId) {
-    const player = new Player();
-    player.setBody({
-        type: 'kinematic', shape: 'circle', radius: 20,
-        x: 100 + (dRandom() * (WIDTH - 200)) | 0,
-        y: 100 + (dRandom() * (HEIGHT - 200)) | 0
-    });
-    player.input.setCommands({ target: { mouse: ['position'] } });
-    player.sync.clientId = clientId;
-    player.sync.color = '#' + ((dRandom() * 0xFFFFFF) | 0).toString(16).padStart(6, '0');
-    player.sync.radius = 20;
-    return player;
-}
+game.defineEntity('player')
+    .with(Transform2D)
+    .with(Sprite, { shape: SHAPE_CIRCLE, radius: 20 })
+    .with(Player)
+    .register();
 
-function createFood() {
-    const food = new Entity2D('food');
-    food.setBody({
-        type: 'static', shape: 'circle', radius: 8,
-        x: 50 + (dRandom() * (WIDTH - 100)) | 0,
-        y: 50 + (dRandom() * (HEIGHT - 100)) | 0
-    });
-    food.sync.color = '#44ff44';
-    food.sync.radius = 8;
-    return food;
-}
+const input = game.addPlugin(InputPlugin, canvas);
+input.action('move', { type: 'vector', bindings: ['wasd'] });
 
-const callbacks = {
-    onRoomCreate() {
-        game.reset();
-        for (let i = 0; i < 20; i++) createFood();
-    },
-
-    onLeave(clientId) {
-        game.getPlayer(clientId)?.destroy();
-    },
-
-    onTick() {
-        for (const clientId of game.getClients()) {
-            if (!game.getPlayer(clientId)) createPlayer(clientId);
-        }
-
-        for (const player of game.getEntitiesByType('player')) {
-            const target = player.input?.target;
-            if (target?.x != null && target?.y != null) {
-                player.moveToward(target.x, target.y, 5, player.sync.radius);
-            }
-        }
+game.addSystem(() => {
+    for (const p of game.query('player')) {
+        const dir = game.world.getInput(p.get(Player).clientId)?.move;
+        if (dir) p.setVelocity(dir.x * 5, dir.y * 5);
     }
-};
+});
 
-game.connect('my-game', callbacks);
-Modu.enableDebugUI(game);
+game.connect('my-room', {
+    onConnect(id) {
+        game.spawn('player', {
+            x: dRandom() * 800,
+            y: dRandom() * 600,
+            clientId: id
+        });
+    }
+});
 </script>
 ```
 
 ## Core Concepts
 
-### Game Initialization
+### Game Creation
 
-Initialize the engine with `Modu.init()`:
+Create a game with `createGame()` and add plugins:
 
 ```javascript
-const game = Modu.init({
-    physics: '2d',           // Required: '2d' or '3d'
-    gravity: { x: 0, y: 0 }  // Optional: default { x: 0, y: -30 }
-});
+const game = createGame();
+
+// Add renderer
+game.addPlugin(Simple2DRenderer, canvas);
+
+// Add physics (optional)
+const physics = game.addPlugin(Physics2DSystem, { gravity: { x: 0, y: 0 } });
+
+// Add input
+const input = game.addPlugin(InputPlugin, canvas);
 ```
 
-**Game Object Methods:**
-| Method | Description |
-|--------|-------------|
-| `connect(roomId, callbacks, options?)` | Connect to multiplayer room |
-| `getClientId()` | Get local client ID |
-| `getClients()` | Get all connected client IDs |
-| `getPlayer(clientId)` | Get player entity by client ID |
-| `getEntitiesByType(type)` | Get all entities of a type |
-| `reset()` | Clear all entities |
-| `getFrame()` | Get current server frame |
+### Defining Entities
 
-### Game Callbacks
-
-Games implement lifecycle callbacks passed to `game.connect()`:
+Define entity types by composing components:
 
 ```javascript
-const callbacks = {
-    // Called when room is created - initialize game state
-    onRoomCreate() {
-        game.reset();
-        for (let i = 0; i < 20; i++) new Food();
-    },
+game.defineEntity('player')
+    .with(Transform2D)
+    .with(Sprite, { shape: SHAPE_CIRCLE, radius: 20 })
+    .with(Body2D, { shapeType: SHAPE_CIRCLE, radius: 20, bodyType: BODY_KINEMATIC })
+    .with(Player)
+    .register();
 
-    // Called when a player joins (optional)
-    onJoin(clientId) {
-        console.log('Player joined:', clientId);
-    },
+game.defineEntity('bullet')
+    .with(Transform2D)
+    .with(Sprite, { shape: SHAPE_CIRCLE, radius: 4, color: '#ff0' })
+    .with(Body2D, { shapeType: SHAPE_CIRCLE, radius: 4, bodyType: BODY_KINEMATIC, isSensor: true })
+    .register();
 
-    // Called when a player leaves
-    onLeave(clientId) {
-        game.getPlayer(clientId)?.destroy();
-    },
+game.defineEntity('wall')
+    .with(Transform2D)
+    .with(Sprite, { shape: SHAPE_RECT })
+    .with(Body2D, { shapeType: SHAPE_RECT, bodyType: BODY_STATIC })
+    .register();
+```
 
-    // Called every simulation frame
-    onTick() {
-        // Spawn players for connected clients
-        for (const clientId of game.getClients()) {
-            if (!game.getPlayer(clientId)) new MyPlayer(clientId);
+### Built-in Components
+
+| Component | Description |
+|-----------|-------------|
+| `Transform2D` | Position (x, y), rotation, scale |
+| `Sprite` | Visual rendering (shape, color, radius/width/height) |
+| `Body2D` | Physics body (shape, bodyType, isSensor) |
+| `Player` | Marks entity as player-controlled, stores clientId |
+
+### Custom Components
+
+Define custom components for game-specific data:
+
+```javascript
+const Health = defineComponent('Health', {
+    current: 100,
+    max: 100
+});
+
+const Shooter = defineComponent('Shooter', {
+    cooldownUntil: { type: 'f32', default: 0 }
+});
+
+const Bullet = defineComponent('Bullet', {
+    ownerId: 0,
+    expiresAt: { type: 'f32', default: 0 }
+});
+
+// Use in entity definition
+game.defineEntity('player')
+    .with(Transform2D)
+    .with(Sprite, { shape: SHAPE_CIRCLE, radius: 20 })
+    .with(Player)
+    .with(Health)
+    .with(Shooter)
+    .register();
+```
+
+### Systems
+
+Add systems for game logic. Systems run every tick:
+
+```javascript
+// Movement system
+game.addSystem(() => {
+    for (const player of game.query('player')) {
+        const input = game.world.getInput(player.get(Player).clientId);
+        if (input?.move) {
+            player.setVelocity(input.move.x * 5, input.move.y * 5);
         }
     }
-};
+}, { phase: 'update' });
 
-game.connect('my-room', callbacks);
-```
-
-**Note:** There is no `onInput` callback. Input is handled automatically via `InputComponent`.
-
-### Entity2D
-
-Create game entities with `new Entity2D(type)`:
-
-```javascript
-const food = new Entity2D('food');
-food.setBody({ type: 'static', shape: 'circle', radius: 8, x: 100, y: 100 });
-food.sync.color = '#44ff44';
-food.sync.radius = 8;
-```
-
-**Properties:**
-```javascript
-entity.id       // Unique ID (e.g., "00000001")
-entity.type     // Type string (e.g., "bullet", "food")
-entity.x, entity.y  // Position (float)
-entity.body     // Physics body
-entity.sync     // Synced state (serialized in snapshots)
-```
-
-**Methods:**
-```javascript
-entity.setBody({ type, shape, ... })  // Set up physics body
-entity.moveTo(x, y)         // Set position
-entity.moveBy(dx, dy)       // Move by offset
-entity.moveToward(x, y, speed, stopRadius)  // Move toward target
-entity.destroy()            // Destroy entity
-```
-
-**Collision handling:**
-```javascript
-entity.onCollision = (other) => {
-    if (other.type === 'food') {
-        entity.sync.radius += 2;
-        other.destroy();
+// Bullet lifetime system
+game.addSystem(() => {
+    for (const bullet of game.query('bullet')) {
+        if (game.time >= bullet.get(Bullet).expiresAt) {
+            bullet.destroy();
+        }
     }
-};
+}, { phase: 'update' });
 ```
 
-### Player
-
-`Player` is an entity with built-in `InputComponent`:
+### Entity Operations
 
 ```javascript
-const player = new Player();
-player.setBody({ type: 'kinematic', shape: 'circle', radius: 20, x: 100, y: 100 });
-player.input.setCommands({ target: { mouse: ['position'] } });
-player.sync.clientId = clientId;
-player.sync.color = '#ff0000';
-player.sync.radius = 20;
+// Spawn entity
+const player = game.spawn('player', { x: 100, y: 200, clientId: id });
+
+// Access components
+const transform = player.get(Transform2D);
+const sprite = player.get(Sprite);
+const health = player.get(Health);
+
+// Check for component
+if (player.has(DeadState)) { ... }
+
+// Add/remove components dynamically
+player.addComponent(DeadState, { respawnAt: game.time + 3000 });
+player.removeComponent(DeadState);
+
+// Movement helpers
+player.setVelocity(vx, vy);
+player.moveTowards(target, speed);
+player.moveTowardsWithStop(target, speed, stopRadius);
+
+// Destroy entity
+player.destroy();
+
+// Query entities
+const players = game.query('player');
+const bullets = game.query('bullet');
+const allFood = game.getEntitiesByType('food');
+const myPlayer = game.getEntityByClientId(clientId);
 ```
 
-### InputComponent
+### Input
 
-Declarative input - no manual event listeners needed:
+Define input actions with bindings:
 
 ```javascript
-// Configure what input to track
-player.input.setCommands({
-    move: { keys: ['w', 'a', 's', 'd'] },
-    aim: { mouse: ['position'] },
-    fire: { mouse: ['leftButton'] }
+const input = game.addPlugin(InputPlugin, canvas);
+
+// Vector input (WASD movement)
+input.action('move', { type: 'vector', bindings: ['wasd'] });
+input.action('move', { type: 'vector', bindings: ['keys:wasd', 'keys:arrows'] });
+
+// Mouse position
+input.action('target', { type: 'vector', bindings: ['mouse'] });
+
+// Button input
+input.action('shoot', { type: 'button', bindings: ['mouse:left'] });
+
+// Read input in systems
+const input = game.world.getInput(clientId);
+if (input?.move) { /* { x, y } */ }
+if (input?.target) { /* { x, y } */ }
+if (input?.shoot) { /* true/false */ }
+```
+
+### Collision Handling
+
+```javascript
+const physics = game.addPlugin(Physics2DSystem, { gravity: { x: 0, y: 0 } });
+
+// Collision between types
+physics.onCollision('bullet', 'player', (bullet, player) => {
+    if (bullet.get(Bullet).ownerId === player.get(Player).clientId) return;
+    player.get(Health).current -= 25;
+    bullet.destroy();
 });
 
-// Read input in onTick
-const move = player.input?.move;
-if (move?.w) player.moveBy(0, -5);
-if (move?.d) player.moveBy(5, 0);
+physics.onCollision('bullet', 'wall', (bullet) => {
+    bullet.destroy();
+});
 
-const aim = player.input?.aim;
-if (aim?.x != null) {
-    const angle = Math.atan2(aim.y - player.y, aim.x - player.x);
-}
-
-if (player.input?.fire) { /* shooting */ }
-```
-
-### Synced State (entity.sync)
-
-The `entity.sync` object is automatically serialized in snapshots. Store all gameplay state here:
-
-```javascript
-// Set synced properties
-entity.sync.color = '#ff0000';
-entity.sync.radius = 20;
-entity.sync.health = 100;
-entity.sync.clientId = clientId;  // For player entities
-
-// Physics auto-syncs position/velocity
-entity.sync.x, entity.sync.y       // Position (fixed-point)
-entity.sync.vx, entity.sync.vy    // Velocity (fixed-point)
-```
-
-### setBody() Options
-
-Configure physics when creating an entity:
-
-```javascript
-entity.setBody({
-    type: 'kinematic',    // 'static', 'dynamic', or 'kinematic'
-    shape: 'circle',      // 'circle' or 'box'
-    radius: 20,           // For circles
-    width: 50,            // For boxes
-    height: 30,           // For boxes
-    x: 100, y: 100,       // Initial position
-    isSensor: true        // Optional: detect overlaps without collision response
+physics.onCollision('cell', 'food', (cell, food) => {
+    cell.get(Sprite).radius += 2;
+    food.destroy();
 });
 ```
 
-**Body Types:**
-- `static` - Never moves (walls, obstacles)
-- `dynamic` - Full physics simulation (projectiles with gravity)
-- `kinematic` - User-controlled, no physics response (players)
-
-### CanvasRenderer
-
-Built-in 2D canvas renderer:
+### Connection & Lifecycle
 
 ```javascript
-const renderer = new CanvasRenderer('#game');
+game.connect('my-room', {
+    // Called when room is created (first player joins)
+    onRoomCreate() {
+        // Spawn initial game state
+        for (let i = 0; i < 20; i++) spawnFood();
+    },
 
-// Renderer auto-draws entities based on:
-// - entity.sync.radius + entity.sync.color (circles)
-// - entity.sync.w + entity.sync.h + entity.sync.color (boxes)
+    // Called when a player connects
+    onConnect(clientId) {
+        game.spawn('player', {
+            x: dRandom() * 800,
+            y: dRandom() * 600,
+            clientId
+        });
+    },
 
-// Or define custom draw() method in entity class:
-class MyEntity extends Entity2D {
-    draw(ctx, pos) {
-        ctx.fillStyle = this.sync.color;
-        ctx.beginPath();
-        ctx.arc(pos.x, pos.y, this.sync.radius, 0, Math.PI * 2);
-        ctx.fill();
+    // Called when a player disconnects
+    onDisconnect(clientId) {
+        game.getEntityByClientId(clientId)?.destroy();
     }
-}
+});
+```
+
+### Game Properties
+
+```javascript
+game.time          // Current game time in ms
+game.getFrame()    // Current frame number
+game.getClientId() // Local player's client ID
+game.world         // Access to world state
 ```
 
 ### Deterministic Random
@@ -286,10 +289,21 @@ class MyEntity extends Entity2D {
 Use `dRandom()` instead of `Math.random()` for deterministic simulation:
 
 ```javascript
-// Generate deterministic values (0 to 1)
-const value = dRandom();
-const x = dRandom() * 800;
-const color = '#' + ((dRandom() * 0xFFFFFF) | 0).toString(16).padStart(6, '0');
+const value = dRandom();                    // 0 to 1
+const x = dRandom() * 800;                  // Random position
+const index = (dRandom() * array.length) | 0;  // Random array index
+```
+
+### String Interning
+
+For frequently used strings (like colors), use interning to avoid memory issues:
+
+```javascript
+const COLORS = ['#ff6b6b', '#4dabf7', '#69db7c', '#ffd43b'];
+const colorStr = COLORS[(dRandom() * COLORS.length) | 0];
+const color = game.internString('color', colorStr);
+
+game.spawn('player', { x: 100, y: 100, color });
 ```
 
 ### Debug UI
@@ -302,19 +316,33 @@ Modu.enableDebugUI(game);
 
 Shows: Room ID, Frame, Tick rate, Client ID, State hash, Bandwidth.
 
+## Body Types
+
+| Type | Description |
+|------|-------------|
+| `BODY_STATIC` | Never moves (walls, obstacles) |
+| `BODY_DYNAMIC` | Full physics simulation (projectiles with gravity) |
+| `BODY_KINEMATIC` | User-controlled, no physics response (players) |
+
+## Shape Types
+
+| Type | Properties |
+|------|------------|
+| `SHAPE_CIRCLE` | `radius` |
+| `SHAPE_RECT` | `width`, `height` |
+
 ## Examples
 
 The `examples/` folder contains complete game demos:
 
-- **cell-eater.html** - Agar.io style (procedural)
-- **cell-eater-oop.html** - Agar.io style (OOP classes)
-- **2d-shooter.html** - Top-down shooter with WASD + mouse
+- **cell-eater.html** - Agar.io style game
+- **2d-shooter.html** - Top-down shooter with WASD + mouse aiming
 
 ```bash
 # Build and serve
 npm run build:browser
-npx http-server -p 3001
-# Open http://localhost:3001/examples/cell-eater.html
+npx http-server -p 3000
+# Open http://localhost:3000/examples/cell-eater.html
 ```
 
 ## Determinism Requirements
@@ -322,10 +350,8 @@ npx http-server -p 3001
 **CRITICAL**: All game simulation MUST be 100% deterministic:
 
 1. **Use `dRandom()`**: Never use `Math.random()` in simulation
-
-2. **Use Frame Counts**: Never use `Date.now()` or wall-clock time
-
-3. **Physics is Handled**: Entity movement methods use fixed-point internally
+2. **Use Frame Counts**: Never use `Date.now()` or wall-clock time in simulation
+3. **Fixed-Point Math**: Physics uses fixed-point internally for cross-platform consistency
 
 ## Building
 
@@ -338,7 +364,7 @@ npm run build:browser  # Build browser bundle (dist/modu.iife.js)
 
 ```bash
 npm test               # Run all tests
-npm run test:e2e       # Run E2E browser tests (requires network services)
+npm run test:e2e       # Run E2E browser tests
 npm run test:e2e:headed  # E2E tests with visible browsers
 ```
 
