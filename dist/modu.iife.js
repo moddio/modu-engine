@@ -1,4 +1,4 @@
-/* Modu Engine - Built: 2026-01-06T21:55:58.587Z - Commit: 5079bd6 */
+/* Modu Engine - Built: 2026-01-06T21:57:58.850Z - Commit: ad7b993 */
 // Modu Engine + Network SDK Combined Bundle
 "use strict";
 var moduNetwork = (() => {
@@ -4890,6 +4890,11 @@ var Modu = (() => {
         if (ticksToRun > 0) {
           this.runCatchup(startFrame, frame, pendingInputs);
         }
+        this.lastGoodSnapshot = {
+          snapshot: JSON.parse(JSON.stringify(snapshot)),
+          frame: this.currentFrame,
+          hash: this.getStateHash()
+        };
       } else {
         if (DEBUG_NETWORK)
           console.log("[ecs] First join: creating room");
@@ -6511,7 +6516,7 @@ var Modu = (() => {
   }
 
   // src/version.ts
-  var ENGINE_VERSION = "5079bd6";
+  var ENGINE_VERSION = "ad7b993";
 
   // src/plugins/debug-ui.ts
   var debugDiv = null;

@@ -449,6 +449,12 @@ export class Game {
             if (ticksToRun > 0) {
                 this.runCatchup(startFrame, frame, pendingInputs);
             }
+            // Store as last good snapshot - we just loaded authority's state
+            this.lastGoodSnapshot = {
+                snapshot: JSON.parse(JSON.stringify(snapshot)),
+                frame: this.currentFrame,
+                hash: this.getStateHash()
+            };
         }
         else {
             // === FIRST JOINER PATH ===

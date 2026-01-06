@@ -3788,6 +3788,11 @@ var Game = class {
       if (ticksToRun > 0) {
         this.runCatchup(startFrame, frame, pendingInputs);
       }
+      this.lastGoodSnapshot = {
+        snapshot: JSON.parse(JSON.stringify(snapshot)),
+        frame: this.currentFrame,
+        hash: this.getStateHash()
+      };
     } else {
       if (DEBUG_NETWORK)
         console.log("[ecs] First join: creating room");
@@ -5409,7 +5414,7 @@ function disableDeterminismGuard() {
 }
 
 // src/version.ts
-var ENGINE_VERSION = "5079bd6";
+var ENGINE_VERSION = "ad7b993";
 
 // src/plugins/debug-ui.ts
 var debugDiv = null;
