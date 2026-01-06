@@ -1,3 +1,4 @@
+/* Modu Engine - Built: 2026-01-06T19:52:19.575Z - Commit: 269bb17 */
 // Modu Engine + Network SDK Combined Bundle
 "use strict";
 var moduNetwork = (() => {
@@ -1113,7 +1114,7 @@ var Modu = (() => {
   var FP_2PI = 411775;
   var FP_HALF_PI = 102944;
   function toFixed(f) {
-    return Math.round(f * FP_ONE) | 0;
+    return Math.round(f * FP_ONE);
   }
   function toFloat(fp) {
     return fp / FP_ONE;

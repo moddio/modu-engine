@@ -19,7 +19,7 @@ export const FP_HALF_PI = 102944; // PI/2 * 65536
 // ============================================
 /** Convert float to fixed-point */
 export function toFixed(f) {
-    return Math.round(f * FP_ONE) | 0;
+    return Math.round(f * FP_ONE);
 }
 /** Convert fixed-point to float (for rendering only) */
 export function toFloat(fp) {

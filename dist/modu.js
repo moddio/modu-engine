@@ -12,7 +12,7 @@ var FP_PI = 205887;
 var FP_2PI = 411775;
 var FP_HALF_PI = 102944;
 function toFixed(f) {
-  return Math.round(f * FP_ONE) | 0;
+  return Math.round(f * FP_ONE);
 }
 function toFloat(fp) {
   return fp / FP_ONE;

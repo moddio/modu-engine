@@ -25,7 +25,7 @@ export type Fixed = number;
 
 /** Convert float to fixed-point */
 export function toFixed(f: number): Fixed {
-    return Math.round(f * FP_ONE) | 0;
+    return Math.round(f * FP_ONE);
 }
 
 /** Convert fixed-point to float (for rendering only) */
