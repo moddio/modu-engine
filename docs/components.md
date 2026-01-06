@@ -163,44 +163,6 @@ cameraSystem.follow(cameraEntity, playerEntity);
 
 This is correct behavior since each client has their own camera view.
 
-### Health
-
-Basic health component.
-
-```javascript
-import { Health } from 'modu';
-
-const health = entity.get(Health);
-health.current = 80;
-health.max = 100;
-```
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `current` | number | 100 | Current health |
-| `max` | number | 100 | Maximum health |
-
-### InputState
-
-Input state for player-controlled entities.
-
-```javascript
-import { InputState } from 'modu';
-
-const input = entity.get(InputState);
-console.log(input.targetX, input.targetY);  // Target position
-console.log(input.moveX, input.moveY);      // Movement direction
-console.log(input.buttons);                 // Button bit flags
-```
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `targetX` | number | 0 | Target X (mouse, AI target) |
-| `targetY` | number | 0 | Target Y |
-| `moveX` | number | 0 | Movement direction X (-1 to 1) |
-| `moveY` | number | 0 | Movement direction Y (-1 to 1) |
-| `buttons` | number | 0 | Button bit flags |
-
 ## Defining Custom Components
 
 Use `defineComponent()` to create custom components:
