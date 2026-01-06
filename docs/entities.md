@@ -46,7 +46,7 @@ const FoodPrefab = game.defineEntity('food')
 const food = FoodPrefab.spawn({ x: 100, y: 100 });
 ```
 
-### Bandwidth Optimization with `.sync()` and `.onRestore()`
+### Bandwidth Optimization with `.syncOnly()` and `.onRestore()`
 
 For entities with many components where only a few fields are unique (like snake segments that all share the same color), you can reduce snapshot bandwidth by only syncing essential fields:
 
@@ -56,7 +56,7 @@ game.defineEntity('snake-segment')
     .with(Sprite, { shape: SHAPE_CIRCLE, radius: 14 })
     .with(Body2D, { shapeType: SHAPE_CIRCLE, radius: 14, bodyType: BODY_KINEMATIC })
     .with(SnakeSegment)
-    .sync(['x', 'y', 'ownerId', 'spawnFrame'])  // Only sync these fields
+    .syncOnly(['x', 'y', 'ownerId', 'spawnFrame'])  // Only sync these fields
     .onRestore((entity, game) => {
         // Reconstruct non-synced fields from the owner
         const owner = game.world.getEntityByClientId(entity.get(SnakeSegment).ownerId);
@@ -67,14 +67,25 @@ game.defineEntity('snake-segment')
     .register();
 ```
 
-**`.sync(fields)`** - Specify which component fields to include in network snapshots. If not called, all fields are synced (default behavior).
+**`.syncOnly(fields)`** - Specify which component fields to include in network snapshots. If not called, all fields are synced (default behavior).
+
+**`.syncNone()`** - Exclude all fields from syncing. The entity will not be included in network snapshots at all. Useful for purely client-local entities:
+
+```javascript
+game.defineEntity('local-camera')
+    .with(Camera2D)
+    .syncNone()  // Never synced - each client has their own
+    .register();
+```
 
 **`.onRestore(callback)`** - Called after loading a snapshot to reconstruct non-synced fields. The callback receives the entity and game instance.
 
 **Bandwidth savings example:**
-- Without `.sync()`: 70 segments × 29 fields × 4 bytes = **8.1KB**
-- With `.sync(['x', 'y', 'ownerId', 'spawnFrame'])`: 70 segments × 4 fields × 4 bytes = **1.1KB**
+- Without `.syncOnly()`: 70 segments × 29 fields × 4 bytes = **8.1KB**
+- With `.syncOnly(['x', 'y', 'ownerId', 'spawnFrame'])`: 70 segments × 4 fields × 4 bytes = **1.1KB**
 - **Savings: 87%**
+
+**Note:** For component-level sync control (the entire component never syncs), use `defineComponent` with `{ sync: false }`. See [Components - Sync Options](./components.md#sync-options).
 
 ## Spawning Entities
 

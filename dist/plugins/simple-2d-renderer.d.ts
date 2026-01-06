@@ -2,6 +2,7 @@
  * Simple2DRenderer - Basic 2D canvas renderer for entities with Sprite component
  */
 import { Game } from '../game';
+import { Entity } from '../core/entity';
 export interface Simple2DRendererOptions {
     /** Background color (default: '#111') */
     background?: string;
@@ -26,6 +27,7 @@ export declare class Simple2DRenderer {
     private game;
     private options;
     private imageCache;
+    private _cameraEntity;
     constructor(game: Game, canvas: HTMLCanvasElement | string, options?: Simple2DRendererOptions);
     /** Canvas width */
     get width(): number;
@@ -35,6 +37,12 @@ export declare class Simple2DRenderer {
     get element(): HTMLCanvasElement;
     /** The 2D context (for custom drawing) */
     get context(): CanvasRenderingContext2D;
+    /**
+     * Set the camera entity to use for rendering.
+     * When set, the renderer will apply camera transform (position, zoom).
+     */
+    set camera(entity: Entity | null);
+    get camera(): Entity | null;
     /**
      * Render all entities with Sprite component.
      */

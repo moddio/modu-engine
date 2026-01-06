@@ -3,7 +3,8 @@
  */
 
 import { Game } from '../game';
-import { Sprite, SHAPE_RECT, SHAPE_CIRCLE, SPRITE_IMAGE } from '../components';
+import { Entity } from '../core/entity';
+import { Sprite, Camera2D, SHAPE_RECT, SHAPE_CIRCLE, SPRITE_IMAGE } from '../components';
 
 export interface Simple2DRendererOptions {
     /** Background color (default: '#111') */
@@ -30,6 +31,7 @@ export class Simple2DRenderer {
     private game: Game;
     private options: Required<Simple2DRendererOptions>;
     private imageCache: Map<string, HTMLImageElement> = new Map();
+    private _cameraEntity: Entity | null = null;
 
     constructor(game: Game, canvas: HTMLCanvasElement | string, options: Simple2DRendererOptions = {}) {
         this.game = game;
@@ -69,6 +71,28 @@ export class Simple2DRenderer {
     get context(): CanvasRenderingContext2D { return this.ctx; }
 
     /**
+     * Set the camera entity to use for rendering.
+     * When set, the renderer will apply camera transform (position, zoom).
+     */
+    set camera(entity: Entity | null) {
+        this._cameraEntity = entity;
+        if (entity) {
+            // Update viewport size in camera component
+            try {
+                const cam = entity.get(Camera2D);
+                cam.viewportWidth = this.canvas.width;
+                cam.viewportHeight = this.canvas.height;
+            } catch {
+                // Entity doesn't have Camera2D
+            }
+        }
+    }
+
+    get camera(): Entity | null {
+        return this._cameraEntity;
+    }
+
+    /**
      * Render all entities with Sprite component.
      */
     render(): void {
@@ -82,6 +106,23 @@ export class Simple2DRenderer {
 
         // Get interpolation alpha (0-1 between physics ticks)
         const alpha = game.getRenderAlpha();
+
+        // Get camera data if available
+        let camX = 0, camY = 0, camZoom = 1;
+        if (this._cameraEntity && !this._cameraEntity.destroyed) {
+            try {
+                const cam = this._cameraEntity.get(Camera2D);
+                camX = cam.x;
+                camY = cam.y;
+                camZoom = cam.zoom;
+
+                // Update viewport size in case canvas was resized
+                cam.viewportWidth = canvas.width;
+                cam.viewportHeight = canvas.height;
+            } catch {
+                // Camera entity doesn't have Camera2D
+            }
+        }
 
         // Collect entities with Sprite, sorted by layer
         const entities: Array<{ entity: any; layer: number }> = [];
@@ -105,10 +146,18 @@ export class Simple2DRenderer {
         // Sort by layer (lower first)
         entities.sort((a, b) => a.layer - b.layer);
 
+        // Apply camera transform
+        ctx.save();
+        ctx.translate(canvas.width / 2, canvas.height / 2);
+        ctx.scale(camZoom, camZoom);
+        ctx.translate(-camX, -camY);
+
         // Draw each entity
         for (const { entity } of entities) {
             this.drawEntity(entity);
         }
+
+        ctx.restore();
     }
 
     /**

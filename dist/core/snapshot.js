@@ -32,6 +32,9 @@ export class SparseSnapshotCodec {
         const componentData = new Map();
         const allComponents = getAllComponents();
         for (const [name, component] of allComponents) {
+            // Skip components that are not synced (client-only state)
+            if (!component.sync)
+                continue;
             const fieldCount = component.fieldNames.length;
             if (fieldCount === 0)
                 continue;

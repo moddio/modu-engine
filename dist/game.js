@@ -1322,8 +1322,8 @@ export class GameEntityBuilder {
         return this;
     }
     /**
-     * Specify which fields to sync in snapshots.
-     * If not called, all fields are synced (default behavior).
+     * Specify which fields to sync in snapshots (field-level sync).
+     * Only the specified fields are included in network snapshots.
      *
      * Use this to reduce bandwidth by only syncing essential fields.
      * Non-synced fields can be reconstructed via onRestore().
@@ -1333,12 +1333,34 @@ export class GameEntityBuilder {
      *     .with(Transform2D)
      *     .with(Sprite)
      *     .with(SnakeSegment)
-     *     .sync(['x', 'y', 'ownerId', 'spawnFrame'])
+     *     .syncOnly(['x', 'y', 'ownerId', 'spawnFrame'])
      *     .register();
      */
-    sync(fields) {
+    syncOnly(fields) {
         this.worldBuilder._setSyncFields(fields);
         return this;
+    }
+    /**
+     * Exclude all fields from syncing for this entity type.
+     * The entity will not be included in network snapshots at all.
+     *
+     * Use this for purely client-local entities like cameras, UI, or effects.
+     *
+     * @example
+     * game.defineEntity('local-camera')
+     *     .with(Camera2D)
+     *     .syncNone()
+     *     .register();
+     */
+    syncNone() {
+        this.worldBuilder._setSyncFields([]);
+        return this;
+    }
+    /**
+     * @deprecated Use syncOnly() instead for clarity
+     */
+    sync(fields) {
+        return this.syncOnly(fields);
     }
     /**
      * Set a callback to reconstruct non-synced fields after snapshot load.
@@ -1349,7 +1371,7 @@ export class GameEntityBuilder {
      *     .with(Transform2D)
      *     .with(Sprite)
      *     .with(SnakeSegment)
-     *     .sync(['x', 'y', 'ownerId', 'spawnFrame'])
+     *     .syncOnly(['x', 'y', 'ownerId', 'spawnFrame'])
      *     .onRestore((entity, game) => {
      *         const owner = game.world.getEntityByClientId(entity.get(SnakeSegment).ownerId);
      *         if (owner) {

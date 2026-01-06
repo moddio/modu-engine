@@ -111,6 +111,53 @@ console.log(player.clientId);  // Owner's client ID
 game.spawn('player', { clientId: 'abc123' });  // String auto-interned
 ```
 
+### Camera2D
+
+2D camera for viewport control. This is a **client-only component** (`sync: false`) - each client manages their own camera independently.
+
+```javascript
+import { Camera2D, CameraSystem } from 'modu';
+
+// Add camera system plugin
+const cameraSystem = game.addPlugin(CameraSystem);
+
+// Define camera entity
+game.defineEntity('camera')
+    .with(Camera2D)
+    .register();
+
+// Create and use camera
+const cameraEntity = game.spawn('camera');
+const cam = cameraEntity.get(Camera2D);
+cam.x = 100;
+cam.y = 200;
+cam.zoom = 1.5;
+
+// Set camera on renderer
+renderer.camera = cameraEntity;
+
+// Follow an entity
+cameraSystem.follow(cameraEntity, playerEntity);
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `x` | number | 0 | Camera center X position |
+| `y` | number | 0 | Camera center Y position |
+| `zoom` | number | 1 | Current zoom level |
+| `targetZoom` | number | 1 | Target zoom for smooth transitions |
+| `smoothing` | number | 0.1 | Position/zoom interpolation factor |
+| `followEntity` | number | 0 | Entity ID to follow (0 = none) |
+| `viewportWidth` | number | 0 | Viewport width (set by renderer) |
+| `viewportHeight` | number | 0 | Viewport height (set by renderer) |
+
+**Note:** Camera2D has `sync: false` built-in, meaning:
+- Not included in network snapshots
+- Not included in state hash computation
+- Not included in rollback state
+
+This is correct behavior since each client has their own camera view.
+
 ### Health
 
 Basic health component.
@@ -186,6 +233,31 @@ const Stats = defineComponent('Stats', {
 ```
 
 **Important:** Avoid floats in components for game state. Use fixed-point math for determinism.
+
+### Sync Options
+
+Components can be excluded from network synchronization using the `sync` option:
+
+```javascript
+// Client-only component (not synced)
+const LocalEffects = defineComponent('LocalEffects', {
+    particleCount: 0,
+    screenShake: 0
+}, { sync: false });
+```
+
+When `sync: false`:
+- Component is **not included in network snapshots**
+- Component is **not included in state hash computation**
+- Component is **not saved/restored during rollback**
+
+This is useful for:
+- Camera state (each client has their own view)
+- Local visual effects (particles, screen shake)
+- UI state
+- Debug/development data
+
+**Note:** The built-in `Camera2D` component already has `sync: false` by default.
 
 ## String Interning
 

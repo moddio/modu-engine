@@ -31,7 +31,7 @@ export declare class EntityBuilder {
      */
     with<T extends Record<string, any>>(component: ComponentType<T>, defaults?: Partial<T>): EntityBuilder;
     /**
-     * Set sync fields for this entity (internal - use GameEntityBuilder.sync()).
+     * Set sync fields for this entity (internal - use GameEntityBuilder.syncOnly()).
      */
     _setSyncFields(fields: string[]): void;
     /**
@@ -212,10 +212,10 @@ export declare class World {
     frame: number;
     /** Current sequence number */
     seq: number;
-    /** RNG state (for determinism) */
+    /** RNG state (for determinism) - deprecated, now uses global random state */
     rngState?: {
-        seed: number;
-        state: number;
+        s0: number;
+        s1: number;
     };
     /**
      * Get sparse snapshot (efficient format).
@@ -341,6 +341,7 @@ export declare class World {
     /**
      * Get deterministic hash of world state.
      * Used for comparing state between clients.
+     * Excludes components with sync: false (client-only state).
      */
     getStateHash(): string;
     /**

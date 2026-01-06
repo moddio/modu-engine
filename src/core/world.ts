@@ -25,7 +25,7 @@ import { QueryEngine, QueryIterator } from './query';
 import { SystemScheduler, SystemFn, SystemOptions } from './system';
 import { Entity, EntityPool, EntityDefinition, RenderState } from './entity';
 import { INDEX_MASK } from './constants';
-import { toFixed } from '../math';
+import { toFixed, saveRandomState, loadRandomState } from '../math';
 import { StringRegistry } from './string-registry';
 import { InputHistory } from './input-history';
 
@@ -66,7 +66,7 @@ export class EntityBuilder {
     }
 
     /**
-     * Set sync fields for this entity (internal - use GameEntityBuilder.sync()).
+     * Set sync fields for this entity (internal - use GameEntityBuilder.syncOnly()).
      */
     _setSyncFields(fields: string[]): void {
         this._syncFields = fields;
@@ -823,8 +823,8 @@ export class World {
     /** Current sequence number */
     seq: number = 0;
 
-    /** RNG state (for determinism) */
-    rngState?: { seed: number; state: number };
+    /** RNG state (for determinism) - deprecated, now uses global random state */
+    rngState?: { s0: number; s1: number };
 
     /**
      * Get sparse snapshot (efficient format).
@@ -839,7 +839,7 @@ export class World {
             this.strings.getState(),
             this.frame,
             this.seq,
-            this.rngState
+            saveRandomState() // CRITICAL: Save actual RNG state for deterministic rollback
         );
     }
 
@@ -853,7 +853,12 @@ export class World {
             (state) => this.idAllocator.setState(state),
             (state) => this.strings.setState(state),
             (eid, type, clientId) => this.createEntityFromSnapshot(eid, type, clientId),
-            (rng) => { this.rngState = rng; }
+            (rng) => {
+                // CRITICAL: Actually restore the global RNG state for deterministic rollback
+                if (rng) {
+                    loadRandomState(rng);
+                }
+            }
         );
 
         this.frame = snapshot.frame;
@@ -1293,6 +1298,7 @@ export class World {
     /**
      * Get deterministic hash of world state.
      * Used for comparing state between clients.
+     * Excludes components with sync: false (client-only state).
      */
     getStateHash(): string {
         // Get all entity data in deterministic order
@@ -1309,6 +1315,9 @@ export class World {
 
             // Hash each component's fields in deterministic order
             for (const component of components) {
+                // Skip components that are not synced (client-only state)
+                if (!component.sync) continue;
+
                 const fieldNames = [...component.fieldNames].sort();
                 for (const fieldName of fieldNames) {
                     const arr = component.storage.fields[fieldName];

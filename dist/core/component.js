@@ -130,13 +130,17 @@ const componentRegistry = new Map();
  *
  * @param name Unique component name
  * @param defaults Default values (type inferred from values)
+ * @param options Optional configuration (sync, etc.)
  * @returns ComponentType for use in entity definitions
  *
  * @example
  * const Health = defineComponent('health', { current: 100, max: 100 });
  * const Position = defineComponent('position', { x: 0, y: 0 });
+ *
+ * // Client-only component (not synced)
+ * const Camera2D = defineComponent('camera2d', { zoom: 1, targetZoom: 1 }, { sync: false });
  */
-export function defineComponent(name, defaults) {
+export function defineComponent(name, defaults, options) {
     if (componentRegistry.has(name)) {
         throw new Error(`Component '${name}' is already defined`);
     }
@@ -154,7 +158,8 @@ export function defineComponent(name, defaults) {
         schema,
         storage,
         AccessorClass,
-        fieldNames: Object.keys(schema)
+        fieldNames: Object.keys(schema),
+        sync: options?.sync !== false // Default to true
     };
     componentRegistry.set(name, componentType);
     return componentType;

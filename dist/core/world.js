@@ -15,7 +15,7 @@ import { QueryEngine } from './query';
 import { SystemScheduler } from './system';
 import { EntityPool } from './entity';
 import { INDEX_MASK } from './constants';
-import { toFixed } from '../math';
+import { toFixed, saveRandomState, loadRandomState } from '../math';
 import { StringRegistry } from './string-registry';
 import { InputHistory } from './input-history';
 /**
@@ -41,7 +41,7 @@ export class EntityBuilder {
         return this;
     }
     /**
-     * Set sync fields for this entity (internal - use GameEntityBuilder.sync()).
+     * Set sync fields for this entity (internal - use GameEntityBuilder.syncOnly()).
      */
     _setSyncFields(fields) {
         this._syncFields = fields;
@@ -699,13 +699,19 @@ export class World {
      * Get sparse snapshot (efficient format).
      */
     getSparseSnapshot() {
-        return this.snapshotCodec.encode(Array.from(this.activeEntities), (eid) => this.entityTypes.get(eid) || '', (eid) => this.entityClientIds.get(eid), (eid) => this.entityComponents.get(eid) || [], this.idAllocator.getState(), this.strings.getState(), this.frame, this.seq, this.rngState);
+        return this.snapshotCodec.encode(Array.from(this.activeEntities), (eid) => this.entityTypes.get(eid) || '', (eid) => this.entityClientIds.get(eid), (eid) => this.entityComponents.get(eid) || [], this.idAllocator.getState(), this.strings.getState(), this.frame, this.seq, saveRandomState() // CRITICAL: Save actual RNG state for deterministic rollback
+        );
     }
     /**
      * Load sparse snapshot (efficient format).
      */
     loadSparseSnapshot(snapshot) {
-        this.snapshotCodec.decode(snapshot, () => this.clearForSnapshot(), (state) => this.idAllocator.setState(state), (state) => this.strings.setState(state), (eid, type, clientId) => this.createEntityFromSnapshot(eid, type, clientId), (rng) => { this.rngState = rng; });
+        this.snapshotCodec.decode(snapshot, () => this.clearForSnapshot(), (state) => this.idAllocator.setState(state), (state) => this.strings.setState(state), (eid, type, clientId) => this.createEntityFromSnapshot(eid, type, clientId), (rng) => {
+            // CRITICAL: Actually restore the global RNG state for deterministic rollback
+            if (rng) {
+                loadRandomState(rng);
+            }
+        });
         this.frame = snapshot.frame;
         this.seq = snapshot.seq;
         // Sync render state with restored transform positions
@@ -1038,6 +1044,7 @@ export class World {
     /**
      * Get deterministic hash of world state.
      * Used for comparing state between clients.
+     * Excludes components with sync: false (client-only state).
      */
     getStateHash() {
         // Get all entity data in deterministic order
@@ -1050,6 +1057,9 @@ export class World {
             hash = (hash * 31 + eid) | 0;
             // Hash each component's fields in deterministic order
             for (const component of components) {
+                // Skip components that are not synced (client-only state)
+                if (!component.sync)
+                    continue;
                 const fieldNames = [...component.fieldNames].sort();
                 for (const fieldName of fieldNames) {
                     const arr = component.storage.fields[fieldName];

@@ -32,8 +32,8 @@ export interface SparseSnapshot {
     };
     /** RNG state */
     rng?: {
-        seed: number;
-        state: number;
+        s0: number;
+        s1: number;
     };
 }
 /**
@@ -55,8 +55,8 @@ export declare class SparseSnapshotCodec {
         tables: Record<string, Record<string, number>>;
         nextIds: Record<string, number>;
     }, frame?: number, seq?: number, rng?: {
-        seed: number;
-        state: number;
+        s0: number;
+        s1: number;
     }): SparseSnapshot;
     /**
      * Decode sparse snapshot back to world state.
@@ -65,8 +65,8 @@ export declare class SparseSnapshotCodec {
         tables: Record<string, Record<string, number>>;
         nextIds: Record<string, number>;
     }) => void, createEntity: (eid: number, type: string, clientId?: number) => void, setRng?: (rng: {
-        seed: number;
-        state: number;
+        s0: number;
+        s1: number;
     }) => void): void;
     /**
      * Calculate snapshot size in bytes.

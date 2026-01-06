@@ -60,6 +60,38 @@ export declare const Sprite: ComponentType<{
     visible: boolean;
 }>;
 export declare const SPRITE_IMAGE = 2;
+/**
+ * Camera2D - 2D camera for viewport control.
+ *
+ * This is a client-only component (sync: false) - each client manages
+ * their own camera independently. The camera is not included in:
+ * - Network snapshots
+ * - State hash computation
+ * - Rollback state
+ *
+ * @example
+ * // Define camera entity
+ * game.defineEntity('camera')
+ *     .with(Camera2D)
+ *     .register();
+ *
+ * // Spawn and use camera
+ * const cam = game.spawn('camera');
+ * const camera = cam.get(Camera2D);
+ * camera.x = player.x;
+ * camera.y = player.y;
+ * camera.zoom = 1.5;
+ */
+export declare const Camera2D: ComponentType<{
+    x: number;
+    y: number;
+    zoom: number;
+    targetZoom: number;
+    smoothing: number;
+    followEntity: number;
+    viewportWidth: number;
+    viewportHeight: number;
+}>;
 export type Transform2DData = {
     x: number;
     y: number;
@@ -87,3 +119,13 @@ export declare const BODY_STATIC = 1;
 export declare const BODY_KINEMATIC = 2;
 export declare const SHAPE_RECT = 0;
 export declare const SHAPE_CIRCLE = 1;
+export type Camera2DData = {
+    x: number;
+    y: number;
+    zoom: number;
+    targetZoom: number;
+    smoothing: number;
+    followEntity: number;
+    viewportWidth: number;
+    viewportHeight: number;
+};

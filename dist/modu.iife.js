@@ -985,6 +985,8 @@ var Modu = (() => {
     BODY_KINEMATIC: () => BODY_KINEMATIC,
     BODY_STATIC: () => BODY_STATIC,
     Body2D: () => Body2D,
+    Camera2D: () => Camera2D,
+    CameraSystem: () => CameraSystem,
     Entity: () => Entity,
     EntityBuilder: () => EntityBuilder,
     EntityIdAllocator: () => EntityIdAllocator,
@@ -1816,7 +1818,7 @@ var Modu = (() => {
     return AccessorClass;
   }
   var componentRegistry = /* @__PURE__ */ new Map();
-  function defineComponent(name, defaults) {
+  function defineComponent(name, defaults, options) {
     if (componentRegistry.has(name)) {
       throw new Error(`Component '${name}' is already defined`);
     }
@@ -1831,7 +1833,9 @@ var Modu = (() => {
       schema,
       storage,
       AccessorClass,
-      fieldNames: Object.keys(schema)
+      fieldNames: Object.keys(schema),
+      sync: options?.sync !== false
+      // Default to true
     };
     componentRegistry.set(name, componentType);
     return componentType;
@@ -2063,6 +2067,22 @@ var Modu = (() => {
     visible: true
   });
   var SPRITE_IMAGE = 2;
+  var Camera2D = defineComponent("Camera2D", {
+    // Position (world coordinates the camera is centered on)
+    x: 0,
+    y: 0,
+    // Zoom level (1 = normal, >1 = zoomed in, <1 = zoomed out)
+    zoom: 1,
+    // Target zoom for smooth transitions
+    targetZoom: 1,
+    // Smoothing factor for position interpolation (0-1, higher = snappier)
+    smoothing: 0.1,
+    // Optional: follow entity ID (0 = no target)
+    followEntity: 0,
+    // Viewport bounds (set by renderer)
+    viewportWidth: 0,
+    viewportHeight: 0
+  }, { sync: false });
   var BODY_DYNAMIC = 0;
   var BODY_STATIC = 1;
   var BODY_KINEMATIC = 2;
@@ -2801,6 +2821,8 @@ var Modu = (() => {
       const componentData = /* @__PURE__ */ new Map();
       const allComponents = getAllComponents();
       for (const [name, component] of allComponents) {
+        if (!component.sync)
+          continue;
         const fieldCount = component.fieldNames.length;
         if (fieldCount === 0)
           continue;
@@ -3313,7 +3335,7 @@ var Modu = (() => {
       return this;
     }
     /**
-     * Set sync fields for this entity (internal - use GameEntityBuilder.sync()).
+     * Set sync fields for this entity (internal - use GameEntityBuilder.syncOnly()).
      */
     _setSyncFields(fields) {
       this._syncFields = fields;
@@ -3914,7 +3936,8 @@ var Modu = (() => {
         this.strings.getState(),
         this.frame,
         this.seq,
-        this.rngState
+        saveRandomState()
+        // CRITICAL: Save actual RNG state for deterministic rollback
       );
     }
     /**
@@ -3928,7 +3951,9 @@ var Modu = (() => {
         (state) => this.strings.setState(state),
         (eid, type, clientId) => this.createEntityFromSnapshot(eid, type, clientId),
         (rng) => {
-          this.rngState = rng;
+          if (rng) {
+            loadRandomState(rng);
+          }
         }
       );
       this.frame = snapshot.frame;
@@ -4215,6 +4240,7 @@ var Modu = (() => {
     /**
      * Get deterministic hash of world state.
      * Used for comparing state between clients.
+     * Excludes components with sync: false (client-only state).
      */
     getStateHash() {
       const sortedEids = Array.from(this.activeEntities).sort((a, b) => a - b);
@@ -4224,6 +4250,8 @@ var Modu = (() => {
         const components = this.entityComponents.get(eid) || [];
         hash = hash * 31 + eid | 0;
         for (const component of components) {
+          if (!component.sync)
+            continue;
           const fieldNames = [...component.fieldNames].sort();
           for (const fieldName of fieldNames) {
             const arr = component.storage.fields[fieldName];
@@ -5595,8 +5623,8 @@ var Modu = (() => {
       return this;
     }
     /**
-     * Specify which fields to sync in snapshots.
-     * If not called, all fields are synced (default behavior).
+     * Specify which fields to sync in snapshots (field-level sync).
+     * Only the specified fields are included in network snapshots.
      *
      * Use this to reduce bandwidth by only syncing essential fields.
      * Non-synced fields can be reconstructed via onRestore().
@@ -5606,12 +5634,34 @@ var Modu = (() => {
      *     .with(Transform2D)
      *     .with(Sprite)
      *     .with(SnakeSegment)
-     *     .sync(['x', 'y', 'ownerId', 'spawnFrame'])
+     *     .syncOnly(['x', 'y', 'ownerId', 'spawnFrame'])
      *     .register();
      */
-    sync(fields) {
+    syncOnly(fields) {
       this.worldBuilder._setSyncFields(fields);
       return this;
+    }
+    /**
+     * Exclude all fields from syncing for this entity type.
+     * The entity will not be included in network snapshots at all.
+     *
+     * Use this for purely client-local entities like cameras, UI, or effects.
+     *
+     * @example
+     * game.defineEntity('local-camera')
+     *     .with(Camera2D)
+     *     .syncNone()
+     *     .register();
+     */
+    syncNone() {
+      this.worldBuilder._setSyncFields([]);
+      return this;
+    }
+    /**
+     * @deprecated Use syncOnly() instead for clarity
+     */
+    sync(fields) {
+      return this.syncOnly(fields);
     }
     /**
      * Set a callback to reconstruct non-synced fields after snapshot load.
@@ -5622,7 +5672,7 @@ var Modu = (() => {
      *     .with(Transform2D)
      *     .with(Sprite)
      *     .with(SnakeSegment)
-     *     .sync(['x', 'y', 'ownerId', 'spawnFrame'])
+     *     .syncOnly(['x', 'y', 'ownerId', 'spawnFrame'])
      *     .onRestore((entity, game) => {
      *         const owner = game.world.getEntityByClientId(entity.get(SnakeSegment).ownerId);
      *         if (owner) {
@@ -5652,6 +5702,7 @@ var Modu = (() => {
   var Simple2DRenderer = class {
     constructor(game, canvas, options = {}) {
       this.imageCache = /* @__PURE__ */ new Map();
+      this._cameraEntity = null;
       this.game = game;
       if (typeof canvas === "string") {
         const el = document.querySelector(canvas);
@@ -5688,6 +5739,24 @@ var Modu = (() => {
       return this.ctx;
     }
     /**
+     * Set the camera entity to use for rendering.
+     * When set, the renderer will apply camera transform (position, zoom).
+     */
+    set camera(entity) {
+      this._cameraEntity = entity;
+      if (entity) {
+        try {
+          const cam = entity.get(Camera2D);
+          cam.viewportWidth = this.canvas.width;
+          cam.viewportHeight = this.canvas.height;
+        } catch {
+        }
+      }
+    }
+    get camera() {
+      return this._cameraEntity;
+    }
+    /**
      * Render all entities with Sprite component.
      */
     render() {
@@ -5697,6 +5766,18 @@ var Modu = (() => {
         ctx.fillRect(0, 0, canvas.width, canvas.height);
       }
       const alpha = game.getRenderAlpha();
+      let camX = 0, camY = 0, camZoom = 1;
+      if (this._cameraEntity && !this._cameraEntity.destroyed) {
+        try {
+          const cam = this._cameraEntity.get(Camera2D);
+          camX = cam.x;
+          camY = cam.y;
+          camZoom = cam.zoom;
+          cam.viewportWidth = canvas.width;
+          cam.viewportHeight = canvas.height;
+        } catch {
+        }
+      }
       const entities = [];
       for (const entity of game.getAllEntities()) {
         if (entity.destroyed)
@@ -5711,9 +5792,14 @@ var Modu = (() => {
         }
       }
       entities.sort((a, b) => a.layer - b.layer);
+      ctx.save();
+      ctx.translate(canvas.width / 2, canvas.height / 2);
+      ctx.scale(camZoom, camZoom);
+      ctx.translate(-camX, -camY);
       for (const { entity } of entities) {
         this.drawEntity(entity);
       }
+      ctx.restore();
     }
     /**
      * Draw a single entity.
@@ -6060,7 +6146,7 @@ var Modu = (() => {
       const normalized = {};
       for (const [key, value] of Object.entries(input)) {
         if (value && typeof value === "object" && "x" in value && "y" in value) {
-          normalized[key] = { x: Math.round(value.x), y: Math.round(value.y) };
+          normalized[key] = { x: Math.round(value.x / 10) * 10, y: Math.round(value.y / 10) * 10 };
         } else {
           normalized[key] = value;
         }
@@ -6075,6 +6161,136 @@ var Modu = (() => {
         clearInterval(this.sendInterval);
         this.sendInterval = null;
       }
+    }
+  };
+
+  // src/plugins/camera-system.ts
+  var CameraSystem = class {
+    constructor(game, options = {}) {
+      this.game = game;
+      this.options = {
+        defaultZoom: options.defaultZoom ?? 1,
+        defaultSmoothing: options.defaultSmoothing ?? 0.1,
+        minZoom: options.minZoom ?? 0.1,
+        maxZoom: options.maxZoom ?? 10
+      };
+      game.addSystem(this.update.bind(this), { phase: "render" });
+    }
+    /**
+     * Update all cameras.
+     */
+    update() {
+      for (const entity of this.game.query("Camera2D")) {
+        this.updateCamera(entity);
+      }
+    }
+    /**
+     * Update a single camera entity.
+     */
+    updateCamera(cameraEntity) {
+      const cam = cameraEntity.get(Camera2D);
+      if (cam.followEntity !== 0) {
+        const target = this.game.world.getEntity(cam.followEntity);
+        if (target && !target.destroyed) {
+          try {
+            const transform = target.get(Transform2D);
+            cam.x += (transform.x - cam.x) * cam.smoothing;
+            cam.y += (transform.y - cam.y) * cam.smoothing;
+          } catch {
+          }
+        }
+      }
+      if (cam.zoom !== cam.targetZoom) {
+        cam.zoom += (cam.targetZoom - cam.zoom) * cam.smoothing;
+        cam.zoom = Math.max(this.options.minZoom, Math.min(this.options.maxZoom, cam.zoom));
+      }
+    }
+    /**
+     * Set camera to follow an entity.
+     */
+    follow(cameraEntity, targetEntity) {
+      const cam = cameraEntity.get(Camera2D);
+      cam.followEntity = targetEntity ? targetEntity.eid : 0;
+    }
+    /**
+     * Center camera on multiple entities (weighted by optional areas).
+     */
+    centerOn(cameraEntity, entities, weights) {
+      if (entities.length === 0)
+        return;
+      const cam = cameraEntity.get(Camera2D);
+      let totalWeight = 0;
+      let centerX = 0;
+      let centerY = 0;
+      for (let i = 0; i < entities.length; i++) {
+        const entity = entities[i];
+        if (entity.destroyed)
+          continue;
+        try {
+          const transform = entity.get(Transform2D);
+          const weight = weights?.[i] ?? 1;
+          centerX += transform.x * weight;
+          centerY += transform.y * weight;
+          totalWeight += weight;
+        } catch {
+        }
+      }
+      if (totalWeight > 0) {
+        cam.x += (centerX / totalWeight - cam.x) * cam.smoothing;
+        cam.y += (centerY / totalWeight - cam.y) * cam.smoothing;
+      }
+    }
+    /**
+     * Convert world coordinates to screen coordinates.
+     */
+    worldToScreen(cameraEntity, worldX, worldY) {
+      const cam = cameraEntity.get(Camera2D);
+      return {
+        x: (worldX - cam.x) * cam.zoom + cam.viewportWidth / 2,
+        y: (worldY - cam.y) * cam.zoom + cam.viewportHeight / 2
+      };
+    }
+    /**
+     * Convert screen coordinates to world coordinates.
+     */
+    screenToWorld(cameraEntity, screenX, screenY) {
+      const cam = cameraEntity.get(Camera2D);
+      return {
+        x: (screenX - cam.viewportWidth / 2) / cam.zoom + cam.x,
+        y: (screenY - cam.viewportHeight / 2) / cam.zoom + cam.y
+      };
+    }
+    /**
+     * Set zoom with optional target position.
+     */
+    setZoom(cameraEntity, zoom, immediate = false) {
+      const cam = cameraEntity.get(Camera2D);
+      const clampedZoom = Math.max(this.options.minZoom, Math.min(this.options.maxZoom, zoom));
+      cam.targetZoom = clampedZoom;
+      if (immediate) {
+        cam.zoom = clampedZoom;
+      }
+    }
+    /**
+     * Get visible bounds in world coordinates.
+     */
+    getVisibleBounds(cameraEntity) {
+      const cam = cameraEntity.get(Camera2D);
+      const halfWidth = cam.viewportWidth / 2 / cam.zoom;
+      const halfHeight = cam.viewportHeight / 2 / cam.zoom;
+      return {
+        left: cam.x - halfWidth,
+        top: cam.y - halfHeight,
+        right: cam.x + halfWidth,
+        bottom: cam.y + halfHeight
+      };
+    }
+    /**
+     * Check if a world point is visible.
+     */
+    isPointVisible(cameraEntity, worldX, worldY, margin = 0) {
+      const bounds = this.getVisibleBounds(cameraEntity);
+      return worldX >= bounds.left - margin && worldX <= bounds.right + margin && worldY >= bounds.top - margin && worldY <= bounds.bottom + margin;
     }
   };
 

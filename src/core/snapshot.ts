@@ -42,7 +42,7 @@ export interface SparseSnapshot {
     };
 
     /** RNG state */
-    rng?: { seed: number; state: number };
+    rng?: { s0: number; s1: number };
 }
 
 /**
@@ -70,7 +70,7 @@ export class SparseSnapshotCodec {
         stringsState: { tables: Record<string, Record<string, number>>; nextIds: Record<string, number> },
         frame: number = 0,
         seq: number = 0,
-        rng?: { seed: number; state: number }
+        rng?: { s0: number; s1: number }
     ): SparseSnapshot {
         // Build entity bitmap
         const entityMask = new Uint32Array(Math.ceil(MAX_ENTITIES / 32));
@@ -95,6 +95,9 @@ export class SparseSnapshotCodec {
         const allComponents = getAllComponents();
 
         for (const [name, component] of allComponents) {
+            // Skip components that are not synced (client-only state)
+            if (!component.sync) continue;
+
             const fieldCount = component.fieldNames.length;
             if (fieldCount === 0) continue;
 
@@ -154,7 +157,7 @@ export class SparseSnapshotCodec {
         setAllocatorState: (state: EntityIdAllocatorState) => void,
         setStringsState: (state: { tables: Record<string, Record<string, number>>; nextIds: Record<string, number> }) => void,
         createEntity: (eid: number, type: string, clientId?: number) => void,
-        setRng?: (rng: { seed: number; state: number }) => void
+        setRng?: (rng: { s0: number; s1: number }) => void
     ): void {
         // Clear existing state
         clearWorld();

@@ -18,7 +18,7 @@ export { World, EntityBuilder, Entity, EntityPool, EntityIdAllocator, defineComp
 // ============================================
 // Components (Built-in ECS Components)
 // ============================================
-export { Transform2D, Body2D, Player, Sprite, 
+export { Transform2D, Body2D, Player, Sprite, Camera2D, 
 // Body type constants
 BODY_DYNAMIC, BODY_STATIC, BODY_KINEMATIC, 
 // Shape type constants
@@ -32,6 +32,7 @@ export { Game, createGame, Prefab } from './game';
 // ============================================
 export { Simple2DRenderer } from './plugins/simple-2d-renderer';
 export { InputPlugin } from './plugins/input-plugin';
+export { CameraSystem } from './plugins/camera-system';
 export { enableDebugUI } from './plugins/debug-ui';
 export { enableDeterminismGuard, disableDeterminismGuard } from './plugins/determinism-guard';
 export { Physics2DSystem, createPhysics2DSystem } from './plugins/physics2d/system';

@@ -56,6 +56,7 @@ export {
     Body2D,
     Player,
     Sprite,
+    Camera2D,
     // Body type constants
     BODY_DYNAMIC,
     BODY_STATIC,
@@ -77,6 +78,7 @@ export type { GameCallbacks } from './game';
 // ============================================
 export { Simple2DRenderer, Simple2DRendererOptions } from './plugins/simple-2d-renderer';
 export { InputPlugin } from './plugins/input-plugin';
+export { CameraSystem, CameraSystemOptions } from './plugins/camera-system';
 export { enableDebugUI, DebugUITarget } from './plugins/debug-ui';
 export { enableDeterminismGuard, disableDeterminismGuard } from './plugins/determinism-guard';
 export { Physics2DSystem, createPhysics2DSystem } from './plugins/physics2d/system';

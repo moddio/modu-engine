@@ -45,6 +45,23 @@ export interface ComponentStorage {
 }
 
 /**
+ * Options for defining a component.
+ */
+export interface ComponentOptions {
+    /**
+     * Whether this component should be synchronized across the network.
+     * When false, the component is excluded from:
+     * - Network snapshots (not sent to other clients)
+     * - State hash computation (doesn't affect determinism checks)
+     * - Rollback state (not saved/restored during rollback)
+     *
+     * Use sync: false for client-only state like cameras, UI, local effects.
+     * @default true
+     */
+    sync?: boolean;
+}
+
+/**
  * Component type definition.
  */
 export interface ComponentType<T extends Record<string, any> = any> {
@@ -53,6 +70,8 @@ export interface ComponentType<T extends Record<string, any> = any> {
     readonly storage: ComponentStorage;
     readonly AccessorClass: new (index: number) => T;
     readonly fieldNames: string[];
+    /** Whether this component is synchronized across network. Default: true */
+    readonly sync: boolean;
 }
 
 /**
@@ -198,15 +217,20 @@ const componentRegistry = new Map<string, ComponentType>();
  *
  * @param name Unique component name
  * @param defaults Default values (type inferred from values)
+ * @param options Optional configuration (sync, etc.)
  * @returns ComponentType for use in entity definitions
  *
  * @example
  * const Health = defineComponent('health', { current: 100, max: 100 });
  * const Position = defineComponent('position', { x: 0, y: 0 });
+ *
+ * // Client-only component (not synced)
+ * const Camera2D = defineComponent('camera2d', { zoom: 1, targetZoom: 1 }, { sync: false });
  */
 export function defineComponent<T extends Record<string, any>>(
     name: string,
-    defaults: T
+    defaults: T,
+    options?: ComponentOptions
 ): ComponentType<{ [K in keyof T]: T[K] extends boolean ? boolean : number }> {
     if (componentRegistry.has(name)) {
         throw new Error(`Component '${name}' is already defined`);
@@ -229,7 +253,8 @@ export function defineComponent<T extends Record<string, any>>(
         schema,
         storage,
         AccessorClass,
-        fieldNames: Object.keys(schema)
+        fieldNames: Object.keys(schema),
+        sync: options?.sync !== false // Default to true
     };
 
     componentRegistry.set(name, componentType);

@@ -76,6 +76,44 @@ export const Sprite = defineComponent('Sprite', {
 });
 // Sprite shape constants (reuse SHAPE_RECT, SHAPE_CIRCLE, add SPRITE_IMAGE)
 export const SPRITE_IMAGE = 2;
+/**
+ * Camera2D - 2D camera for viewport control.
+ *
+ * This is a client-only component (sync: false) - each client manages
+ * their own camera independently. The camera is not included in:
+ * - Network snapshots
+ * - State hash computation
+ * - Rollback state
+ *
+ * @example
+ * // Define camera entity
+ * game.defineEntity('camera')
+ *     .with(Camera2D)
+ *     .register();
+ *
+ * // Spawn and use camera
+ * const cam = game.spawn('camera');
+ * const camera = cam.get(Camera2D);
+ * camera.x = player.x;
+ * camera.y = player.y;
+ * camera.zoom = 1.5;
+ */
+export const Camera2D = defineComponent('Camera2D', {
+    // Position (world coordinates the camera is centered on)
+    x: 0,
+    y: 0,
+    // Zoom level (1 = normal, >1 = zoomed in, <1 = zoomed out)
+    zoom: 1,
+    // Target zoom for smooth transitions
+    targetZoom: 1,
+    // Smoothing factor for position interpolation (0-1, higher = snappier)
+    smoothing: 0.1,
+    // Optional: follow entity ID (0 = no target)
+    followEntity: 0,
+    // Viewport bounds (set by renderer)
+    viewportWidth: 0,
+    viewportHeight: 0
+}, { sync: false });
 // Body type constants
 export const BODY_DYNAMIC = 0;
 export const BODY_STATIC = 1;

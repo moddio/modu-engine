@@ -318,7 +318,7 @@ export class InputPlugin {
         for (const [key, value] of Object.entries(input)) {
             if (value && typeof value === 'object' && 'x' in value && 'y' in value) {
                 // Round vectors to avoid sending tiny movements
-                normalized[key] = { x: Math.round(value.x), y: Math.round(value.y) };
+                normalized[key] = { x: Math.round(value.x / 10) * 10, y: Math.round(value.y / 10) * 10 };
             }
             else {
                 normalized[key] = value;
