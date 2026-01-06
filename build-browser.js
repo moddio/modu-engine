@@ -15,6 +15,10 @@ if (!fs.existsSync(distDir)) {
 
 console.log('Building Modu Engine for Browser...\n');
 
+// Generate build timestamp banner
+const buildDate = new Date().toISOString();
+const banner = `/* Modu Engine - Built: ${buildDate} */\n`;
+
 // Read network SDK source
 const networkSdkPath = path.join(process.cwd(), '..', 'network', 'sdk', 'dist', 'modu-network.iife.js');
 let networkSdkCode = '';
@@ -86,7 +90,7 @@ async function buildCombinedIIFE(outDir, filename) {
     const engineCode = await buildEngineIIFE();
 
     // Combine: network SDK first (sets window.moduNetwork), then engine
-    const combined = `// Modu Engine + Network SDK Combined Bundle
+    const combined = `${banner}// Modu Engine + Network SDK Combined Bundle
 ${networkSdkCode}
 ${engineCode}`;
 
@@ -114,7 +118,7 @@ async function buildMinifiedCombined(outDir, filename) {
     // Minify network SDK too
     const networkMinified = networkSdkCode ? (await esbuild.transform(networkSdkCode, { minify: true })).code : '';
 
-    const combined = `${networkMinified}${engineCode}`;
+    const combined = `${banner}${networkMinified}${engineCode}`;
     fs.writeFileSync(path.join(outDir, filename), combined);
     console.log('Built:', path.join(outDir, filename));
 }
