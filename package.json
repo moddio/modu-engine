@@ -5,6 +5,8 @@
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "scripts": {
+    "version": "node update-version.js",
+    "prebuild": "npm run version",
     "build": "tsc",
     "build:browser": "node build-browser.js",
     "dev": "node build.js --watch --serve",
