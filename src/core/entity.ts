@@ -348,38 +348,6 @@ export class Entity {
         body.vy = toFloat(fpDiv(fpMul(dy, speedFp), dist));
     }
 
-    /**
-     * Set velocity toward a target, but stop if within radius.
-     *
-     * @param target Target position {x, y}
-     * @param speed Speed in units per second
-     * @param stopRadius Stop moving when within this distance (default: 0)
-     */
-    moveTowardsWithStop(target: { x: number; y: number }, speed: number, stopRadius: number = 0): void {
-        if (!this.has(Transform2D) || !this.has(Body2D)) return;
-
-        const transform = this.get(Transform2D);
-        const body = this.get(Body2D);
-
-        // All math in fixed-point for determinism
-        const dx = toFixed(target.x) - toFixed(transform.x);
-        const dy = toFixed(target.y) - toFixed(transform.y);
-        const distSq = fpMul(dx, dx) + fpMul(dy, dy);
-        const stopRadiusFp = toFixed(stopRadius);
-        const stopRadiusSq = fpMul(stopRadiusFp, stopRadiusFp);
-
-        // Stop if within radius
-        if (distSq <= stopRadiusSq) {
-            body.vx = 0;
-            body.vy = 0;
-            return;
-        }
-
-        const dist = fpSqrt(distSq);
-        const speedFp = toFixed(speed * 60);
-        body.vx = toFloat(fpDiv(fpMul(dx, speedFp), dist));
-        body.vy = toFloat(fpDiv(fpMul(dy, speedFp), dist));
-    }
 
     /**
      * Stop all movement.

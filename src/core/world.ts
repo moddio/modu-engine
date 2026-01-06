@@ -847,6 +847,18 @@ export class World {
      * Load sparse snapshot (efficient format).
      */
     loadSparseSnapshot(snapshot: SparseSnapshot): void {
+        // Save visual positions BEFORE clearing entities
+        const savedVisualPositions = new Map<number, { x: number; y: number }>();
+        for (const eid of this.activeEntities) {
+            const entity = this.entityPool.get(eid);
+            if (entity) {
+                savedVisualPositions.set(eid, {
+                    x: entity.render.interpX,
+                    y: entity.render.interpY
+                });
+            }
+        }
+
         this.snapshotCodec.decode(
             snapshot,
             () => this.clearForSnapshot(),
@@ -854,7 +866,6 @@ export class World {
             (state) => this.strings.setState(state),
             (eid, type, clientId) => this.createEntityFromSnapshot(eid, type, clientId),
             (rng) => {
-                // CRITICAL: Actually restore the global RNG state for deterministic rollback
                 if (rng) {
                     loadRandomState(rng);
                 }
@@ -864,35 +875,36 @@ export class World {
         this.frame = snapshot.frame;
         this.seq = snapshot.seq;
 
-        // Sync render state with restored transform positions
-        this.syncRenderStateFromTransforms();
+        // Restore visual positions for smooth interpolation
+        this.syncRenderStateFromTransforms(savedVisualPositions);
     }
 
     /**
-     * Sync render state with current transform positions.
-     * Called after snapshot restore to prevent interpolation artifacts.
+     * Sync render state after snapshot restore.
+     * Uses saved visual positions for smooth interpolation.
      */
-    private syncRenderStateFromTransforms(): void {
+    private syncRenderStateFromTransforms(savedPositions: Map<number, { x: number; y: number }>): void {
         for (const eid of this.activeEntities) {
             const entity = this.getEntity(eid);
             if (!entity) continue;
 
-            // Find Transform2D component and read x,y values
+            // Use saved visual position as prev for smooth blending
+            const saved = savedPositions.get(eid);
+            if (saved) {
+                entity.render.prevX = saved.x;
+                entity.render.prevY = saved.y;
+            }
+
+            // Set interpX/Y from current transform
             const components = this.entityComponents.get(eid) || [];
             const index = eid & INDEX_MASK;
-
             for (const component of components) {
                 if (component.name === 'Transform2D') {
                     const xArr = component.storage.fields['x'];
                     const yArr = component.storage.fields['y'];
                     if (xArr && yArr) {
-                        // Convert from fixed-point to float for render
-                        const x = xArr[index] / 65536;
-                        const y = yArr[index] / 65536;
-                        entity.render.prevX = x;
-                        entity.render.prevY = y;
-                        entity.render.interpX = x;
-                        entity.render.interpY = y;
+                        entity.render.interpX = xArr[index] / 65536;
+                        entity.render.interpY = yArr[index] / 65536;
                     }
                     break;
                 }
