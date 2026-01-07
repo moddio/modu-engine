@@ -820,16 +820,13 @@ export class Game {
     private routeInputToEntity(clientId: string, data: any): void {
         const numId = this.internClientId(clientId);
 
-        // Use O(1) clientId index lookup instead of iterating
-        const entity = this.world.getEntityByClientId(numId);
+        // Always store input in registry - systems query by clientId, not entity
+        // This supports games where one clientId maps to multiple entities (e.g., split cells)
+        this.world.setInput(numId, data);
+
         if (DEBUG_NETWORK) {
+            const entity = this.world.getEntityByClientId(numId);
             console.log(`[ecs] routeInput: clientId=${clientId.slice(0, 8)}, numId=${numId}, entity=${entity?.eid || 'null'}, data=${JSON.stringify(data)}`);
-        }
-        if (entity) {
-            // Store input in world's input registry for systems to read
-            this.world.setInput(numId, data);
-        } else if (DEBUG_NETWORK) {
-            console.log(`[ecs] WARNING: No entity for clientId ${clientId.slice(0, 8)} (numId=${numId})`);
         }
     }
 
