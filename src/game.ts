@@ -649,9 +649,16 @@ export class Game {
             if (DEBUG_NETWORK) console.log('[ecs] First join: creating room');
 
             this.currentFrame = frame;
+
+            // First joiner is always authority
+            this.authorityClientId = clientId;
+            if (!this.connectedClients.includes(clientId)) {
+                this.connectedClients.push(clientId);
+            }
+
             this.callbacks.onRoomCreate?.();
 
-            // Process all inputs
+            // Process all inputs (may include our own join event)
             for (const input of inputs) {
                 this.processInput(input);
             }
