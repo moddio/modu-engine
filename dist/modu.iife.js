@@ -1,4 +1,4 @@
-/* Modu Engine - Built: 2026-01-06T19:52:19.575Z - Commit: 269bb17 */
+/* Modu Engine - Built: 2026-01-08T17:36:43.628Z - Commit: f1f7f06 */
 // Modu Engine + Network SDK Combined Bundle
 "use strict";
 var moduNetwork = (() => {
