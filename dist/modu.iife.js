@@ -1,4 +1,4 @@
-/* Modu Engine - Built: 2026-01-09T23:52:19.943Z - Commit: 1d544f9 */
+/* Modu Engine - Built: 2026-01-10T00:28:57.822Z - Commit: 5359935 */
 // Modu Engine + Network SDK Combined Bundle
 "use strict";
 var moduNetwork = (() => {
@@ -715,16 +715,18 @@ var moduNetwork = (() => {
           let inputs = [];
           let snapshotFrame;
           let snapshotHash;
-          if (buffer.byteLength > 9) {
+          let majorityHash;
+          if (buffer.byteLength > 13) {
             snapshotFrame = view.getUint32(5, true);
-            const hashLen = view.getUint8(9);
-            let offset = 10;
+            majorityHash = view.getUint32(9, true);
+            const hashLen = view.getUint8(13);
+            let offset = 14;
             if (hashLen > 0 && offset + hashLen <= buffer.byteLength) {
               snapshotHash = new TextDecoder().decode(new Uint8Array(buffer, offset, hashLen));
               offset += hashLen;
             }
             if (offset >= buffer.byteLength) {
-              return { type: "TICK", frame, snapshotFrame, snapshotHash, inputs, events: inputs };
+              return { type: "TICK", frame, snapshotFrame, snapshotHash, majorityHash, inputs, events: inputs };
             }
             const inputCount = view.getUint8(offset);
             offset++;
@@ -762,7 +764,7 @@ var moduNetwork = (() => {
               inputs.push({ seq, data, clientId, clientHash });
             }
           }
-          return { type: "TICK", frame, snapshotFrame, snapshotHash, inputs, events: inputs };
+          return { type: "TICK", frame, snapshotFrame, snapshotHash, majorityHash, inputs, events: inputs };
         }
         case BinaryMessageType.INITIAL_STATE: {
           let offset = 1;
@@ -1169,7 +1171,7 @@ var moduNetwork = (() => {
                 processInputsForClientIds(newInputs);
               }
               if (onTick) {
-                onTick(msg.frame, newInputs, msg.snapshotFrame, msg.snapshotHash);
+                onTick(msg.frame, newInputs, msg.snapshotFrame, msg.snapshotHash, msg.majorityHash);
               }
               break;
             }
@@ -1230,7 +1232,7 @@ var moduNetwork = (() => {
                     reResolveClientId(inp);
                   }
                   if (onTick && (tickInputs.length > 0 || tickMsg.frame > frame)) {
-                    onTick(tickMsg.frame, tickInputs, tickMsg.snapshotFrame, tickMsg.snapshotHash);
+                    onTick(tickMsg.frame, tickInputs, tickMsg.snapshotFrame, tickMsg.snapshotHash, tickMsg.majorityHash);
                   }
                 }
                 pendingTicks = [];
@@ -5343,8 +5345,8 @@ var Modu = (() => {
           onConnect: (snapshot, inputs, frame, nodeUrl, fps, clientId) => {
             this.handleConnect(snapshot, inputs, frame, fps, clientId);
           },
-          onTick: (frame, inputs) => {
-            this.handleTick(frame, inputs);
+          onTick: (frame, inputs, _snapshotFrame, _snapshotHash, majorityHash) => {
+            this.handleTick(frame, inputs, majorityHash);
           },
           onDisconnect: () => {
             this.handleDisconnect();
@@ -5689,7 +5691,7 @@ var Modu = (() => {
     /**
      * Handle server tick.
      */
-    handleTick(frame, inputs) {
+    handleTick(frame, inputs, majorityHash) {
       if (frame <= this.lastProcessedFrame) {
         if (DEBUG_NETWORK) {
           console.log(`[ecs] Skipping old frame ${frame} (already at ${this.lastProcessedFrame})`);
@@ -5714,6 +5716,9 @@ var Modu = (() => {
       }
       this.lastTickTime = typeof performance !== "undefined" ? performance.now() : Date.now();
       this.sendStateSync(frame);
+      if (majorityHash !== void 0 && majorityHash !== 0) {
+        this.handleMajorityHash(frame - 1, majorityHash);
+      }
     }
     /**
      * Send state synchronization data after tick.
@@ -5732,26 +5737,32 @@ var Modu = (() => {
       const stateHash = this.world.getStateHash();
       this.connection.sendStateHash(frame, stateHash);
       this.deltaBytesThisSecond += 9;
-      if (this.activeClients.length > 0 && this.connection.clientId) {
-        const entityCount = this.world.entityCount;
-        const numPartitions = computePartitionCount(entityCount, this.activeClients.length);
-        const assignment = computePartitionAssignment(
-          entityCount,
-          this.activeClients,
-          frame,
-          this.reliabilityScores
-        );
-        const myPartitions = getClientPartitions(assignment, this.connection.clientId);
-        if (myPartitions.length > 0 && this.connection.sendPartitionData) {
-          const currentSnapshot = this.world.getSparseSnapshot();
-          const delta = computeStateDelta(this.prevSnapshot, currentSnapshot);
+      if (this.activeClients.length > 0 && this.connection.clientId && this.connection.sendPartitionData) {
+        const currentSnapshot = this.world.getSparseSnapshot();
+        if (!this.prevSnapshot) {
+          this.prevSnapshot = currentSnapshot;
+          return;
+        }
+        const delta = computeStateDelta(this.prevSnapshot, currentSnapshot);
+        if (!isDeltaEmpty(delta)) {
+          const entityCount = this.world.entityCount;
+          const numPartitions = computePartitionCount(entityCount, this.activeClients.length);
+          const assignment = computePartitionAssignment(
+            entityCount,
+            this.activeClients,
+            frame,
+            this.reliabilityScores
+          );
+          const myPartitions = getClientPartitions(assignment, this.connection.clientId);
           for (const partitionId of myPartitions) {
             const partitionData = getPartition(delta, partitionId, numPartitions);
-            this.connection.sendPartitionData(frame, partitionId, partitionData);
-            this.deltaBytesThisSecond += 8 + partitionData.length;
+            if (partitionData.length > 50) {
+              this.connection.sendPartitionData(frame, partitionId, partitionData);
+              this.deltaBytesThisSecond += 8 + partitionData.length;
+            }
           }
-          this.prevSnapshot = currentSnapshot;
         }
+        this.prevSnapshot = currentSnapshot;
       }
     }
     /**
@@ -7323,7 +7334,7 @@ var Modu = (() => {
   }
 
   // src/version.ts
-  var ENGINE_VERSION = "1d544f9";
+  var ENGINE_VERSION = "5359935";
 
   // src/plugins/debug-ui.ts
   var debugDiv = null;

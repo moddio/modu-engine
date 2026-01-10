@@ -25,7 +25,8 @@ import {
     getClientPartitions,
     computeStateDelta,
     getPartition,
-    computePartitionCount
+    computePartitionCount,
+    isDeltaEmpty
 } from './sync';
 
 // ==========================================
@@ -582,8 +583,8 @@ export class Game {
                     this.handleConnect(snapshot, inputs, frame, fps, clientId);
                 },
 
-                onTick: (frame: number, inputs: ServerInput[]) => {
-                    this.handleTick(frame, inputs);
+                onTick: (frame: number, inputs: ServerInput[], _snapshotFrame?: number, _snapshotHash?: string, majorityHash?: number) => {
+                    this.handleTick(frame, inputs, majorityHash);
                 },
 
                 onDisconnect: () => {
@@ -1047,7 +1048,7 @@ export class Game {
     /**
      * Handle server tick.
      */
-    private handleTick(frame: number, inputs: ServerInput[]): void {
+    private handleTick(frame: number, inputs: ServerInput[], majorityHash?: number): void {
         // Skip frames we've already processed (e.g., during catchup)
         if (frame <= this.lastProcessedFrame) {
             if (DEBUG_NETWORK) {
@@ -1090,6 +1091,11 @@ export class Game {
 
         // 6. Send state sync data (stateHash + partition data if assigned)
         this.sendStateSync(frame);
+
+        // 7. Check for desync using majority hash from server
+        if (majorityHash !== undefined && majorityHash !== 0) {
+            this.handleMajorityHash(frame - 1, majorityHash);
+        }
     }
 
     /**
@@ -1114,41 +1120,45 @@ export class Game {
         this.connection.sendStateHash(frame, stateHash);
         this.deltaBytesThisSecond += 9;
 
-        // NOTE: Partition-based delta sync is NOT YET IMPLEMENTED.
-        // The current implementation uses hash-based consensus only.
-        // Clients send state hashes (9 bytes), server computes majority hash,
-        // desynced clients request full snapshot resync.
-        //
-        // TODO: Implement distributed partition sending when needed for bandwidth optimization.
-        // The code below is disabled until then.
-        /*
-        if (this.activeClients.length > 0 && this.connection.clientId) {
-            const entityCount = this.world.entityCount;
-            const numPartitions = computePartitionCount(entityCount, this.activeClients.length);
+        // Partition-based delta sync: send only changed entity data for assigned partitions
+        if (this.activeClients.length > 0 && this.connection.clientId && this.connection.sendPartitionData) {
+            const currentSnapshot = this.world.getSparseSnapshot();
 
-            const assignment = computePartitionAssignment(
-                entityCount,
-                this.activeClients,
-                frame,
-                this.reliabilityScores
-            );
+            // First tick: just store snapshot, don't send delta (nothing to compare to)
+            if (!this.prevSnapshot) {
+                this.prevSnapshot = currentSnapshot;
+                return;
+            }
 
-            const myPartitions = getClientPartitions(assignment, this.connection.clientId);
+            // Compute delta between previous and current state
+            const delta = computeStateDelta(this.prevSnapshot, currentSnapshot);
 
-            if (myPartitions.length > 0 && this.connection.sendPartitionData) {
-                const currentSnapshot = this.world.getSparseSnapshot();
-                const delta = computeStateDelta(this.prevSnapshot, currentSnapshot);
+            // Only send if there are actual changes
+            if (!isDeltaEmpty(delta)) {
+                const entityCount = this.world.entityCount;
+                const numPartitions = computePartitionCount(entityCount, this.activeClients.length);
+
+                const assignment = computePartitionAssignment(
+                    entityCount,
+                    this.activeClients,
+                    frame,
+                    this.reliabilityScores
+                );
+
+                const myPartitions = getClientPartitions(assignment, this.connection.clientId);
 
                 for (const partitionId of myPartitions) {
                     const partitionData = getPartition(delta, partitionId, numPartitions);
-                    this.connection.sendPartitionData(frame, partitionId, partitionData);
-                    this.deltaBytesThisSecond += 8 + partitionData.length;
+                    // Only send if this partition has data (not just empty JSON)
+                    if (partitionData.length > 50) { // Empty partition JSON is ~45 bytes
+                        this.connection.sendPartitionData(frame, partitionId, partitionData);
+                        this.deltaBytesThisSecond += 8 + partitionData.length;
+                    }
                 }
-
-                this.prevSnapshot = currentSnapshot;
             }
+
+            this.prevSnapshot = currentSnapshot;
         }
-        */
     }
 
     /**

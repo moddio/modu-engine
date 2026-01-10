@@ -14,6 +14,7 @@ import { Player } from './components';
 import { encode, decode } from './codec';
 import { loadRandomState, saveRandomState } from './math/random';
 import { INDEX_MASK } from './core/constants';
+import { computePartitionAssignment, getClientPartitions, computeStateDelta, getPartition, computePartitionCount, isDeltaEmpty } from './sync';
 // Debug flag - set to false for production
 const DEBUG_NETWORK = false;
 // ==========================================
@@ -390,8 +391,8 @@ export class Game {
                 onConnect: (snapshot, inputs, frame, nodeUrl, fps, clientId) => {
                     this.handleConnect(snapshot, inputs, frame, fps, clientId);
                 },
-                onTick: (frame, inputs) => {
-                    this.handleTick(frame, inputs);
+                onTick: (frame, inputs, _snapshotFrame, _snapshotHash, majorityHash) => {
+                    this.handleTick(frame, inputs, majorityHash);
                 },
                 onDisconnect: () => {
                     this.handleDisconnect();
@@ -795,7 +796,7 @@ export class Game {
     /**
      * Handle server tick.
      */
-    handleTick(frame, inputs) {
+    handleTick(frame, inputs, majorityHash) {
         // Skip frames we've already processed (e.g., during catchup)
         if (frame <= this.lastProcessedFrame) {
             if (DEBUG_NETWORK) {
@@ -830,6 +831,10 @@ export class Game {
         this.lastTickTime = typeof performance !== 'undefined' ? performance.now() : Date.now();
         // 6. Send state sync data (stateHash + partition data if assigned)
         this.sendStateSync(frame);
+        // 7. Check for desync using majority hash from server
+        if (majorityHash !== undefined && majorityHash !== 0) {
+            this.handleMajorityHash(frame - 1, majorityHash);
+        }
     }
     /**
      * Send state synchronization data after tick.
@@ -850,41 +855,33 @@ export class Game {
         const stateHash = this.world.getStateHash();
         this.connection.sendStateHash(frame, stateHash);
         this.deltaBytesThisSecond += 9;
-        // NOTE: Partition-based delta sync is NOT YET IMPLEMENTED.
-        // The current implementation uses hash-based consensus only.
-        // Clients send state hashes (9 bytes), server computes majority hash,
-        // desynced clients request full snapshot resync.
-        //
-        // TODO: Implement distributed partition sending when needed for bandwidth optimization.
-        // The code below is disabled until then.
-        /*
-        if (this.activeClients.length > 0 && this.connection.clientId) {
-            const entityCount = this.world.entityCount;
-            const numPartitions = computePartitionCount(entityCount, this.activeClients.length);
-
-            const assignment = computePartitionAssignment(
-                entityCount,
-                this.activeClients,
-                frame,
-                this.reliabilityScores
-            );
-
-            const myPartitions = getClientPartitions(assignment, this.connection.clientId);
-
-            if (myPartitions.length > 0 && this.connection.sendPartitionData) {
-                const currentSnapshot = this.world.getSparseSnapshot();
-                const delta = computeStateDelta(this.prevSnapshot, currentSnapshot);
-
+        // Partition-based delta sync: send only changed entity data for assigned partitions
+        if (this.activeClients.length > 0 && this.connection.clientId && this.connection.sendPartitionData) {
+            const currentSnapshot = this.world.getSparseSnapshot();
+            // First tick: just store snapshot, don't send delta (nothing to compare to)
+            if (!this.prevSnapshot) {
+                this.prevSnapshot = currentSnapshot;
+                return;
+            }
+            // Compute delta between previous and current state
+            const delta = computeStateDelta(this.prevSnapshot, currentSnapshot);
+            // Only send if there are actual changes
+            if (!isDeltaEmpty(delta)) {
+                const entityCount = this.world.entityCount;
+                const numPartitions = computePartitionCount(entityCount, this.activeClients.length);
+                const assignment = computePartitionAssignment(entityCount, this.activeClients, frame, this.reliabilityScores);
+                const myPartitions = getClientPartitions(assignment, this.connection.clientId);
                 for (const partitionId of myPartitions) {
                     const partitionData = getPartition(delta, partitionId, numPartitions);
-                    this.connection.sendPartitionData(frame, partitionId, partitionData);
-                    this.deltaBytesThisSecond += 8 + partitionData.length;
+                    // Only send if this partition has data (not just empty JSON)
+                    if (partitionData.length > 50) { // Empty partition JSON is ~45 bytes
+                        this.connection.sendPartitionData(frame, partitionId, partitionData);
+                        this.deltaBytesThisSecond += 8 + partitionData.length;
+                    }
                 }
-
-                this.prevSnapshot = currentSnapshot;
             }
+            this.prevSnapshot = currentSnapshot;
         }
-        */
     }
     /**
      * Process a network input (join/leave/game).

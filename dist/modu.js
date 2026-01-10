@@ -3887,8 +3887,8 @@ var Game = class {
         onConnect: (snapshot, inputs, frame, nodeUrl, fps, clientId) => {
           this.handleConnect(snapshot, inputs, frame, fps, clientId);
         },
-        onTick: (frame, inputs) => {
-          this.handleTick(frame, inputs);
+        onTick: (frame, inputs, _snapshotFrame, _snapshotHash, majorityHash) => {
+          this.handleTick(frame, inputs, majorityHash);
         },
         onDisconnect: () => {
           this.handleDisconnect();
@@ -4233,7 +4233,7 @@ var Game = class {
   /**
    * Handle server tick.
    */
-  handleTick(frame, inputs) {
+  handleTick(frame, inputs, majorityHash) {
     if (frame <= this.lastProcessedFrame) {
       if (DEBUG_NETWORK) {
         console.log(`[ecs] Skipping old frame ${frame} (already at ${this.lastProcessedFrame})`);
@@ -4258,6 +4258,9 @@ var Game = class {
     }
     this.lastTickTime = typeof performance !== "undefined" ? performance.now() : Date.now();
     this.sendStateSync(frame);
+    if (majorityHash !== void 0 && majorityHash !== 0) {
+      this.handleMajorityHash(frame - 1, majorityHash);
+    }
   }
   /**
    * Send state synchronization data after tick.
@@ -4276,26 +4279,32 @@ var Game = class {
     const stateHash = this.world.getStateHash();
     this.connection.sendStateHash(frame, stateHash);
     this.deltaBytesThisSecond += 9;
-    if (this.activeClients.length > 0 && this.connection.clientId) {
-      const entityCount = this.world.entityCount;
-      const numPartitions = computePartitionCount(entityCount, this.activeClients.length);
-      const assignment = computePartitionAssignment(
-        entityCount,
-        this.activeClients,
-        frame,
-        this.reliabilityScores
-      );
-      const myPartitions = getClientPartitions(assignment, this.connection.clientId);
-      if (myPartitions.length > 0 && this.connection.sendPartitionData) {
-        const currentSnapshot = this.world.getSparseSnapshot();
-        const delta = computeStateDelta(this.prevSnapshot, currentSnapshot);
+    if (this.activeClients.length > 0 && this.connection.clientId && this.connection.sendPartitionData) {
+      const currentSnapshot = this.world.getSparseSnapshot();
+      if (!this.prevSnapshot) {
+        this.prevSnapshot = currentSnapshot;
+        return;
+      }
+      const delta = computeStateDelta(this.prevSnapshot, currentSnapshot);
+      if (!isDeltaEmpty(delta)) {
+        const entityCount = this.world.entityCount;
+        const numPartitions = computePartitionCount(entityCount, this.activeClients.length);
+        const assignment = computePartitionAssignment(
+          entityCount,
+          this.activeClients,
+          frame,
+          this.reliabilityScores
+        );
+        const myPartitions = getClientPartitions(assignment, this.connection.clientId);
         for (const partitionId of myPartitions) {
           const partitionData = getPartition(delta, partitionId, numPartitions);
-          this.connection.sendPartitionData(frame, partitionId, partitionData);
-          this.deltaBytesThisSecond += 8 + partitionData.length;
+          if (partitionData.length > 50) {
+            this.connection.sendPartitionData(frame, partitionId, partitionData);
+            this.deltaBytesThisSecond += 8 + partitionData.length;
+          }
         }
-        this.prevSnapshot = currentSnapshot;
       }
+      this.prevSnapshot = currentSnapshot;
     }
   }
   /**
@@ -5867,7 +5876,7 @@ function disableDeterminismGuard() {
 }
 
 // src/version.ts
-var ENGINE_VERSION = "1d544f9";
+var ENGINE_VERSION = "5359935";
 
 // src/plugins/debug-ui.ts
 var debugDiv = null;
