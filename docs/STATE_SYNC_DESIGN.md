@@ -15,7 +15,7 @@ A bandwidth-efficient, Byzantine-fault-tolerant state synchronization system for
 
 ## Current Implementation Status
 
-The following simplified model is currently implemented:
+The following model is currently implemented:
 
 ### What's Implemented ✅
 
@@ -29,6 +29,8 @@ The following simplified model is currently implemented:
 | Detailed diagnostics | ✅ | Field-by-field diff logging on desync |
 | Rolling sync stats | ✅ | Track % of hash checks that pass |
 | Debug UI integration | ✅ | Shows sync %, desynced/resyncing status |
+| **Structural-only delta** | ✅ | Delta tracks created/deleted only (deterministic simulation) |
+| **Solo client optimization** | ✅ | Skip delta computation when alone |
 
 ### Current Flow (Simplified)
 
@@ -36,7 +38,7 @@ The following simplified model is currently implemented:
 Every tick:
   ALL CLIENTS:
     1. Apply inputs from server
-    2. Run deterministic simulation
+    2. Run deterministic simulation (all clients compute identical state)
     3. Compute stateHash (4 bytes)
     4. Send STATE_HASH to server
 
@@ -55,12 +57,21 @@ Every tick:
     6. Client verifies hash now matches
 ```
 
+### Delta Sync (Structural Changes Only)
+
+Because simulation is **deterministic**, all clients compute identical field values (positions, velocities, etc.) from the same inputs. The delta system only needs to track **structural changes**:
+
+- **Created entities**: New entities spawned this frame (with full component data)
+- **Deleted entities**: Entity IDs destroyed this frame
+
+Field updates (position changes, velocity changes) are **NOT** transmitted - all clients already have the correct values from local simulation.
+
+**Bandwidth impact**: Delta is typically **16 bytes** (header only) when no entities are created/deleted. Creating an entity adds ~50-100 bytes for its component data.
+
 ### Not Yet Implemented ❌
 
 | Feature | Status | Notes |
 |---------|--------|-------|
-| Partition-based delta sync | ❌ | Design ready, not implemented |
-| Reliability scoring | ❌ | Scores tracked but not used for assignment |
 | Distributed partition sending | ❌ | All data from authority, not distributed |
 | Merkle tree divergence detection | ❌ | Uses full snapshot comparison instead |
 | Compression | ❌ | Raw binary for now |
@@ -70,9 +81,9 @@ Every tick:
 | Direction | Per Client | Notes |
 |-----------|------------|-------|
 | Upload | ~180 bytes/sec | 9 bytes × 20 fps (STATE_HASH only) |
-| Download | ~2-4 KB/sec | TICK messages with inputs + majorityHash |
+| Download | ~320-500 bytes/sec | TICK messages (16 byte delta header when no creates/deletes) |
 
-This is significantly lower than the full distributed model since clients don't send partition data.
+**Key insight**: Because field updates are NOT transmitted (deterministic simulation), bandwidth is minimal and scales with entity spawn/despawn rate, not entity count or movement frequency.
 
 ---
 
@@ -1002,46 +1013,44 @@ function fillMissingPartition(partitionId, frame, majorityHash) {
 
 ---
 
-### HIGH: Delta Format Specification
+### Delta Format Specification (IMPLEMENTED ✅)
 
-**Problem:** Document says "compute stateDelta" but never defines the format.
-
-**Fix:**
+The delta format is designed for **deterministic simulation** where all clients compute identical field values. Only structural changes need to be transmitted.
 
 ```typescript
-// Delta Format Specification v1
+// Delta Format - Structural Changes Only
 interface StateDelta {
-  version: 1;
   frame: number;
-  baseStateHash: number;         // Hash of state BEFORE this delta
+  baseHash: number;              // Hash of state BEFORE this delta
+  resultHash: number;            // Hash of state AFTER this delta
 
-  created: EntitySnapshot[];     // New entities this frame
-  updated: EntityUpdate[];       // Changed entities
+  created: CreatedEntity[];      // New entities this frame
   deleted: number[];             // Deleted entity IDs
+  // NOTE: No 'updated' field - deterministic simulation means all clients
+  // compute identical field values from the same inputs
 }
 
-interface EntitySnapshot {
-  entityId: number;
-  typeId: number;                // Entity type for schema lookup
-  components: Uint8Array;        // Full component data
+interface CreatedEntity {
+  eid: number;
+  type: string;
+  clientId?: number;
+  components: Record<string, Record<string, number>>;  // All component data
 }
 
-interface EntityUpdate {
-  entityId: number;
-  changedMask: number;           // Bitmask: which components changed
-  componentData: Uint8Array;     // Only changed component data
-}
-
-// Binary format:
-// [version:1][frame:4][baseHash:4]
-// [createdCount:2][...created]
-// [updatedCount:2][...updated]
-// [deletedCount:2][...deleted entityIds]
-//
-// Created entry: [entityId:4][typeId:2][dataLen:2][data:N]
-// Updated entry: [entityId:4][changedMask:2][dataLen:2][data:N]
-// Deleted entry: [entityId:4]
+// Serialization: JSON (can optimize to binary later)
+// Typical size: 16 bytes when no creates/deletes (just header)
+// Created entity: ~50-100 bytes (includes all component data)
+// Deleted entity: ~4 bytes (just the eid)
 ```
+
+**Why no field updates?**
+
+In deterministic lockstep, all clients run identical simulation code with identical inputs. This means:
+- Position changes are computed locally, not transmitted
+- Velocity changes are computed locally, not transmitted
+- All field values are identical across clients by definition
+
+Only **structural changes** (entity creation/deletion) require transmission because they involve non-deterministic allocation (entity IDs, timing of spawns).
 
 ---
 

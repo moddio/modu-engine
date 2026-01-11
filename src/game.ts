@@ -160,8 +160,6 @@ export class Game {
     /** Local client ID (string form) */
     private localClientIdStr: string | null = null;
 
-    /** All connected client IDs (in join order for determinism) */
-    private connectedClients: string[] = [];
 
     /** Authority client (first joiner, sends snapshots) */
     private authorityClientId: string | null = null;
@@ -1044,7 +1042,7 @@ export class Game {
             };
 
             // DEBUG: Log state after catchup
-            console.log(`[ecs-debug] After catchup: activeClients=${this.activeClients.length} connectedClients=${this.connectedClients.length} entities=${this.world.entityCount} hash=${this.getStateHash()}`);
+            console.log(`[ecs-debug] After catchup: activeClients=${this.activeClients.length} entities=${this.world.entityCount} hash=${this.getStateHash()}`);
         } else {
             // === FIRST JOINER PATH ===
             if (DEBUG_NETWORK) console.log('[ecs] First join: creating room');
@@ -1053,10 +1051,7 @@ export class Game {
 
             // First joiner is always authority
             this.authorityClientId = clientId;
-            if (!this.connectedClients.includes(clientId)) {
-                this.connectedClients.push(clientId);
-            }
-            // Also add to activeClients for state sync
+            // Add to activeClients for state sync
             if (!this.activeClients.includes(clientId)) {
                 this.activeClients.push(clientId);
                 this.activeClients.sort();
@@ -1169,39 +1164,11 @@ export class Game {
             // Compute delta between previous and current state
             const delta = computeStateDelta(this.prevSnapshot, currentSnapshot);
 
-            // Debug: Only log when delta is unexpectedly large (> 10 updates or > 1KB)
             const deltaSize = getDeltaSize(delta);
-            if (delta.updated.length > 10 || deltaSize > 1000) {
-                console.log(`[delta-BUG] frame=${frame} updated=${delta.updated.length} created=${delta.created.length} deleted=${delta.deleted.length} bytes=${deltaSize}`);
-                console.log(`  activeClients=[${this.activeClients.join(',')}]`);
-                console.log(`  prevSnapshot: entityCount=${this.prevSnapshot.entityCount} frame=${this.prevSnapshot.frame}`);
-                console.log(`  currentSnapshot: entityCount=${currentSnapshot.entityCount} frame=${currentSnapshot.frame}`);
-                // Group by entity type and changed component
-                const byType: Record<string, number> = {};
-                const byComp: Record<string, number> = {};
-                for (const upd of delta.updated) {
-                    const entity = this.world.getEntity(upd.eid);
-                    const type = entity?.type || 'unknown';
-                    byType[type] = (byType[type] || 0) + 1;
-                    for (const comp of Object.keys(upd.changes)) {
-                        byComp[comp] = (byComp[comp] || 0) + 1;
-                    }
-                }
-                console.log(`  byType: ${JSON.stringify(byType)}`);
-                console.log(`  byComp: ${JSON.stringify(byComp)}`);
-                // Show first few updates
-                if (delta.updated.length > 0) {
-                    console.log(`  sample updates:`);
-                    for (const upd of delta.updated.slice(0, 5)) {
-                        const entity = this.world.getEntity(upd.eid);
-                        console.log(`    eid=${upd.eid} type=${entity?.type} changes=${JSON.stringify(upd.changes)}`);
-                    }
-                }
-            }
 
             // Log delta stats (once per second) - only when there's activity
             if (frame % 60 === 0 && !isDeltaEmpty(delta)) {
-                console.log(`[delta] frame=${frame} created=${delta.created.length} updated=${delta.updated.length} deleted=${delta.deleted.length} bytes=${deltaSize}`);
+                console.log(`[delta] frame=${frame} created=${delta.created.length} deleted=${delta.deleted.length} bytes=${deltaSize}`);
             }
 
             // Only send if there are actual changes
@@ -1222,7 +1189,6 @@ export class Game {
                     // Check if this partition has any actual changes before serializing
                     const hasChangesInPartition =
                         delta.created.some(e => (e.eid % numPartitions) === partitionId) ||
-                        delta.updated.some(e => (e.eid % numPartitions) === partitionId) ||
                         delta.deleted.some(eid => (eid % numPartitions) === partitionId);
 
                     if (hasChangesInPartition) {
@@ -1272,12 +1238,6 @@ export class Game {
         }
 
         if (type === 'join') {
-            // Track connected clients
-            const wasConnected = this.connectedClients.includes(clientId);
-            if (!wasConnected) {
-                this.connectedClients.push(clientId);
-            }
-
             // Update activeClients for state sync (sorted for deterministic assignment)
             const wasActive = this.activeClients.includes(clientId);
             if (!wasActive) {
@@ -1322,13 +1282,7 @@ export class Game {
                 this.pendingSnapshotUpload = true;
             }
         } else if (type === 'leave' || type === 'disconnect') {
-            // Remove from connected clients
-            const idx = this.connectedClients.indexOf(clientId);
-            if (idx !== -1) {
-                this.connectedClients.splice(idx, 1);
-            }
-
-            // Remove from activeClients for state sync
+            // Remove from activeClients
             const activeIdx = this.activeClients.indexOf(clientId);
             if (activeIdx !== -1) {
                 this.activeClients.splice(activeIdx, 1);
@@ -1336,7 +1290,7 @@ export class Game {
 
             // Transfer authority if needed
             if (clientId === this.authorityClientId) {
-                this.authorityClientId = this.connectedClients[0] || null;
+                this.authorityClientId = this.activeClients[0] || null;
             }
 
             if (DEBUG_NETWORK) {
@@ -1385,10 +1339,7 @@ export class Game {
         const type = data?.type;
 
         if (type === 'join') {
-            if (!this.connectedClients.includes(clientId)) {
-                this.connectedClients.push(clientId);
-            }
-            // Also update activeClients for state sync (same as processInput)
+            // Update activeClients for state sync
             if (!this.activeClients.includes(clientId)) {
                 this.activeClients.push(clientId);
                 this.activeClients.sort();
@@ -1397,17 +1348,13 @@ export class Game {
                 this.authorityClientId = clientId;
             }
         } else if (type === 'leave' || type === 'disconnect') {
-            const idx = this.connectedClients.indexOf(clientId);
-            if (idx !== -1) {
-                this.connectedClients.splice(idx, 1);
-            }
-            // Also update activeClients for state sync (same as processInput)
+            // Remove from activeClients
             const activeIdx = this.activeClients.indexOf(clientId);
             if (activeIdx !== -1) {
                 this.activeClients.splice(activeIdx, 1);
             }
             if (clientId === this.authorityClientId) {
-                this.authorityClientId = this.connectedClients[0] || null;
+                this.authorityClientId = this.activeClients[0] || null;
             }
         }
     }
@@ -1703,12 +1650,11 @@ export class Game {
 
         // Track which clients already have entities from the snapshot
         // This prevents duplicate entity creation during catchup
-        // ALSO populate activeClients and connectedClients for correct partition assignment
+        // ALSO populate activeClients for correct partition assignment
         this.clientsWithEntitiesFromSnapshot.clear();
-        // CRITICAL: Clear activeClients and connectedClients before populating from snapshot
+        // CRITICAL: Clear activeClients before populating from snapshot
         // Without this, stale clients remain after resync (e.g., client left but snapshot doesn't include them)
         this.activeClients.length = 0;
-        this.connectedClients.length = 0;
         for (const entity of this.world.query(Player)) {
             const player = entity.get(Player);
             if (player.clientId !== 0) {
@@ -1716,11 +1662,8 @@ export class Game {
                 if (clientIdStr) {
                     this.clientsWithEntitiesFromSnapshot.add(clientIdStr);
 
-                    // CRITICAL: Also add to connectedClients and activeClients
+                    // CRITICAL: Add to activeClients for partition assignment
                     // Without this, partition assignment differs between authority and late joiner
-                    if (!this.connectedClients.includes(clientIdStr)) {
-                        this.connectedClients.push(clientIdStr);
-                    }
                     if (!this.activeClients.includes(clientIdStr)) {
                         this.activeClients.push(clientIdStr);
                     }
@@ -1757,7 +1700,7 @@ export class Game {
         }
 
         // Always log snapshot loading for debugging
-        console.log(`[ecs-debug] Snapshot loaded: entities=${this.world.getAllEntities().length} activeClients=[${this.activeClients.join(',')}] connectedClients=[${this.connectedClients.join(',')}]`);
+        console.log(`[ecs-debug] Snapshot loaded: entities=${this.world.getAllEntities().length} activeClients=[${this.activeClients.join(',')}]`);
 
         if (DEBUG_NETWORK) {
             console.log(`[ecs] Snapshot loaded: ${this.world.getAllEntities().length} entities, hash=${this.getStateHash()}, activeClients=${this.activeClients.length}`);
@@ -2259,7 +2202,7 @@ export class Game {
      * Get connected clients.
      */
     getClients(): string[] {
-        return this.connectedClients;
+        return this.activeClients;
     }
 
     /**

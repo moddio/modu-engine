@@ -5,10 +5,9 @@
  * Used by the distributed state sync protocol.
  */
 
-import { xxhash32, xxhash32Combine } from '../hash/xxhash';
+import { xxhash32Combine } from '../hash/xxhash';
 import { SparseSnapshot, EntityMeta } from '../core/snapshot';
 import { getAllComponents } from '../core/component';
-import { INDEX_MASK } from '../core/constants';
 
 
 /**
@@ -27,9 +26,6 @@ export interface StateDelta {
   /** Newly created entities */
   created: CreatedEntity[];
 
-  /** Updated entities (partial data) */
-  updated: UpdatedEntity[];
-
   /** Deleted entity IDs */
   deleted: number[];
 }
@@ -45,14 +41,6 @@ export interface CreatedEntity {
   components: Record<string, Record<string, number>>;
 }
 
-/**
- * An entity with changed fields only.
- */
-export interface UpdatedEntity {
-  eid: number;
-  /** Component name -> field name -> new value (only changed fields) */
-  changes: Record<string, Record<string, number>>;
-}
 
 /**
  * Compute state delta between two snapshots.
@@ -63,18 +51,25 @@ export function computeStateDelta(
 ): StateDelta {
   const allComponents = getAllComponents();
 
-  // Build lookup for previous entities
-  const prevEntities = new Map<number, EntityMeta>();
-  const prevComponentData = new Map<number, Record<string, Record<string, number>>>();
-
+  // Build lookup for previous entity IDs
+  const prevEntityIds = new Set<number>();
   if (prevSnapshot) {
-    for (let i = 0; i < prevSnapshot.entityMeta.length; i++) {
-      const meta = prevSnapshot.entityMeta[i];
-      prevEntities.set(meta.eid, meta);
+    for (const meta of prevSnapshot.entityMeta) {
+      prevEntityIds.add(meta.eid);
+    }
+  }
 
-      // Extract component data for this entity
+  // Find created entities (need component data for new entities)
+  const created: CreatedEntity[] = [];
+  const deleted: number[] = [];
+
+  for (let i = 0; i < currentSnapshot.entityMeta.length; i++) {
+    const meta = currentSnapshot.entityMeta[i];
+
+    if (!prevEntityIds.has(meta.eid)) {
+      // New entity - extract component data
       const entityData: Record<string, Record<string, number>> = {};
-      for (const [compName, buffer] of prevSnapshot.componentData) {
+      for (const [compName, buffer] of currentSnapshot.componentData) {
         const component = allComponents.get(compName);
         if (!component) continue;
 
@@ -83,77 +78,37 @@ export function computeStateDelta(
         for (const fieldName of component.fieldNames) {
           const arr = component.storage.fields[fieldName];
           const bytesPerElement = arr.BYTES_PER_ELEMENT;
-          const packedArr = new (arr.constructor as any)(buffer, offset, prevSnapshot.entityCount);
+          const packedArr = new (arr.constructor as any)(buffer, offset, currentSnapshot.entityCount);
           fields[fieldName] = packedArr[i];
-          offset += prevSnapshot.entityCount * bytesPerElement;
+          offset += currentSnapshot.entityCount * bytesPerElement;
         }
         entityData[compName] = fields;
       }
-      prevComponentData.set(meta.eid, entityData);
-    }
-  }
 
-  // Build current entity data
-  const currentEntities = new Map<number, EntityMeta>();
-  const currentComponentData = new Map<number, Record<string, Record<string, number>>>();
-
-  for (let i = 0; i < currentSnapshot.entityMeta.length; i++) {
-    const meta = currentSnapshot.entityMeta[i];
-    currentEntities.set(meta.eid, meta);
-
-    // Extract component data for this entity
-    const entityData: Record<string, Record<string, number>> = {};
-    for (const [compName, buffer] of currentSnapshot.componentData) {
-      const component = allComponents.get(compName);
-      if (!component) continue;
-
-      const fields: Record<string, number> = {};
-      let offset = 0;
-      for (const fieldName of component.fieldNames) {
-        const arr = component.storage.fields[fieldName];
-        const bytesPerElement = arr.BYTES_PER_ELEMENT;
-        const packedArr = new (arr.constructor as any)(buffer, offset, currentSnapshot.entityCount);
-        fields[fieldName] = packedArr[i];
-        offset += currentSnapshot.entityCount * bytesPerElement;
-      }
-      entityData[compName] = fields;
-    }
-    currentComponentData.set(meta.eid, entityData);
-  }
-
-  // Compute delta
-  const created: CreatedEntity[] = [];
-  const updated: UpdatedEntity[] = [];
-  const deleted: number[] = [];
-
-  // Find created and updated entities
-  for (const [eid, meta] of currentEntities) {
-    const currentData = currentComponentData.get(eid)!;
-
-    if (!prevEntities.has(eid)) {
-      // New entity
       created.push({
-        eid,
+        eid: meta.eid,
         type: meta.type,
         clientId: meta.clientId,
-        components: currentData
+        components: entityData
       });
     }
-    // No field updates tracked - simulation is deterministic, all clients compute same values
   }
 
   // Find deleted entities
   if (prevSnapshot) {
-    for (const [eid] of prevEntities) {
-      if (!currentEntities.has(eid)) {
-        deleted.push(eid);
+    const currentEntityIds = new Set<number>();
+    for (const meta of currentSnapshot.entityMeta) {
+      currentEntityIds.add(meta.eid);
+    }
+    for (const meta of prevSnapshot.entityMeta) {
+      if (!currentEntityIds.has(meta.eid)) {
+        deleted.push(meta.eid);
       }
     }
   }
 
   // Sort for determinism
   created.sort((a, b) => a.eid - b.eid);
-  updated.sort((a, b) => a.eid - b.eid);
   deleted.sort((a, b) => a - b);
 
   return {
@@ -161,7 +116,6 @@ export function computeStateDelta(
     baseHash: prevSnapshot ? computeSnapshotHash(prevSnapshot) : 0,
     resultHash: computeSnapshotHash(currentSnapshot),
     created,
-    updated,
     deleted
   };
 }
@@ -245,11 +199,6 @@ export function getPartition(
     e => getEntityPartition(e.eid, numPartitions) === partitionId
   );
 
-  // Filter updated entities
-  const partitionUpdated = delta.updated.filter(
-    e => getEntityPartition(e.eid, numPartitions) === partitionId
-  );
-
   // Filter deleted entities
   const partitionDeleted = delta.deleted.filter(
     eid => getEntityPartition(eid, numPartitions) === partitionId
@@ -260,7 +209,6 @@ export function getPartition(
     numPartitions,
     frame: delta.frame,
     created: partitionCreated,
-    updated: partitionUpdated,
     deleted: partitionDeleted
   };
 
@@ -284,7 +232,6 @@ export interface PartitionDelta {
   numPartitions: number;
   frame: number;
   created: CreatedEntity[];
-  updated: UpdatedEntity[];
   deleted: number[];
 }
 
@@ -305,7 +252,6 @@ export function assemblePartitions(partitions: PartitionDelta[]): StateDelta | n
 
   // Verify all partitions are for the same frame
   const frame = partitions[0].frame;
-  const numPartitions = partitions[0].numPartitions;
 
   for (const p of partitions) {
     if (p.frame !== frame) {
@@ -316,18 +262,15 @@ export function assemblePartitions(partitions: PartitionDelta[]): StateDelta | n
 
   // Combine all partition data
   const created: CreatedEntity[] = [];
-  const updated: UpdatedEntity[] = [];
   const deleted: number[] = [];
 
   for (const p of partitions) {
     created.push(...p.created);
-    updated.push(...p.updated);
     deleted.push(...p.deleted);
   }
 
   // Sort for determinism
   created.sort((a, b) => a.eid - b.eid);
-  updated.sort((a, b) => a.eid - b.eid);
   deleted.sort((a, b) => a - b);
 
   return {
@@ -335,7 +278,6 @@ export function assemblePartitions(partitions: PartitionDelta[]): StateDelta | n
     baseHash: 0, // Not known from partitions
     resultHash: 0, // Not known from partitions
     created,
-    updated,
     deleted
   };
 }
@@ -347,9 +289,8 @@ export function assemblePartitions(partitions: PartitionDelta[]): StateDelta | n
 export function applyDelta(
   delta: StateDelta,
   createEntity: (eid: number, type: string, clientId?: number, components?: Record<string, Record<string, number>>) => void,
-  updateEntity: (eid: number, changes: Record<string, Record<string, number>>) => void,
   deleteEntity: (eid: number) => void
-): { created: number[]; updated: number[]; deleted: number[] } {
+): { created: number[]; deleted: number[] } {
   // Apply deletions first
   for (const eid of delta.deleted) {
     deleteEntity(eid);
@@ -360,14 +301,8 @@ export function applyDelta(
     createEntity(entity.eid, entity.type, entity.clientId, entity.components);
   }
 
-  // Apply updates
-  for (const entity of delta.updated) {
-    updateEntity(entity.eid, entity.changes);
-  }
-
   return {
     created: delta.created.map(e => e.eid),
-    updated: delta.updated.map(e => e.eid),
     deleted: delta.deleted
   };
 }
@@ -376,9 +311,7 @@ export function applyDelta(
  * Check if delta is empty (no changes).
  */
 export function isDeltaEmpty(delta: StateDelta): boolean {
-  return delta.created.length === 0 &&
-         delta.updated.length === 0 &&
-         delta.deleted.length === 0;
+  return delta.created.length === 0 && delta.deleted.length === 0;
 }
 
 /**
@@ -391,11 +324,6 @@ export function getDeltaSize(delta: StateDelta): number {
   for (const entity of delta.created) {
     size += 12; // eid + type overhead
     size += JSON.stringify(entity.components).length;
-  }
-
-  for (const entity of delta.updated) {
-    size += 4; // eid
-    size += JSON.stringify(entity.changes).length;
   }
 
   size += delta.deleted.length * 4; // 4 bytes per deleted eid

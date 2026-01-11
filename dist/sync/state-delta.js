@@ -79,29 +79,7 @@ export function computeStateDelta(prevSnapshot, currentSnapshot) {
                 components: currentData
             });
         }
-        else {
-            // Existing entity - check for changes
-            const prevData = prevComponentData.get(eid);
-            const changes = {};
-            let hasChanges = false;
-            for (const [compName, currentFields] of Object.entries(currentData)) {
-                const prevFields = prevData[compName] || {};
-                const fieldChanges = {};
-                for (const [fieldName, currentValue] of Object.entries(currentFields)) {
-                    const prevValue = prevFields[fieldName];
-                    if (prevValue !== currentValue) {
-                        fieldChanges[fieldName] = currentValue;
-                        hasChanges = true;
-                    }
-                }
-                if (Object.keys(fieldChanges).length > 0) {
-                    changes[compName] = fieldChanges;
-                }
-            }
-            if (hasChanges) {
-                updated.push({ eid, changes });
-            }
-        }
+        // No field updates tracked - simulation is deterministic, all clients compute same values
     }
     // Find deleted entities
     if (prevSnapshot) {

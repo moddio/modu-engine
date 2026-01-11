@@ -115,7 +115,7 @@ describe('Rejoin Bandwidth Spike Bug', () => {
             const delta = computeStateDelta(prevSnapshot, currentSnapshot);
             const size = getDeltaSize(delta);
             deltaSizes.push(size);
-            deltaUpdates.push(delta.updated.length);
+            deltaUpdates.push(0 /* updated removed - deterministic sim */);
         }
 
         // Update prevSnapshot (like real sendStateSync does)
@@ -200,7 +200,7 @@ describe('Rejoin Bandwidth Spike Bug', () => {
         // This is where the bug might manifest - check delta size immediately after rejoin
         const snapshotAfterJoin = (authority as any).world.getSparseSnapshot();
         const deltaAfterJoin = computeStateDelta((authority as any).prevSnapshot, snapshotAfterJoin);
-        console.log(`Delta IMMEDIATELY after rejoin: updated=${deltaAfterJoin.updated.length} created=${deltaAfterJoin.created.length} size=${getDeltaSize(deltaAfterJoin)} B`);
+        console.log(`Delta IMMEDIATELY after rejoin: updated=${0} created=${deltaAfterJoin.created.length} size=${getDeltaSize(deltaAfterJoin)} B`);
 
         // Update prevSnapshot
         (authority as any).prevSnapshot = snapshotAfterJoin;
@@ -241,13 +241,7 @@ describe('Rejoin Bandwidth Spike Bug', () => {
             const prevSnap = (authority as any).prevSnapshot;
             if (prevSnap) {
                 const delta = computeStateDelta(prevSnap, currentSnap);
-                const byType: Record<string, number> = {};
-                for (const upd of delta.updated) {
-                    const entity = authority.world.getEntity(upd.eid);
-                    const type = entity?.type || 'unknown';
-                    byType[type] = (byType[type] || 0) + 1;
-                }
-                console.log('Updates by type:', JSON.stringify(byType));
+                console.log('Created:', delta.created.length, 'Deleted:', delta.deleted.length);
             }
         }
 
@@ -339,7 +333,7 @@ describe('Rejoin Bandwidth Spike Bug', () => {
             const deltaAfterJoin = computeStateDelta((authority as any).prevSnapshot, snapshotAfterJoin);
             const deltaSize = getDeltaSize(deltaAfterJoin);
             rejoinDeltas.push(deltaSize);
-            console.log(`Rejoin ${rejoin + 1}: delta=${deltaSize} B, updated=${deltaAfterJoin.updated.length}, created=${deltaAfterJoin.created.length}`);
+            console.log(`Rejoin ${rejoin + 1}: delta=${deltaSize} B, updated=${0}, created=${deltaAfterJoin.created.length}`);
             console.log(`  activeClients: ${JSON.stringify((authority as any).activeClients)}`);
 
             (authority as any).prevSnapshot = snapshotAfterJoin;
@@ -432,7 +426,7 @@ describe('Rejoin Bandwidth Spike Bug', () => {
                 totalDeltaBytes += size;
 
                 if (i % 20 === 0) {
-                    console.log(`Frame ${i}: delta size=${size} B, updated=${delta.updated.length}`);
+                    console.log(`Frame ${i}: delta size=${size} B, updated=${0 /* updated removed - deterministic sim */}`);
                 }
             }
 

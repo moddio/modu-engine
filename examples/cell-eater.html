@@ -41,7 +41,7 @@ game.defineEntity('cell')
     .with(Transform2D)
     .with(Sprite, { shape: SHAPE_CIRCLE, radius: INITIAL_RADIUS, layer: 1 })
     .with(Body2D, { shapeType: SHAPE_CIRCLE, radius: INITIAL_RADIUS, bodyType: BODY_KINEMATIC, isSensor: true })
-    .with(Player)  // Player component marks entity as player-controlled
+    .with(Player)
     .register();
 
 game.defineEntity('food')
@@ -61,7 +61,6 @@ physics.onCollision('cell', 'food', (cell, food) => {
 });
 
 // Collision handler: cell eats smaller cell
-// Called twice per collision (A,B) and (B,A), so just check if first > second
 physics.onCollision('cell', 'cell', (eater, prey) => {
     const eaterSprite = eater.get(Sprite);
     const preySprite = prey.get(Sprite);
@@ -74,7 +73,6 @@ physics.onCollision('cell', 'cell', (eater, prey) => {
 
 // Helper to spawn food
 function spawnFood() {
-    // Use palette colors to avoid unbounded string interning
     const colorStr = COLORS[(dRandom() * COLORS.length) | 0];
     const color = game.internString('color', colorStr);
     game.spawn('food', {
@@ -86,7 +84,6 @@ function spawnFood() {
 
 // Helper to spawn cell for player
 function spawnCell(clientId) {
-    // Use palette colors to avoid unbounded string interning
     const colorStr = COLORS[(dRandom() * COLORS.length) | 0];
     const color = game.internString('color', colorStr);
     game.spawn('cell', {
@@ -97,7 +94,7 @@ function spawnCell(clientId) {
     });
 }
 
-// Movement system - uses deterministic helpers
+// Movement system
 game.addSystem(() => {
     for (const cell of game.query('cell')) {
         const player = cell.get(Player);
@@ -116,12 +113,16 @@ game.addSystem(() => {
     }
 }, { phase: 'update' });
 
-// Input - just define actions, plugin handles the rest
+// Input
 const input = game.addPlugin(InputPlugin, canvas);
 input.action('target', { type: 'vector', bindings: ['mouse'] });
 
-// Connect - no render callback needed, Simple2DRenderer handles it
-game.connect('cell-eater-ecs', {
+// Get room ID from URL query parameter or use default
+const urlParams = new URLSearchParams(window.location.search);
+const roomId = urlParams.get('room') || 'cell-eater-ecs';
+
+// Connect
+game.connect(roomId, {
     onRoomCreate() {
         for (let i = 0; i < FOOD_COUNT; i++) spawnFood();
     },

@@ -70,7 +70,7 @@ describe('Rejoin activeClients Bug', () => {
 
         console.log('=== INITIAL STATE ===');
         console.log('Authority activeClients:', (authority as any).activeClients);
-        console.log('Authority connectedClients:', (authority as any).connectedClients);
+        console.log('Authority activeClients:', (authority as any).activeClients);
         expect((authority as any).activeClients.length).toBe(2);
 
         // First client LEAVES
@@ -84,7 +84,7 @@ describe('Rejoin activeClients Bug', () => {
         (authority as any).world.tick(1);
 
         console.log('Authority activeClients after leave:', (authority as any).activeClients);
-        console.log('Authority connectedClients after leave:', (authority as any).connectedClients);
+        console.log('Authority activeClients after leave:', (authority as any).activeClients);
 
         // Should have 1 client now
         expect((authority as any).activeClients.length).toBe(1);
@@ -100,7 +100,7 @@ describe('Rejoin activeClients Bug', () => {
         (authority as any).world.tick(2);
 
         console.log('Authority activeClients after rejoin:', (authority as any).activeClients);
-        console.log('Authority connectedClients after rejoin:', (authority as any).connectedClients);
+        console.log('Authority activeClients after rejoin:', (authority as any).activeClients);
         expect((authority as any).activeClients.length).toBe(2);
 
         // Take snapshot for the new late joiner
@@ -129,7 +129,7 @@ describe('Rejoin activeClients Bug', () => {
 
         console.log('\n=== LATE JOINER STATE ===');
         console.log('Late joiner activeClients:', (lateJoiner as any).activeClients);
-        console.log('Late joiner connectedClients:', (lateJoiner as any).connectedClients);
+        console.log('Late joiner activeClients:', (lateJoiner as any).activeClients);
 
         // BUG CHECK
         console.log('\n=== BUG CHECK ===');

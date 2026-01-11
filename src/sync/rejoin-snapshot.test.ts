@@ -166,7 +166,7 @@ describe('Rejoin Snapshot Contents', () => {
         }
 
         console.log('Late joiner activeClients:', (lateJoiner as any).activeClients);
-        console.log('Late joiner connectedClients:', (lateJoiner as any).connectedClients);
+        console.log('Late joiner activeClients:', (lateJoiner as any).activeClients);
 
         // Verify late joiner has same entities
         expect(lateJoinerEntities.length).toBe(2);

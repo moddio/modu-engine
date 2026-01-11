@@ -108,7 +108,6 @@ function createSnapshot(
   return {
     frame,
     seq: 0,
-    entityMask: new Uint32Array(Math.ceil(entities.length / 32)),
     entityMeta,
     componentData: new Map(),
     entityCount: entities.length,
@@ -160,7 +159,6 @@ describe('Multi-Client Partition Sync', () => {
         expect(deltas[i].frame).toBe(baseline.frame);
         expect(deltas[i].created).toEqual(baseline.created);
         expect(deltas[i].deleted).toEqual(baseline.deleted);
-        expect(deltas[i].updated).toEqual(baseline.updated);
       }
 
       // Verify delta is correct
@@ -195,7 +193,6 @@ describe('Multi-Client Partition Sync', () => {
       // Delta should only have 2 changes, not 1000 entities
       expect(delta.created).toHaveLength(1);
       expect(delta.deleted).toHaveLength(1);
-      expect(delta.updated).toHaveLength(0);
 
       // Verify size is small
       const size = getDeltaSize(delta);
@@ -221,7 +218,6 @@ describe('Multi-Client Partition Sync', () => {
 
       expect(isDeltaEmpty(delta)).toBe(true);
       expect(delta.created).toHaveLength(0);
-      expect(delta.updated).toHaveLength(0);
       expect(delta.deleted).toHaveLength(0);
     });
   });
@@ -521,7 +517,6 @@ describe('Multi-Client Partition Sync', () => {
       // Should only have 20 changes (10 deleted, 10 created)
       expect(delta.created).toHaveLength(10);
       expect(delta.deleted).toHaveLength(10);
-      expect(delta.updated).toHaveLength(0);
     });
   });
 
@@ -547,7 +542,6 @@ describe('Multi-Client Partition Sync', () => {
         const delta = client.computeDelta();
         results.push(JSON.stringify({
           created: delta.created,
-          updated: delta.updated,
           deleted: delta.deleted
         }));
       }

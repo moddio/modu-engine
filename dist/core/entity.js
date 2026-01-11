@@ -245,6 +245,38 @@ export class Entity {
         body.vy = toFloat(fpDiv(fpMul(dy, speedFp), dist));
     }
     /**
+     * Move towards target, stopping when within stopRadius.
+     *
+     * @param target Target position {x, y}
+     * @param speed Speed in units per second
+     * @param stopRadius Radius within which to stop moving
+     */
+    moveTowardsWithStop(target, speed, stopRadius) {
+        if (!this.has(Transform2D) || !this.has(Body2D))
+            return;
+        const transform = this.get(Transform2D);
+        const body = this.get(Body2D);
+        // All math in fixed-point for determinism
+        const dx = toFixed(target.x) - toFixed(transform.x);
+        const dy = toFixed(target.y) - toFixed(transform.y);
+        // Distance squared
+        const distSq = fpMul(dx, dx) + fpMul(dy, dy);
+        const stopRadiusFp = toFixed(stopRadius);
+        const stopRadiusSq = fpMul(stopRadiusFp, stopRadiusFp);
+        // Stop if within stopRadius
+        if (distSq <= stopRadiusSq) {
+            body.vx = 0;
+            body.vy = 0;
+            return;
+        }
+        // Distance
+        const dist = fpSqrt(distSq);
+        // Normalize and scale by speed
+        const speedFp = toFixed(speed * 60);
+        body.vx = toFloat(fpDiv(fpMul(dx, speedFp), dist));
+        body.vy = toFloat(fpDiv(fpMul(dy, speedFp), dist));
+    }
+    /**
      * Stop all movement.
      */
     stop() {

@@ -134,6 +134,9 @@ export declare class Game {
     /** Hash comparison stats (rolling window) */
     private hashChecksPassed;
     private hashChecksFailed;
+    /** Previous frame's state hash (for desync comparison) */
+    private prevStateHash;
+    private prevStateHashFrame;
     /** String to ID mapping for clientIds */
     private clientIdToNum;
     private numToClientId;

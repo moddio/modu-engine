@@ -128,6 +128,17 @@ export declare class Entity {
         y: number;
     }, speed: number): void;
     /**
+     * Move towards target, stopping when within stopRadius.
+     *
+     * @param target Target position {x, y}
+     * @param speed Speed in units per second
+     * @param stopRadius Radius within which to stop moving
+     */
+    moveTowardsWithStop(target: {
+        x: number;
+        y: number;
+    }, speed: number, stopRadius: number): void;
+    /**
      * Stop all movement.
      */
     stop(): void;

@@ -155,7 +155,7 @@ describe('Rapid Rejoin Bug', () => {
                 const lateSnap = (lateJoiner as any).world.getSparseSnapshot();
 
                 const delta = computeStateDelta(authSnap, lateSnap);
-                console.log(`Delta: updated=${delta.updated.length} created=${delta.created.length} deleted=${delta.deleted.length}`);
+                console.log(`Delta: created=${delta.created.length} deleted=${delta.deleted.length}`);
             }
 
             lastLateJoiner = lateJoiner;

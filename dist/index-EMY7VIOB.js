@@ -1716,12 +1716,9 @@ var SparseSnapshotCodec = class {
    * Encode world state to sparse snapshot.
    */
   encode(activeEids, getEntityType, getEntityClientId, getComponentsForEntity, allocatorState, stringsState, frame = 0, seq = 0, rng) {
-    const entityMask = new Uint32Array(Math.ceil(MAX_ENTITIES / 32));
     const entityMeta = [];
     const sortedEids = [...activeEids].sort((a, b) => a - b);
     for (const eid of sortedEids) {
-      const index = eid & INDEX_MASK;
-      entityMask[index >>> 5] |= 1 << (index & 31);
       entityMeta.push({
         eid,
         type: getEntityType(eid),
@@ -1762,7 +1759,6 @@ var SparseSnapshotCodec = class {
     return {
       frame,
       seq,
-      entityMask,
       entityMeta,
       componentData,
       entityCount: sortedEids.length,
@@ -1812,7 +1808,6 @@ var SparseSnapshotCodec = class {
    */
   getSize(snapshot) {
     let size = 0;
-    size += snapshot.entityMask.byteLength;
     size += snapshot.entityMeta.length * 32;
     for (const buffer of snapshot.componentData.values()) {
       size += buffer.byteLength;
@@ -1837,12 +1832,10 @@ var SparseSnapshotCodec = class {
     const metaBytes = new TextEncoder().encode(metaJson);
     const metaLength = metaBytes.length;
     let componentDataSize = 0;
-    const componentSizes = [];
     for (const buffer2 of snapshot.componentData.values()) {
-      componentSizes.push(buffer2.byteLength);
       componentDataSize += buffer2.byteLength;
     }
-    const totalSize = 4 + metaLength + 4 + snapshot.entityMask.byteLength + componentDataSize;
+    const totalSize = 4 + metaLength + componentDataSize;
     const buffer = new ArrayBuffer(totalSize);
     const view = new DataView(buffer);
     let offset = 0;
@@ -1850,12 +1843,6 @@ var SparseSnapshotCodec = class {
     offset += 4;
     new Uint8Array(buffer, offset, metaLength).set(metaBytes);
     offset += metaLength;
-    view.setUint32(offset, snapshot.entityMask.byteLength, true);
-    offset += 4;
-    new Uint8Array(buffer, offset, snapshot.entityMask.byteLength).set(
-      new Uint8Array(snapshot.entityMask.buffer)
-    );
-    offset += snapshot.entityMask.byteLength;
     for (const compBuffer of snapshot.componentData.values()) {
       new Uint8Array(buffer, offset, compBuffer.byteLength).set(
         new Uint8Array(compBuffer)
@@ -1876,12 +1863,6 @@ var SparseSnapshotCodec = class {
     const metaJson = new TextDecoder().decode(metaBytes);
     const meta = JSON.parse(metaJson);
     offset += metaLength;
-    const maskLength = view.getUint32(offset, true);
-    offset += 4;
-    const entityMask = new Uint32Array(
-      buffer.slice(offset, offset + maskLength)
-    );
-    offset += maskLength;
     const componentData = /* @__PURE__ */ new Map();
     const allComponents = getAllComponents();
     for (const name of meta.componentNames) {
@@ -1900,7 +1881,6 @@ var SparseSnapshotCodec = class {
     return {
       frame: meta.frame,
       seq: meta.seq,
-      entityMask,
       entityMeta: meta.entityMeta,
       componentData,
       entityCount: meta.entityMeta.length,
@@ -3194,14 +3174,19 @@ function decode(data) {
 // src/sync/state-delta.ts
 function computeStateDelta(prevSnapshot, currentSnapshot) {
   const allComponents = getAllComponents();
-  const prevEntities = /* @__PURE__ */ new Map();
-  const prevComponentData = /* @__PURE__ */ new Map();
+  const prevEntityIds = /* @__PURE__ */ new Set();
   if (prevSnapshot) {
-    for (let i = 0; i < prevSnapshot.entityMeta.length; i++) {
-      const meta = prevSnapshot.entityMeta[i];
-      prevEntities.set(meta.eid, meta);
+    for (const meta of prevSnapshot.entityMeta) {
+      prevEntityIds.add(meta.eid);
+    }
+  }
+  const created = [];
+  const deleted = [];
+  for (let i = 0; i < currentSnapshot.entityMeta.length; i++) {
+    const meta = currentSnapshot.entityMeta[i];
+    if (!prevEntityIds.has(meta.eid)) {
       const entityData = {};
-      for (const [compName, buffer] of prevSnapshot.componentData) {
+      for (const [compName, buffer] of currentSnapshot.componentData) {
         const component = allComponents.get(compName);
         if (!component)
           continue;
@@ -3210,68 +3195,38 @@ function computeStateDelta(prevSnapshot, currentSnapshot) {
         for (const fieldName of component.fieldNames) {
           const arr = component.storage.fields[fieldName];
           const bytesPerElement = arr.BYTES_PER_ELEMENT;
-          const packedArr = new arr.constructor(buffer, offset, prevSnapshot.entityCount);
+          const packedArr = new arr.constructor(buffer, offset, currentSnapshot.entityCount);
           fields[fieldName] = packedArr[i];
-          offset += prevSnapshot.entityCount * bytesPerElement;
+          offset += currentSnapshot.entityCount * bytesPerElement;
         }
         entityData[compName] = fields;
       }
-      prevComponentData.set(meta.eid, entityData);
-    }
-  }
-  const currentEntities = /* @__PURE__ */ new Map();
-  const currentComponentData = /* @__PURE__ */ new Map();
-  for (let i = 0; i < currentSnapshot.entityMeta.length; i++) {
-    const meta = currentSnapshot.entityMeta[i];
-    currentEntities.set(meta.eid, meta);
-    const entityData = {};
-    for (const [compName, buffer] of currentSnapshot.componentData) {
-      const component = allComponents.get(compName);
-      if (!component)
-        continue;
-      const fields = {};
-      let offset = 0;
-      for (const fieldName of component.fieldNames) {
-        const arr = component.storage.fields[fieldName];
-        const bytesPerElement = arr.BYTES_PER_ELEMENT;
-        const packedArr = new arr.constructor(buffer, offset, currentSnapshot.entityCount);
-        fields[fieldName] = packedArr[i];
-        offset += currentSnapshot.entityCount * bytesPerElement;
-      }
-      entityData[compName] = fields;
-    }
-    currentComponentData.set(meta.eid, entityData);
-  }
-  const created = [];
-  const updated = [];
-  const deleted = [];
-  for (const [eid, meta] of currentEntities) {
-    const currentData = currentComponentData.get(eid);
-    if (!prevEntities.has(eid)) {
       created.push({
-        eid,
+        eid: meta.eid,
         type: meta.type,
         clientId: meta.clientId,
-        components: currentData
+        components: entityData
       });
     }
   }
   if (prevSnapshot) {
-    for (const [eid] of prevEntities) {
-      if (!currentEntities.has(eid)) {
-        deleted.push(eid);
+    const currentEntityIds = /* @__PURE__ */ new Set();
+    for (const meta of currentSnapshot.entityMeta) {
+      currentEntityIds.add(meta.eid);
+    }
+    for (const meta of prevSnapshot.entityMeta) {
+      if (!currentEntityIds.has(meta.eid)) {
+        deleted.push(meta.eid);
       }
     }
   }
   created.sort((a, b) => a.eid - b.eid);
-  updated.sort((a, b) => a.eid - b.eid);
   deleted.sort((a, b) => a - b);
   return {
     frame: currentSnapshot.frame,
     baseHash: prevSnapshot ? computeSnapshotHash(prevSnapshot) : 0,
     resultHash: computeSnapshotHash(currentSnapshot),
     created,
-    updated,
     deleted
   };
 }
@@ -3314,9 +3269,6 @@ function getPartition(delta, partitionId, numPartitions) {
   const partitionCreated = delta.created.filter(
     (e) => getEntityPartition(e.eid, numPartitions) === partitionId
   );
-  const partitionUpdated = delta.updated.filter(
-    (e) => getEntityPartition(e.eid, numPartitions) === partitionId
-  );
   const partitionDeleted = delta.deleted.filter(
     (eid) => getEntityPartition(eid, numPartitions) === partitionId
   );
@@ -3325,7 +3277,6 @@ function getPartition(delta, partitionId, numPartitions) {
     numPartitions,
     frame: delta.frame,
     created: partitionCreated,
-    updated: partitionUpdated,
     deleted: partitionDeleted
   };
   const json = JSON.stringify(partitionDelta);
@@ -3344,7 +3295,6 @@ function assemblePartitions(partitions) {
   if (partitions.length === 0)
     return null;
   const frame = partitions[0].frame;
-  const numPartitions = partitions[0].numPartitions;
   for (const p of partitions) {
     if (p.frame !== frame) {
       console.warn("Partition frame mismatch");
@@ -3352,15 +3302,12 @@ function assemblePartitions(partitions) {
     }
   }
   const created = [];
-  const updated = [];
   const deleted = [];
   for (const p of partitions) {
     created.push(...p.created);
-    updated.push(...p.updated);
     deleted.push(...p.deleted);
   }
   created.sort((a, b) => a.eid - b.eid);
-  updated.sort((a, b) => a.eid - b.eid);
   deleted.sort((a, b) => a - b);
   return {
     frame,
@@ -3369,38 +3316,29 @@ function assemblePartitions(partitions) {
     resultHash: 0,
     // Not known from partitions
     created,
-    updated,
     deleted
   };
 }
-function applyDelta(delta, createEntity, updateEntity, deleteEntity) {
+function applyDelta(delta, createEntity, deleteEntity) {
   for (const eid of delta.deleted) {
     deleteEntity(eid);
   }
   for (const entity of delta.created) {
     createEntity(entity.eid, entity.type, entity.clientId, entity.components);
   }
-  for (const entity of delta.updated) {
-    updateEntity(entity.eid, entity.changes);
-  }
   return {
     created: delta.created.map((e) => e.eid),
-    updated: delta.updated.map((e) => e.eid),
     deleted: delta.deleted
   };
 }
 function isDeltaEmpty(delta) {
-  return delta.created.length === 0 && delta.updated.length === 0 && delta.deleted.length === 0;
+  return delta.created.length === 0 && delta.deleted.length === 0;
 }
 function getDeltaSize(delta) {
   let size = 16;
   for (const entity of delta.created) {
     size += 12;
     size += JSON.stringify(entity.components).length;
-  }
-  for (const entity of delta.updated) {
-    size += 4;
-    size += JSON.stringify(entity.changes).length;
   }
   size += delta.deleted.length * 4;
   return size;
@@ -3562,8 +3500,6 @@ var Game = class {
     this.connectedRoomId = null;
     /** Local client ID (string form) */
     this.localClientIdStr = null;
-    /** All connected client IDs (in join order for determinism) */
-    this.connectedClients = [];
     /** Authority client (first joiner, sends snapshots) */
     this.authorityClientId = null;
     /** Current server frame */
@@ -4230,15 +4166,12 @@ var Game = class {
         frame: this.currentFrame,
         hash: this.getStateHash()
       };
-      console.log(`[ecs-debug] After catchup: activeClients=${this.activeClients.length} connectedClients=${this.connectedClients.length} entities=${this.world.entityCount} hash=${this.getStateHash()}`);
+      console.log(`[ecs-debug] After catchup: activeClients=${this.activeClients.length} entities=${this.world.entityCount} hash=${this.getStateHash()}`);
     } else {
       if (DEBUG_NETWORK)
         console.log("[ecs] First join: creating room");
       this.currentFrame = frame;
       this.authorityClientId = clientId;
-      if (!this.connectedClients.includes(clientId)) {
-        this.connectedClients.push(clientId);
-      }
       if (!this.activeClients.includes(clientId)) {
         this.activeClients.push(clientId);
         this.activeClients.sort();
@@ -4310,33 +4243,8 @@ var Game = class {
     if (this.activeClients.length > 1 && this.connection.clientId && this.connection.sendPartitionData && this.prevSnapshot) {
       const delta = computeStateDelta(this.prevSnapshot, currentSnapshot);
       const deltaSize = getDeltaSize(delta);
-      if (delta.updated.length > 10 || deltaSize > 1e3) {
-        console.log(`[delta-BUG] frame=${frame} updated=${delta.updated.length} created=${delta.created.length} deleted=${delta.deleted.length} bytes=${deltaSize}`);
-        console.log(`  activeClients=[${this.activeClients.join(",")}]`);
-        console.log(`  prevSnapshot: entityCount=${this.prevSnapshot.entityCount} frame=${this.prevSnapshot.frame}`);
-        console.log(`  currentSnapshot: entityCount=${currentSnapshot.entityCount} frame=${currentSnapshot.frame}`);
-        const byType = {};
-        const byComp = {};
-        for (const upd of delta.updated) {
-          const entity = this.world.getEntity(upd.eid);
-          const type = entity?.type || "unknown";
-          byType[type] = (byType[type] || 0) + 1;
-          for (const comp of Object.keys(upd.changes)) {
-            byComp[comp] = (byComp[comp] || 0) + 1;
-          }
-        }
-        console.log(`  byType: ${JSON.stringify(byType)}`);
-        console.log(`  byComp: ${JSON.stringify(byComp)}`);
-        if (delta.updated.length > 0) {
-          console.log(`  sample updates:`);
-          for (const upd of delta.updated.slice(0, 5)) {
-            const entity = this.world.getEntity(upd.eid);
-            console.log(`    eid=${upd.eid} type=${entity?.type} changes=${JSON.stringify(upd.changes)}`);
-          }
-        }
-      }
       if (frame % 60 === 0 && !isDeltaEmpty(delta)) {
-        console.log(`[delta] frame=${frame} created=${delta.created.length} updated=${delta.updated.length} deleted=${delta.deleted.length} bytes=${deltaSize}`);
+        console.log(`[delta] frame=${frame} created=${delta.created.length} deleted=${delta.deleted.length} bytes=${deltaSize}`);
       }
       if (!isDeltaEmpty(delta)) {
         const entityCount = this.world.entityCount;
@@ -4349,7 +4257,7 @@ var Game = class {
         );
         const myPartitions = getClientPartitions(assignment, this.connection.clientId);
         for (const partitionId of myPartitions) {
-          const hasChangesInPartition = delta.created.some((e) => e.eid % numPartitions === partitionId) || delta.updated.some((e) => e.eid % numPartitions === partitionId) || delta.deleted.some((eid) => eid % numPartitions === partitionId);
+          const hasChangesInPartition = delta.created.some((e) => e.eid % numPartitions === partitionId) || delta.deleted.some((eid) => eid % numPartitions === partitionId);
           if (hasChangesInPartition) {
             const partitionData = getPartition(delta, partitionId, numPartitions);
             this.connection.sendPartitionData(frame, partitionId, partitionData);
@@ -4388,10 +4296,6 @@ var Game = class {
       this.lastInputSeq = input.seq;
     }
     if (type === "join") {
-      const wasConnected = this.connectedClients.includes(clientId);
-      if (!wasConnected) {
-        this.connectedClients.push(clientId);
-      }
       const wasActive = this.activeClients.includes(clientId);
       if (!wasActive) {
         this.activeClients.push(clientId);
@@ -4417,16 +4321,12 @@ var Game = class {
         this.pendingSnapshotUpload = true;
       }
     } else if (type === "leave" || type === "disconnect") {
-      const idx = this.connectedClients.indexOf(clientId);
-      if (idx !== -1) {
-        this.connectedClients.splice(idx, 1);
-      }
       const activeIdx = this.activeClients.indexOf(clientId);
       if (activeIdx !== -1) {
         this.activeClients.splice(activeIdx, 1);
       }
       if (clientId === this.authorityClientId) {
-        this.authorityClientId = this.connectedClients[0] || null;
+        this.authorityClientId = this.activeClients[0] || null;
       }
       if (DEBUG_NETWORK) {
         console.log(`[ecs] Leave: ${clientId.slice(0, 8)}, new authority=${this.authorityClientId?.slice(0, 8)}`);
@@ -4464,9 +4364,6 @@ var Game = class {
     const clientId = data?.clientId || input.clientId;
     const type = data?.type;
     if (type === "join") {
-      if (!this.connectedClients.includes(clientId)) {
-        this.connectedClients.push(clientId);
-      }
       if (!this.activeClients.includes(clientId)) {
         this.activeClients.push(clientId);
         this.activeClients.sort();
@@ -4475,16 +4372,12 @@ var Game = class {
         this.authorityClientId = clientId;
       }
     } else if (type === "leave" || type === "disconnect") {
-      const idx = this.connectedClients.indexOf(clientId);
-      if (idx !== -1) {
-        this.connectedClients.splice(idx, 1);
-      }
       const activeIdx = this.activeClients.indexOf(clientId);
       if (activeIdx !== -1) {
         this.activeClients.splice(activeIdx, 1);
       }
       if (clientId === this.authorityClientId) {
-        this.authorityClientId = this.connectedClients[0] || null;
+        this.authorityClientId = this.activeClients[0] || null;
       }
     }
   }
@@ -4698,16 +4591,12 @@ var Game = class {
     }
     this.clientsWithEntitiesFromSnapshot.clear();
     this.activeClients.length = 0;
-    this.connectedClients.length = 0;
     for (const entity of this.world.query(Player)) {
       const player = entity.get(Player);
       if (player.clientId !== 0) {
         const clientIdStr = this.getClientIdString(player.clientId);
         if (clientIdStr) {
           this.clientsWithEntitiesFromSnapshot.add(clientIdStr);
-          if (!this.connectedClients.includes(clientIdStr)) {
-            this.connectedClients.push(clientIdStr);
-          }
           if (!this.activeClients.includes(clientIdStr)) {
             this.activeClients.push(clientIdStr);
           }
@@ -4730,7 +4619,7 @@ var Game = class {
     if (snapshot.inputState) {
       this.world.setInputState(snapshot.inputState);
     }
-    console.log(`[ecs-debug] Snapshot loaded: entities=${this.world.getAllEntities().length} activeClients=[${this.activeClients.join(",")}] connectedClients=[${this.connectedClients.join(",")}]`);
+    console.log(`[ecs-debug] Snapshot loaded: entities=${this.world.getAllEntities().length} activeClients=[${this.activeClients.join(",")}]`);
     if (DEBUG_NETWORK) {
       console.log(`[ecs] Snapshot loaded: ${this.world.getAllEntities().length} entities, hash=${this.getStateHash()}, activeClients=${this.activeClients.length}`);
       const firstEntity = this.world.getAllEntities()[0];
@@ -5130,7 +5019,7 @@ var Game = class {
    * Get connected clients.
    */
   getClients() {
-    return this.connectedClients;
+    return this.activeClients;
   }
   /**
    * Get client ID (for debug UI).
@@ -8900,3 +8789,4 @@ export {
   xxhash32Combine,
   xxhash32String
 };
+//# sourceMappingURL=index-EMY7VIOB.js.map

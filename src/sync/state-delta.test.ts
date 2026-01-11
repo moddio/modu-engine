@@ -11,8 +11,7 @@ import {
   isDeltaEmpty,
   getDeltaSize,
   StateDelta,
-  CreatedEntity,
-  UpdatedEntity
+  CreatedEntity
 } from './state-delta';
 import { SparseSnapshot, EntityMeta } from '../core/snapshot';
 
@@ -32,7 +31,6 @@ function createMockSnapshot(
   return {
     frame,
     seq: 0,
-    entityMask: new Uint32Array(1),
     entityMeta,
     componentData: new Map(),
     entityCount: entities.length,
@@ -53,7 +51,6 @@ describe('computeStateDelta', () => {
     expect(delta.created).toHaveLength(1);
     expect(delta.created[0].eid).toBe(1);
     expect(delta.created[0].type).toBe('Player');
-    expect(delta.updated).toHaveLength(0);
     expect(delta.deleted).toHaveLength(0);
   });
 
@@ -66,7 +63,6 @@ describe('computeStateDelta', () => {
     const delta = computeStateDelta(prev, curr);
 
     expect(delta.created).toHaveLength(0);
-    expect(delta.updated).toHaveLength(0);
     expect(delta.deleted).toHaveLength(1);
     expect(delta.deleted[0]).toBe(1);
   });
@@ -101,7 +97,6 @@ describe('computeStateDelta', () => {
     const delta = computeStateDelta(snapshot, snapshot);
 
     expect(delta.created).toHaveLength(0);
-    expect(delta.updated).toHaveLength(0);
     expect(delta.deleted).toHaveLength(0);
     expect(isDeltaEmpty(delta)).toBe(true);
   });
@@ -156,9 +151,6 @@ describe('serializeDelta / deserializeDelta', () => {
       created: [
         { eid: 1, type: 'Player', clientId: 5, components: { Transform2D: { x: 100, y: 200 } } }
       ],
-      updated: [
-        { eid: 2, changes: { Transform2D: { x: 150 } } }
-      ],
       deleted: [3, 4, 5]
     };
 
@@ -169,7 +161,6 @@ describe('serializeDelta / deserializeDelta', () => {
     expect(restored.baseHash).toBe(0xDEADBEEF);
     expect(restored.resultHash).toBe(0xCAFEBABE);
     expect(restored.created).toEqual(delta.created);
-    expect(restored.updated).toEqual(delta.updated);
     expect(restored.deleted).toEqual([3, 4, 5]);
   });
 
@@ -179,7 +170,6 @@ describe('serializeDelta / deserializeDelta', () => {
       baseHash: 0,
       resultHash: 0,
       created: [],
-      updated: [],
       deleted: []
     };
 
@@ -233,7 +223,6 @@ describe('getPartition', () => {
         { eid: 4, type: 'E', components: {} }, // partition 1 (4 % 3 = 1)
         { eid: 5, type: 'F', components: {} }  // partition 2 (5 % 3 = 2)
       ],
-      updated: [],
       deleted: []
     };
 
@@ -252,7 +241,6 @@ describe('getPartition', () => {
       baseHash: 0,
       resultHash: 0,
       created: [{ eid: 0, type: 'A', components: {} }],
-      updated: [],
       deleted: []
     };
 
@@ -269,7 +257,6 @@ describe('getPartition', () => {
       baseHash: 0,
       resultHash: 0,
       created: [],
-      updated: [],
       deleted: [0, 1, 2, 3, 4, 5]
     };
 
@@ -294,7 +281,6 @@ describe('assemblePartitions', () => {
         { eid: 1, type: 'B', components: {} },
         { eid: 2, type: 'C', components: {} }
       ],
-      updated: [],
       deleted: [3, 4, 5]
     };
 
@@ -316,8 +302,8 @@ describe('assemblePartitions', () => {
   });
 
   test('returns null for frame mismatch', () => {
-    const p1 = { partitionId: 0, numPartitions: 2, frame: 1, created: [], updated: [], deleted: [] };
-    const p2 = { partitionId: 1, numPartitions: 2, frame: 2, created: [], updated: [], deleted: [] };
+    const p1 = { partitionId: 0, numPartitions: 2, frame: 1, created: [], deleted: [] };
+    const p2 = { partitionId: 1, numPartitions: 2, frame: 2, created: [], deleted: [] };
 
     const result = assemblePartitions([p1, p2]);
     expect(result).toBeNull();
@@ -333,7 +319,6 @@ describe('assemblePartitions', () => {
         { eid: 1, type: 'B', components: {} },
         { eid: 2, type: 'C', components: {} }
       ],
-      updated: [],
       deleted: []
     };
 
@@ -391,7 +376,6 @@ describe('isDeltaEmpty', () => {
       baseHash: 0,
       resultHash: 0,
       created: [],
-      updated: [],
       deleted: []
     };
     expect(isDeltaEmpty(delta)).toBe(true);
@@ -403,19 +387,6 @@ describe('isDeltaEmpty', () => {
       baseHash: 0,
       resultHash: 0,
       created: [{ eid: 1, type: 'A', components: {} }],
-      updated: [],
-      deleted: []
-    };
-    expect(isDeltaEmpty(delta)).toBe(false);
-  });
-
-  test('returns false with updated entities', () => {
-    const delta: StateDelta = {
-      frame: 0,
-      baseHash: 0,
-      resultHash: 0,
-      created: [],
-      updated: [{ eid: 1, changes: {} }],
       deleted: []
     };
     expect(isDeltaEmpty(delta)).toBe(false);
@@ -427,7 +398,6 @@ describe('isDeltaEmpty', () => {
       baseHash: 0,
       resultHash: 0,
       created: [],
-      updated: [],
       deleted: [1]
     };
     expect(isDeltaEmpty(delta)).toBe(false);
@@ -443,7 +413,6 @@ describe('getDeltaSize', () => {
       created: [
         { eid: 1, type: 'Player', components: { Transform2D: { x: 100, y: 200 } } }
       ],
-      updated: [],
       deleted: [2, 3, 4]
     };
 
@@ -458,7 +427,6 @@ describe('getDeltaSize', () => {
       baseHash: 0,
       resultHash: 0,
       created: [],
-      updated: [],
       deleted: []
     };
 

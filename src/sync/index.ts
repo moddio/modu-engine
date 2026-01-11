@@ -10,7 +10,6 @@ export {
     // Delta computation
     StateDelta,
     CreatedEntity,
-    UpdatedEntity,
     PartitionDelta,
     computeStateDelta,
     computeSnapshotHash,

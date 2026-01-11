@@ -1,8 +1,9 @@
 /**
  * Delta Performance Test
  *
- * Tests that delta computation correctly identifies only changed entities.
- * This reproduces the issue where delta bandwidth was 9.3 kB/s when only 2 entities moved.
+ * Tests that delta computation correctly identifies only structural changes (creates/deletes).
+ * Field changes are NOT tracked because simulation is deterministic - all clients compute
+ * identical field values from the same inputs.
  */
 import { describe, test, expect, beforeEach, afterEach } from 'vitest';
 import { World } from '../core/world';
@@ -14,18 +15,15 @@ describe('Delta Performance', () => {
     let world: World;
 
     beforeEach(() => {
-        // Don't clear component registry - components are registered at module load
-        // and cannot be re-registered
         world = new World();
     });
 
     afterEach(() => {
-        // Reset world state
         world.reset();
     });
 
-    test('detects only changed entities when most are static', () => {
-        // Define entity types using the correct World API
+    test('field changes do not affect delta (deterministic simulation)', () => {
+        // Define entity types
         world.defineEntity('food')
             .with(Transform2D)
             .with(Sprite, { shape: SHAPE_CIRCLE, radius: 8 })
@@ -49,8 +47,11 @@ describe('Delta Performance', () => {
         world.frame = 1;
         const snapshot1 = world.getSparseSnapshot();
 
-        // Move only the cells - modify the raw storage directly for accuracy
-        // Note: entity.get(Transform2D) returns a proxy that handles fixed-point conversion
+        console.log('Snapshot 1:');
+        console.log('  entityCount:', snapshot1.entityCount);
+        console.log('  componentData keys:', Array.from(snapshot1.componentData.keys()));
+
+        // Move only the cells - modify the raw storage directly
         const index1 = cell1.eid & INDEX_MASK;
         const index2 = cell2.eid & INDEX_MASK;
         Transform2D.storage.fields['x'][index1] = 110 * 65536;
@@ -62,29 +63,18 @@ describe('Delta Performance', () => {
         world.frame = 2;
         const snapshot2 = world.getSparseSnapshot();
 
-        // Debug: examine snapshots
-        console.log('Snapshot 1:');
-        console.log('  entityCount:', snapshot1.entityCount);
-        console.log('  componentData keys:', Array.from(snapshot1.componentData.keys()));
-
         // Compute delta
         const delta = computeStateDelta(snapshot1, snapshot2);
 
         console.log('Delta stats:');
         console.log('  Created:', delta.created.length);
-        console.log('  Updated:', delta.updated.length);
         console.log('  Deleted:', delta.deleted.length);
         console.log('  Delta size:', getDeltaSize(delta), 'bytes');
 
-        // Should only have 2 updated entities (the cells that moved)
+        // Field changes should NOT appear in delta (deterministic simulation)
         expect(delta.created.length).toBe(0);
         expect(delta.deleted.length).toBe(0);
-        expect(delta.updated.length).toBe(2); // Only the 2 cells that moved
-
-        // Verify the updated entities are the cells
-        const updatedEids = delta.updated.map(u => u.eid);
-        expect(updatedEids).toContain(cell1.eid);
-        expect(updatedEids).toContain(cell2.eid);
+        expect(isDeltaEmpty(delta)).toBe(true);
     });
 
     test('identical snapshots produce empty delta', () => {
@@ -109,42 +99,38 @@ describe('Delta Performance', () => {
 
         expect(isDeltaEmpty(delta)).toBe(true);
         expect(delta.created.length).toBe(0);
-        expect(delta.updated.length).toBe(0);
         expect(delta.deleted.length).toBe(0);
     });
 
-    test('only includes changed fields in updates', () => {
-        world.defineEntity('movableEntity')
+    test('delta tracks entity creation', () => {
+        world.defineEntity('entity')
             .with(Transform2D)
             .with(Sprite);
 
-        const entity = world.spawn('movableEntity', { x: 100, y: 200 });
+        // Initial state: 10 entities
+        for (let i = 0; i < 10; i++) {
+            world.spawn('entity', { x: i * 10, y: i * 10 });
+        }
 
         world.frame = 1;
         const snapshot1 = world.getSparseSnapshot();
 
-        // Only change x, not y or angle (directly modify storage)
-        const index = entity.eid & INDEX_MASK;
-        Transform2D.storage.fields['x'][index] = 150 * 65536;
+        // Add 5 more entities
+        for (let i = 0; i < 5; i++) {
+            world.spawn('entity', { x: 100 + i * 10, y: 100 + i * 10 });
+        }
 
         world.frame = 2;
         const snapshot2 = world.getSparseSnapshot();
 
         const delta = computeStateDelta(snapshot1, snapshot2);
 
-        expect(delta.updated.length).toBe(1);
-        const update = delta.updated[0];
-        expect(update.eid).toBe(entity.eid);
-
-        // Should only have Transform2D.x changed
-        expect(update.changes['Transform2D']).toBeDefined();
-        expect(update.changes['Transform2D'].x).toBe(150 * 65536);
-        // y and angle should NOT be in changes since they didn't change
-        expect(update.changes['Transform2D'].y).toBeUndefined();
-        expect(update.changes['Transform2D'].angle).toBeUndefined();
+        // Should detect 5 new entities
+        expect(delta.created.length).toBe(5);
+        expect(delta.deleted.length).toBe(0);
     });
 
-    test('large world with few moving entities has small delta', () => {
+    test('large world with field changes has minimal delta (deterministic)', () => {
         // This simulates the cell-eater scenario: 1604 entities, only 2 moving
         world.defineEntity('staticPellet')
             .with(Transform2D)
@@ -188,19 +174,17 @@ describe('Delta Performance', () => {
         console.log('Large world delta stats:');
         console.log('  Total entities:', world.entityCount);
         console.log('  Created:', delta.created.length);
-        console.log('  Updated:', delta.updated.length);
         console.log('  Deleted:', delta.deleted.length);
         console.log('  Delta size:', getDeltaSize(delta), 'bytes');
 
-        // CRITICAL: Should only have 4 updated entities (the moving cells)
-        // If this shows more than 4, there's a bug in delta computation
-        expect(delta.updated.length).toBe(4);
+        // Field changes don't affect delta (deterministic simulation)
+        // Delta should be empty since no entities were created or deleted
         expect(delta.created.length).toBe(0);
         expect(delta.deleted.length).toBe(0);
+        expect(isDeltaEmpty(delta)).toBe(true);
 
-        // Delta should be small (< 1KB) for just 4 entity updates
+        // Delta should be minimal (just header, 16 bytes)
         const deltaSize = getDeltaSize(delta);
-        expect(deltaSize).toBeLessThan(1000);
-        console.log('  Expected ~4 updates, got', delta.updated.length);
+        expect(deltaSize).toBe(16);
     });
 });
