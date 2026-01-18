@@ -6193,7 +6193,7 @@ function disableDeterminismGuard() {
 }
 
 // src/version.ts
-var ENGINE_VERSION = "c5102b4";
+var ENGINE_VERSION = "e376586";
 
 // src/plugins/debug-ui.ts
 var debugDiv = null;
