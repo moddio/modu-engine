@@ -87,6 +87,8 @@ export class EntityBuilder {
 /**
  * ECS World - main container for all ECS state.
  */
+/** Bit marker for local-only (syncNone) entity IDs - distinguishes from synced entities */
+export const LOCAL_ENTITY_BIT = 0x40000000;
 export class World {
     constructor() {
         /** Entity definitions */
@@ -138,6 +140,7 @@ export class World {
         /** Local client ID for this client */
         this.localClientId = null;
         this.idAllocator = new EntityIdAllocator();
+        this.localIdAllocator = new EntityIdAllocator(); // Separate allocator for syncNone entities
         this.entityPool = new EntityPool();
         this.strings = new StringRegistry();
         // Create query engine with callbacks
@@ -214,8 +217,19 @@ export class World {
         if (!def) {
             throw new Error(`Unknown entity type: '${typeName}'`);
         }
-        // Allocate entity ID
-        const eid = this.idAllocator.allocate();
+        // Check if this is a syncNone (local-only) entity
+        const isSyncNone = def.syncFields && def.syncFields.length === 0;
+        // Allocate entity ID - use separate allocator for syncNone to avoid state divergence
+        let eid;
+        if (isSyncNone) {
+            // Local-only entities use localIdAllocator with high bit marker
+            const localEid = this.localIdAllocator.allocate();
+            eid = localEid | LOCAL_ENTITY_BIT; // Mark as local entity
+        }
+        else {
+            // Synced entities use main allocator
+            eid = this.idAllocator.allocate();
+        }
         const index = eid & INDEX_MASK;
         // Get entity wrapper
         const entity = this.entityPool.acquire(eid);
@@ -414,8 +428,15 @@ export class World {
         this.entityClientIds.delete(eid);
         // Return entity wrapper to pool
         this.entityPool.release(eid);
-        // Free entity ID
-        this.idAllocator.free(eid);
+        // Free entity ID to the correct allocator
+        if (eid & LOCAL_ENTITY_BIT) {
+            // Local entity - strip the marker bit and free to localIdAllocator
+            this.localIdAllocator.free(eid & ~LOCAL_ENTITY_BIT);
+        }
+        else {
+            // Synced entity - free to main allocator
+            this.idAllocator.free(eid);
+        }
     }
     /**
      * Get entity by eid.
@@ -670,8 +691,9 @@ export class World {
         this.entityClientIds.clear();
         // Clear indices
         this.queryEngine.clear();
-        // Reset allocator
+        // Reset allocators
         this.idAllocator.reset();
+        this.localIdAllocator.reset();
         // Clear strings
         this.strings.clear();
     }

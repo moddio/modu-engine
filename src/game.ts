@@ -10,7 +10,7 @@
  * - game.connect() → Network connection with distributed state sync
  */
 
-import { World, EntityBuilder, NetworkInput } from './core/world';
+import { World, EntityBuilder, NetworkInput, LOCAL_ENTITY_BIT } from './core/world';
 import { Entity } from './core/entity';
 import { ComponentType } from './core/component';
 import { SystemFn, SystemOptions } from './core/system';
@@ -284,6 +284,18 @@ export class Game {
 
     /** Clients that already have entities from snapshot (skip onConnect for them during catchup) */
     private clientsWithEntitiesFromSnapshot: Set<string> = new Set();
+
+    /** ClientIds that were in the snapshot's clientIdMap (includes clients who joined then left) */
+    private clientIdsFromSnapshotMap: Set<string> = new Set();
+
+    /** ClientIds that have DISCONNECT inputs during current catchup (for robust stale JOIN detection) */
+    private clientsWithDisconnectInCatchup: Set<string> = new Set();
+
+    /** Seq of the loaded snapshot - JOINs with seq <= this are already in snapshot */
+    private loadedSnapshotSeq: number = 0;
+
+    /** True when we're running catchup simulation (only then should we filter JOINs by seq) */
+    private inCatchupMode: boolean = false;
 
     /** Attached renderer */
     private renderer: any = null;
@@ -874,7 +886,7 @@ export class Game {
      * This compares state, logs detailed diff, then replaces local state.
      */
     private handleResyncSnapshot(data: Uint8Array, serverFrame: number): void {
-        console.log(`[state-sync] Received resync snapshot (${data.length} bytes) for frame ${serverFrame}`);
+        console.warn(`[ENGINE-RESYNC] Received resync snapshot (${data.length} bytes) for frame ${serverFrame}. currentFrame=${this.currentFrame} isDesynced=${this.isDesynced}`);
 
         // Decode the snapshot - try binary format first, then JSON fallback
         let snapshot: any;
@@ -1000,6 +1012,9 @@ export class Game {
         // If left populated, future join events would incorrectly skip onConnect
         // for clients whose entities are in this stale set.
         this.clientsWithEntitiesFromSnapshot.clear();
+        this.clientIdsFromSnapshotMap.clear();
+        this.clientsWithDisconnectInCatchup.clear();
+        this.loadedSnapshotSeq = 0;
 
         console.log(`[state-sync] === END RESYNC ===`);
     }
@@ -1274,14 +1289,20 @@ export class Game {
 
         if (hasValidSnapshot) {
             // === LATE JOINER PATH ===
-            console.log(`[LATE JOIN] Restoring snapshot: frame=${snapshot.frame}, entities=${snapshot.entities.length}, serverFrame=${frame}`);
 
             // 1. CRITICAL: Build clientId mappings BEFORE loading snapshot!
             // The snapshot stores numeric clientIds, but we need to map them back to strings
             // to correctly populate clientsWithEntitiesFromSnapshot.
-            // Process ALL inputs to extract clientIds from join events.
-            let joinCount = 0;
+            // ONLY process join inputs that are IN the snapshot (seq <= snapshotSeq).
+            // Joins that happen AFTER the snapshot will be interned when processed normally.
+            const snapshotSeq = snapshot.seq || 0;
             for (const input of inputs) {
+                // Skip joins that happen AFTER the snapshot - they'll be interned during normal processing
+                // Also skip if seq is undefined (shouldn't happen, but be safe)
+                if (input.seq === undefined || input.seq > snapshotSeq) {
+                    continue;
+                }
+
                 let data = input.data;
                 if (data instanceof Uint8Array) {
                     try { data = decode(data); } catch { continue; }
@@ -1290,7 +1311,6 @@ export class Game {
                 if (inputClientId && (data?.type === 'join' || data?.type === 'reconnect')) {
                     // Intern the clientId to build numToClientId mapping
                     this.internClientId(inputClientId);
-                    joinCount++;
                 }
             }
 
@@ -1298,7 +1318,6 @@ export class Game {
             this.currentFrame = snapshot.frame || frame;
 
             this.loadNetworkSnapshot(snapshot);
-
             // Verify loaded state hash matches expected (from authority)
             const loadedHash = this.world.getStateHash();
             const expectedHash = snapshot.hash;
@@ -1321,9 +1340,31 @@ export class Game {
 
             loadRandomState(rngStateSnapshot);
             // 5. Filter inputs already in snapshot
-            const snapshotSeq = snapshot.seq || 0;
+            // CRITICAL: Always include join/reconnect/disconnect inputs regardless of seq!
+            // The server sends ALL joins for clientId mapping, but we were filtering them out
+            // if seq <= snapshotSeq. This caused late joiners to miss their own join event
+            // when the snapshot was taken AFTER their join was queued.
+            // Note: snapshotSeq is declared earlier in this block
+
+            // Helper to get input type, handling both object and binary data
+            const getInputType = (input: ServerInput): string | undefined => {
+                let data = input.data;
+                if (data instanceof Uint8Array) {
+                    try { data = decode(data); } catch { return undefined; }
+                }
+                return data?.type;
+            };
+
             const pendingInputs = inputs
-                .filter(i => i.seq > snapshotSeq)
+                .filter(i => {
+                    const inputType = getInputType(i);
+                    // Always process join/reconnect/disconnect for proper entity lifecycle
+                    if (inputType === 'join' || inputType === 'reconnect' || inputType === 'disconnect' || inputType === 'leave') {
+                        return true;
+                    }
+                    // Other inputs only if after snapshot
+                    return i.seq > snapshotSeq;
+                })
                 .sort((a, b) => a.seq - b.seq);
 
             // 6. Run catchup simulation
@@ -1332,36 +1373,27 @@ export class Game {
             const startFrame = isPostTick ? snapshotFrame + 1 : snapshotFrame;
             const ticksToRun = frame - startFrame + 1;
 
-            // CRITICAL: Limit catchup to prevent error accumulation
-            // If too many frames need to be simulated, skip catchup and use snapshot state directly
-            // This prevents desync from accumulated physics errors over many frames
-            const MAX_CATCHUP_FRAMES = 100; // ~5 seconds at 20Hz tick rate
+            // CRITICAL: Limit catchup to prevent performance issues
+            // If too many frames need to be simulated, request a fresh snapshot instead
+            const MAX_CATCHUP_FRAMES = 200; // ~10 seconds at 20Hz tick rate
             if (ticksToRun > MAX_CATCHUP_FRAMES) {
-                console.warn(`[CATCHUP] Skipping ${ticksToRun} frames of catchup (max=${MAX_CATCHUP_FRAMES}). Using snapshot state directly.`);
-                // Just use the snapshot state - don't try to simulate hundreds of frames
-                this.currentFrame = frame;
-                this.lastProcessedFrame = frame;
-                this.clientsWithEntitiesFromSnapshot.clear();
+                console.warn(`[CATCHUP] Too many frames to catch up (${ticksToRun} > ${MAX_CATCHUP_FRAMES}). Requesting fresh snapshot.`);
 
-                // Set up for normal tick processing
-                this.prevSnapshot = this.world.getSparseSnapshot();
-                this.lastGoodSnapshot = {
-                    snapshot: this.prevSnapshot,
-                    frame: frame,
-                    hash: this.world.getStateHash()
-                };
+                // Request fresh snapshot from authority - don't use stale state
+                if (this.connection?.requestResync) {
+                    this.connection.requestResync();
+                }
 
-                console.log(`[LATE JOIN] Skipped catchup, using snapshot at frame=${frame}, hash=0x${this.world.getStateHash().toString(16)}`);
+                // Don't process anything - wait for fresh snapshot to arrive
+                // The fresh snapshot will trigger a new INITIAL_STATE with current state
                 return;
             }
 
             // Run catchup simulation
             if (ticksToRun > 0) {
-                console.log(`[LATE JOIN] Starting catchup: ${ticksToRun} frames, ${pendingInputs.length} inputs`);
                 this.runCatchup(startFrame, frame, pendingInputs);
             }
 
-            console.log(`[LATE JOIN] Catchup complete: frame=${this.currentFrame} hash=0x${this.world.getStateHash().toString(16)}`);
             this.snapshotLoadedFrame = this.currentFrame;  // Track for debug timing
 
             // CRITICAL: Set prevSnapshot after catchup so delta computation has a valid baseline
@@ -1644,11 +1676,22 @@ export class Game {
             // The entity positions from callbacks are preserved in snapshots - only RNG sync matters.
             const rngState = saveRandomState();
 
-            // Call callback ONLY if this client doesn't already have an entity from snapshot
-            // This prevents duplicate entity creation during catchup
-            const hasEntityFromSnapshot = this.clientsWithEntitiesFromSnapshot.has(clientId);
+            // CRITICAL FIX: Only process JOINs that happened AFTER the snapshot was taken.
+            // JOINs with seq <= loadedSnapshotSeq are already reflected in the snapshot state.
+            // This is deterministic because each client uses their own snapshot.seq.
+            //
+            // NOTE: We do NOT skip "stale" JOINs (clients who disconnect later in catchup).
+            // Skipping them causes allocator divergence because:
+            // 1. We don't allocate the entity ID
+            // 2. So we don't free it when DISCONNECT happens
+            // 3. So allocator generations diverge -> different eids -> DESYNC
+            // Instead, process ALL JOINs and let DISCONNECT handle cleanup.
+            const inputSeq = (input as any).seq || 0;
+            // CRITICAL: Only filter by seq during catchup mode - outside catchup, all JOINs are fresh
+            const isAlreadyInSnapshot = this.inCatchupMode && inputSeq > 0 && inputSeq <= this.loadedSnapshotSeq;
 
-            if (!hasEntityFromSnapshot) {
+            // Skip only if JOIN is already reflected in snapshot (seq <= snapshot.seq)
+            if (!isAlreadyInSnapshot) {
                 this.callbacks.onConnect?.(clientId);
             }
 
@@ -1754,13 +1797,24 @@ export class Game {
         // Multiple inputs can occur in a single frame - seq determines order
         const sortedInputs = [...inputs].sort((a, b) => (a.seq || 0) - (b.seq || 0));
 
+        // NOTE: Stale JOIN detection has been REMOVED.
+        // Previously we pre-scanned to skip JOINs that would be followed by DISCONNECTs.
+        // But skipping JOINs causes allocator divergence (entity IDs not allocated, so
+        // generations don't increment when DISCONNECT frees them).
+        // Now we process ALL JOINs and let DISCONNECTs handle cleanup naturally.
+
         // Build map of frame -> inputs for that frame (sorted by seq)
         const inputsByFrame = new Map<number, ServerInput[]>();
         for (const input of sortedInputs) {
-            // CRITICAL FIX: Inputs without explicit frames should use endFrame (when they arrived),
-            // NOT startFrame. Using startFrame causes inputs to be processed before catchup starts,
-            // double-applying input state changes that are already in the snapshot.
-            const rawFrame = input.frame ?? endFrame;  // FIX: use endFrame instead of startFrame
+            // CRITICAL: Inputs MUST have explicit frames for deterministic catchup.
+            // If input.frame is undefined, different clients would assign different frames
+            // (based on their local endFrame), causing desync.
+            // Skip frameless inputs during catchup - they'll be processed in normal ticks.
+            if (input.frame === undefined || input.frame === null) {
+                continue;
+            }
+
+            const rawFrame = input.frame;
 
             // CRITICAL: Don't process inputs that are AFTER the catchup range
             // These should be processed during normal ticks, not catchup
@@ -1779,6 +1833,9 @@ export class Game {
         // We'll record hash for each catchup frame so majorityHash comparison works
         this.stateHashHistory.clear();
 
+        // Set catchup mode so processInput knows to filter JOINs by seq
+        this.inCatchupMode = true;
+
         // Run each tick
         for (let f = 0; f < ticksToRun; f++) {
             const tickFrame = startFrame + f;
@@ -1786,11 +1843,9 @@ export class Game {
 
             // Process inputs for this frame (already sorted by seq)
             const frameInputs = inputsByFrame.get(tickFrame) || [];
-            const hashBeforeInputs = this.world.getStateHash();
             for (const input of frameInputs) {
                 this.processInput(input);
             }
-            const hashAfterInputs = this.world.getStateHash();
 
             // Run world tick
             this.world.tick(tickFrame, []);
@@ -1803,15 +1858,16 @@ export class Game {
             this.stateHashHistory.set(tickFrame, hashAfterTick);
         }
 
-        // Final hash at end of catchup
-        const finalHash = this.world.getStateHash();
-
         this.currentFrame = endFrame;
         this.lastProcessedFrame = endFrame;  // Prevent re-processing old frames
 
         // Clear the snapshot entity tracking - catchup is done
         // Future join events should trigger onConnect normally
         this.clientsWithEntitiesFromSnapshot.clear();
+        this.clientIdsFromSnapshotMap.clear();
+        this.clientsWithDisconnectInCatchup.clear();
+        this.loadedSnapshotSeq = 0;  // Reset so normal JOINs aren't filtered
+        this.inCatchupMode = false;  // Exit catchup mode
     }
 
     // ==========================================
@@ -1917,7 +1973,6 @@ export class Game {
             },
             inputState: this.world.getInputState()
         };
-        console.log(`[SNAPSHOT-CREATE] frame=${this.currentFrame} inputState:`, JSON.stringify(this.world.getInputState()));
     }
 
     /**
@@ -1927,6 +1982,10 @@ export class Game {
         if (DEBUG_NETWORK) {
             console.log(`[ecs] Loading snapshot: ${snapshot.entities?.length} entities`);
         }
+
+        // CRITICAL: Track snapshot seq for filtering JOINs during catchup
+        // JOINs with seq <= this are already reflected in the snapshot state
+        this.loadedSnapshotSeq = snapshot.seq || 0;
 
         // Reset world FIRST (clears everything including ID allocator and strings)
         this.world.reset();
@@ -1953,6 +2012,13 @@ export class Game {
         // that occurred AFTER the snapshot was taken. We must preserve those.
         if (snapshot.clientIdMap) {
             const snapshotMappings = Object.entries(snapshot.clientIdMap.toNum) as [string, number][];
+
+            // Track ALL clientIds from snapshot (including those who joined then left)
+            // This is used to detect "stale" JOINs during catchup
+            this.clientIdsFromSnapshotMap.clear();
+            for (const [clientId] of snapshotMappings) {
+                this.clientIdsFromSnapshotMap.add(clientId);
+            }
 
             // Save any NEW clientIds that were interned from join inputs (not in snapshot)
             const newMappings: [string, number][] = [];
@@ -2049,27 +2115,40 @@ export class Game {
         // Format 2-: full format with generations as array
         if (snapshot.idAllocatorState) {
             const state = snapshot.idAllocatorState;
-            if (snapshot.format >= 3 && typeof state.generations === 'object' && !Array.isArray(state.generations)) {
-                // Minimal format - reconstruct full state
-                this.world.idAllocator.reset();
-                this.world.idAllocator.setNextId(state.nextIndex);
-                // Set generations for active entities
+
+            // First restore the basic allocator state
+            this.world.idAllocator.reset();
+            this.world.idAllocator.setNextId(state.nextIndex);
+
+            // Restore generations - handle both array and object formats
+            if (Array.isArray(state.generations)) {
+                for (let i = 0; i < state.generations.length; i++) {
+                    (this.world.idAllocator as any).generations[i] = state.generations[i];
+                }
+            } else if (typeof state.generations === 'object') {
                 for (const [indexStr, gen] of Object.entries(state.generations)) {
                     const index = parseInt(indexStr, 10);
                     (this.world.idAllocator as any).generations[index] = gen;
                 }
-                // Compute free list: indices from 0 to nextIndex that aren't in active generations
-                const freeList: number[] = [];
-                for (let i = 0; i < state.nextIndex; i++) {
-                    if (!(i.toString() in state.generations)) {
-                        freeList.push(i);
-                    }
-                }
-                (this.world.idAllocator as any).freeList = freeList;
-            } else {
-                // Legacy full format
-                this.world.idAllocator.setState(state);
             }
+
+            // NOTE: syncNone entities now use a separate localIdAllocator, so they don't
+            // affect the main idAllocator state. The snapshot's allocator state should be
+            // correct for synced entities. We verify by checking loaded entities match.
+            // Skip local entities (those with LOCAL_ENTITY_BIT set).
+            const loadedIndices = new Set<number>();
+            for (const entity of this.world.getAllEntities()) {
+                // Skip local entities - they use a different allocator
+                if (entity.eid & LOCAL_ENTITY_BIT) continue;
+                loadedIndices.add(entity.eid & INDEX_MASK);
+            }
+            const freeList: number[] = [];
+            for (let i = 0; i < state.nextIndex; i++) {
+                if (!loadedIndices.has(i)) {
+                    freeList.push(i);
+                }
+            }
+            (this.world.idAllocator as any).freeList = freeList;
         }
 
         // Track which clients already have entities from the snapshot
@@ -2168,14 +2247,6 @@ export class Game {
         const hash = this.world.getStateHash();
         const binary = encode({ snapshot, hash });
         const entityCount = snapshot.entities.length;
-
-        // DEBUG: Log snapshot send with input state
-        console.log(`[SNAPSHOT-SEND] source=${source} frame=${snapshot.frame} hash=0x${hash.toString(16)} entities=${entityCount}`);
-        console.log(`[SNAPSHOT-SEND] inputState:`, JSON.stringify(snapshot.inputState || 'MISSING'));
-
-        if (DEBUG_NETWORK) {
-            console.log(`[ecs] Sending snapshot (${source}): ${binary.length} bytes, ${entityCount} entities, hash=${hash}`);
-        }
 
         this.connection.sendSnapshot(binary, hash, snapshot.seq, snapshot.frame);
 
@@ -2929,5 +3000,6 @@ export class GameEntityBuilder {
  * Initialize a new game instance.
  */
 export function createGame(): Game {
+    console.log('[MODU] Engine version: BUILD_50');
     return new Game();
 }

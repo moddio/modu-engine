@@ -54,9 +54,13 @@ export declare class EntityBuilder {
 /**
  * ECS World - main container for all ECS state.
  */
+/** Bit marker for local-only (syncNone) entity IDs - distinguishes from synced entities */
+export declare const LOCAL_ENTITY_BIT = 1073741824;
 export declare class World {
-    /** Entity ID allocator */
+    /** Entity ID allocator (for synced entities) */
     readonly idAllocator: EntityIdAllocator;
+    /** Entity ID allocator for local-only (syncNone) entities - separate to avoid allocator divergence */
+    readonly localIdAllocator: EntityIdAllocator;
     /** Query engine */
     readonly queryEngine: QueryEngine;
     /** System scheduler */

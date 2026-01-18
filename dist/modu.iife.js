@@ -1,4 +1,4 @@
-/* Modu Engine - Built: 2026-01-17T01:10:28.431Z - Commit: 1972fb2 */
+/* Modu Engine - Built: 2026-01-18T00:09:33.131Z - Commit: c5102b4 */
 // Modu Engine + Network SDK Combined Bundle
 "use strict";
 var moduNetwork = (() => {
@@ -1237,6 +1237,7 @@ var moduNetwork = (() => {
               const isResync = initialConnectionComplete;
               console.log(`[modu-network] Received INITIAL_STATE, ${isResync ? "RESYNC" : "connecting"}...`);
               const { snapshot, frame, snapshotHash } = msg;
+              console.warn(`[SDK-INITIAL_STATE] frame=${frame} snapshot=${snapshot ? "exists" : "null"} entities=${snapshot?.entities?.length || 0} inputs=${(msg.inputs || msg.events || []).length}`);
               if (snapshot && snapshotHash) {
                 snapshot.snapshotHash = snapshotHash;
               }
@@ -3706,6 +3707,7 @@ var Modu = (() => {
       };
     }
   };
+  var LOCAL_ENTITY_BIT = 1073741824;
   var World = class {
     constructor() {
       /** Entity definitions */
@@ -3757,6 +3759,7 @@ var Modu = (() => {
       /** Local client ID for this client */
       this.localClientId = null;
       this.idAllocator = new EntityIdAllocator();
+      this.localIdAllocator = new EntityIdAllocator();
       this.entityPool = new EntityPool();
       this.strings = new StringRegistry();
       this.queryEngine = new QueryEngine(
@@ -3829,7 +3832,14 @@ var Modu = (() => {
       if (!def) {
         throw new Error(`Unknown entity type: '${typeName}'`);
       }
-      const eid = this.idAllocator.allocate();
+      const isSyncNone = def.syncFields && def.syncFields.length === 0;
+      let eid;
+      if (isSyncNone) {
+        const localEid = this.localIdAllocator.allocate();
+        eid = localEid | LOCAL_ENTITY_BIT;
+      } else {
+        eid = this.idAllocator.allocate();
+      }
       const index = eid & INDEX_MASK;
       const entity = this.entityPool.acquire(eid);
       this.activeEntities.add(eid);
@@ -3989,7 +3999,11 @@ var Modu = (() => {
       this.entityComponents.delete(eid);
       this.entityClientIds.delete(eid);
       this.entityPool.release(eid);
-      this.idAllocator.free(eid);
+      if (eid & LOCAL_ENTITY_BIT) {
+        this.localIdAllocator.free(eid & ~LOCAL_ENTITY_BIT);
+      } else {
+        this.idAllocator.free(eid);
+      }
     }
     /**
      * Get entity by eid.
@@ -4229,6 +4243,7 @@ var Modu = (() => {
       this.entityClientIds.clear();
       this.queryEngine.clear();
       this.idAllocator.reset();
+      this.localIdAllocator.reset();
       this.strings.clear();
     }
     /**
@@ -5106,6 +5121,14 @@ var Modu = (() => {
       this.collisionHandlers = /* @__PURE__ */ new Map();
       /** Clients that already have entities from snapshot (skip onConnect for them during catchup) */
       this.clientsWithEntitiesFromSnapshot = /* @__PURE__ */ new Set();
+      /** ClientIds that were in the snapshot's clientIdMap (includes clients who joined then left) */
+      this.clientIdsFromSnapshotMap = /* @__PURE__ */ new Set();
+      /** ClientIds that have DISCONNECT inputs during current catchup (for robust stale JOIN detection) */
+      this.clientsWithDisconnectInCatchup = /* @__PURE__ */ new Set();
+      /** Seq of the loaded snapshot - JOINs with seq <= this are already in snapshot */
+      this.loadedSnapshotSeq = 0;
+      /** True when we're running catchup simulation (only then should we filter JOINs by seq) */
+      this.inCatchupMode = false;
       /** Attached renderer */
       this.renderer = null;
       /** Installed plugins */
@@ -5555,7 +5578,7 @@ var Modu = (() => {
      * This compares state, logs detailed diff, then replaces local state.
      */
     handleResyncSnapshot(data, serverFrame) {
-      console.log(`[state-sync] Received resync snapshot (${data.length} bytes) for frame ${serverFrame}`);
+      console.warn(`[ENGINE-RESYNC] Received resync snapshot (${data.length} bytes) for frame ${serverFrame}. currentFrame=${this.currentFrame} isDesynced=${this.isDesynced}`);
       let snapshot;
       try {
         const decoded = decode(data);
@@ -5628,6 +5651,9 @@ var Modu = (() => {
         hash: newLocalHash
       };
       this.clientsWithEntitiesFromSnapshot.clear();
+      this.clientIdsFromSnapshotMap.clear();
+      this.clientsWithDisconnectInCatchup.clear();
+      this.loadedSnapshotSeq = 0;
       console.log(`[state-sync] === END RESYNC ===`);
     }
     /**
@@ -5844,9 +5870,11 @@ var Modu = (() => {
       }
       const hasValidSnapshot = snapshot?.entities && snapshot.entities.length > 0;
       if (hasValidSnapshot) {
-        console.log(`[LATE JOIN] Restoring snapshot: frame=${snapshot.frame}, entities=${snapshot.entities.length}, serverFrame=${frame}`);
-        let joinCount = 0;
+        const snapshotSeq = snapshot.seq || 0;
         for (const input of inputs) {
+          if (input.seq === void 0 || input.seq > snapshotSeq) {
+            continue;
+          }
           let data = input.data;
           if (data instanceof Uint8Array) {
             try {
@@ -5858,7 +5886,6 @@ var Modu = (() => {
           const inputClientId = data?.clientId || input.clientId;
           if (inputClientId && (data?.type === "join" || data?.type === "reconnect")) {
             this.internClientId(inputClientId);
-            joinCount++;
           }
         }
         this.currentFrame = snapshot.frame || frame;
@@ -5876,32 +5903,39 @@ var Modu = (() => {
           this.callbacks.onSnapshot(this.world.getAllEntities());
         }
         loadRandomState(rngStateSnapshot);
-        const snapshotSeq = snapshot.seq || 0;
-        const pendingInputs = inputs.filter((i) => i.seq > snapshotSeq).sort((a, b) => a.seq - b.seq);
+        const getInputType = (input) => {
+          let data = input.data;
+          if (data instanceof Uint8Array) {
+            try {
+              data = decode(data);
+            } catch {
+              return void 0;
+            }
+          }
+          return data?.type;
+        };
+        const pendingInputs = inputs.filter((i) => {
+          const inputType = getInputType(i);
+          if (inputType === "join" || inputType === "reconnect" || inputType === "disconnect" || inputType === "leave") {
+            return true;
+          }
+          return i.seq > snapshotSeq;
+        }).sort((a, b) => a.seq - b.seq);
         const snapshotFrame = this.currentFrame;
         const isPostTick = snapshot.postTick === true;
         const startFrame = isPostTick ? snapshotFrame + 1 : snapshotFrame;
         const ticksToRun = frame - startFrame + 1;
-        const MAX_CATCHUP_FRAMES = 100;
+        const MAX_CATCHUP_FRAMES = 200;
         if (ticksToRun > MAX_CATCHUP_FRAMES) {
-          console.warn(`[CATCHUP] Skipping ${ticksToRun} frames of catchup (max=${MAX_CATCHUP_FRAMES}). Using snapshot state directly.`);
-          this.currentFrame = frame;
-          this.lastProcessedFrame = frame;
-          this.clientsWithEntitiesFromSnapshot.clear();
-          this.prevSnapshot = this.world.getSparseSnapshot();
-          this.lastGoodSnapshot = {
-            snapshot: this.prevSnapshot,
-            frame,
-            hash: this.world.getStateHash()
-          };
-          console.log(`[LATE JOIN] Skipped catchup, using snapshot at frame=${frame}, hash=0x${this.world.getStateHash().toString(16)}`);
+          console.warn(`[CATCHUP] Too many frames to catch up (${ticksToRun} > ${MAX_CATCHUP_FRAMES}). Requesting fresh snapshot.`);
+          if (this.connection?.requestResync) {
+            this.connection.requestResync();
+          }
           return;
         }
         if (ticksToRun > 0) {
-          console.log(`[LATE JOIN] Starting catchup: ${ticksToRun} frames, ${pendingInputs.length} inputs`);
           this.runCatchup(startFrame, frame, pendingInputs);
         }
-        console.log(`[LATE JOIN] Catchup complete: frame=${this.currentFrame} hash=0x${this.world.getStateHash().toString(16)}`);
         this.snapshotLoadedFrame = this.currentFrame;
         this.prevSnapshot = this.world.getSparseSnapshot();
         this.lastGoodSnapshot = {
@@ -6077,8 +6111,9 @@ var Modu = (() => {
           this.authorityClientId = clientId;
         }
         const rngState = saveRandomState();
-        const hasEntityFromSnapshot = this.clientsWithEntitiesFromSnapshot.has(clientId);
-        if (!hasEntityFromSnapshot) {
+        const inputSeq = input.seq || 0;
+        const isAlreadyInSnapshot = this.inCatchupMode && inputSeq > 0 && inputSeq <= this.loadedSnapshotSeq;
+        if (!isAlreadyInSnapshot) {
           this.callbacks.onConnect?.(clientId);
         }
         loadRandomState(rngState);
@@ -6159,7 +6194,10 @@ var Modu = (() => {
       const sortedInputs = [...inputs].sort((a, b) => (a.seq || 0) - (b.seq || 0));
       const inputsByFrame = /* @__PURE__ */ new Map();
       for (const input of sortedInputs) {
-        const rawFrame = input.frame ?? endFrame;
+        if (input.frame === void 0 || input.frame === null) {
+          continue;
+        }
+        const rawFrame = input.frame;
         if (rawFrame > endFrame) {
           continue;
         }
@@ -6170,24 +6208,26 @@ var Modu = (() => {
         inputsByFrame.get(frame).push(input);
       }
       this.stateHashHistory.clear();
+      this.inCatchupMode = true;
       for (let f = 0; f < ticksToRun; f++) {
         const tickFrame = startFrame + f;
         this.currentFrame = tickFrame;
         const frameInputs = inputsByFrame.get(tickFrame) || [];
-        const hashBeforeInputs = this.world.getStateHash();
         for (const input of frameInputs) {
           this.processInput(input);
         }
-        const hashAfterInputs = this.world.getStateHash();
         this.world.tick(tickFrame, []);
         const hashAfterTick = this.world.getStateHash();
         this.callbacks.onTick?.(tickFrame);
         this.stateHashHistory.set(tickFrame, hashAfterTick);
       }
-      const finalHash = this.world.getStateHash();
       this.currentFrame = endFrame;
       this.lastProcessedFrame = endFrame;
       this.clientsWithEntitiesFromSnapshot.clear();
+      this.clientIdsFromSnapshotMap.clear();
+      this.clientsWithDisconnectInCatchup.clear();
+      this.loadedSnapshotSeq = 0;
+      this.inCatchupMode = false;
     }
     // ==========================================
     // Snapshot Methods
@@ -6263,7 +6303,6 @@ var Modu = (() => {
         },
         inputState: this.world.getInputState()
       };
-      console.log(`[SNAPSHOT-CREATE] frame=${this.currentFrame} inputState:`, JSON.stringify(this.world.getInputState()));
     }
     /**
      * Load network snapshot into ECS world.
@@ -6272,6 +6311,7 @@ var Modu = (() => {
       if (DEBUG_NETWORK) {
         console.log(`[ecs] Loading snapshot: ${snapshot.entities?.length} entities`);
       }
+      this.loadedSnapshotSeq = snapshot.seq || 0;
       this.world.reset();
       if (this.physics) {
         this.physics.clear();
@@ -6284,6 +6324,10 @@ var Modu = (() => {
       }
       if (snapshot.clientIdMap) {
         const snapshotMappings = Object.entries(snapshot.clientIdMap.toNum);
+        this.clientIdsFromSnapshotMap.clear();
+        for (const [clientId] of snapshotMappings) {
+          this.clientIdsFromSnapshotMap.add(clientId);
+        }
         const newMappings = [];
         for (const [clientId, num] of this.clientIdToNum.entries()) {
           const snapshotHas = snapshotMappings.some(([sid]) => sid === clientId);
@@ -6349,23 +6393,31 @@ var Modu = (() => {
       this.lastInputSeq = snapshot.seq || 0;
       if (snapshot.idAllocatorState) {
         const state = snapshot.idAllocatorState;
-        if (snapshot.format >= 3 && typeof state.generations === "object" && !Array.isArray(state.generations)) {
-          this.world.idAllocator.reset();
-          this.world.idAllocator.setNextId(state.nextIndex);
+        this.world.idAllocator.reset();
+        this.world.idAllocator.setNextId(state.nextIndex);
+        if (Array.isArray(state.generations)) {
+          for (let i = 0; i < state.generations.length; i++) {
+            this.world.idAllocator.generations[i] = state.generations[i];
+          }
+        } else if (typeof state.generations === "object") {
           for (const [indexStr, gen] of Object.entries(state.generations)) {
             const index = parseInt(indexStr, 10);
             this.world.idAllocator.generations[index] = gen;
           }
-          const freeList = [];
-          for (let i = 0; i < state.nextIndex; i++) {
-            if (!(i.toString() in state.generations)) {
-              freeList.push(i);
-            }
-          }
-          this.world.idAllocator.freeList = freeList;
-        } else {
-          this.world.idAllocator.setState(state);
         }
+        const loadedIndices = /* @__PURE__ */ new Set();
+        for (const entity of this.world.getAllEntities()) {
+          if (entity.eid & LOCAL_ENTITY_BIT)
+            continue;
+          loadedIndices.add(entity.eid & INDEX_MASK);
+        }
+        const freeList = [];
+        for (let i = 0; i < state.nextIndex; i++) {
+          if (!loadedIndices.has(i)) {
+            freeList.push(i);
+          }
+        }
+        this.world.idAllocator.freeList = freeList;
       }
       this.clientsWithEntitiesFromSnapshot.clear();
       this.activeClients.length = 0;
@@ -6421,11 +6473,6 @@ var Modu = (() => {
       const hash = this.world.getStateHash();
       const binary = encode({ snapshot, hash });
       const entityCount = snapshot.entities.length;
-      console.log(`[SNAPSHOT-SEND] source=${source} frame=${snapshot.frame} hash=0x${hash.toString(16)} entities=${entityCount}`);
-      console.log(`[SNAPSHOT-SEND] inputState:`, JSON.stringify(snapshot.inputState || "MISSING"));
-      if (DEBUG_NETWORK) {
-        console.log(`[ecs] Sending snapshot (${source}): ${binary.length} bytes, ${entityCount} entities, hash=${hash}`);
-      }
       this.connection.sendSnapshot(binary, hash, snapshot.seq, snapshot.frame);
       this.lastSnapshotHash = hash;
       this.lastSnapshotFrame = snapshot.frame;
@@ -7022,6 +7069,7 @@ var Modu = (() => {
     }
   };
   function createGame() {
+    console.log("[MODU] Engine version: BUILD_50");
     return new Game();
   }
 
@@ -7654,7 +7702,7 @@ var Modu = (() => {
   }
 
   // src/version.ts
-  var ENGINE_VERSION = "1972fb2";
+  var ENGINE_VERSION = "c5102b4";
 
   // src/plugins/debug-ui.ts
   var debugDiv = null;

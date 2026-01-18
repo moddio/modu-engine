@@ -151,6 +151,14 @@ export declare class Game {
     private collisionHandlers;
     /** Clients that already have entities from snapshot (skip onConnect for them during catchup) */
     private clientsWithEntitiesFromSnapshot;
+    /** ClientIds that were in the snapshot's clientIdMap (includes clients who joined then left) */
+    private clientIdsFromSnapshotMap;
+    /** ClientIds that have DISCONNECT inputs during current catchup (for robust stale JOIN detection) */
+    private clientsWithDisconnectInCatchup;
+    /** Seq of the loaded snapshot - JOINs with seq <= this are already in snapshot */
+    private loadedSnapshotSeq;
+    /** True when we're running catchup simulation (only then should we filter JOINs by seq) */
+    private inCatchupMode;
     /** Attached renderer */
     private renderer;
     /** Installed plugins */
