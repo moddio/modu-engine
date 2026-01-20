@@ -1,5 +1,4 @@
 .claude
 node_modules
 src/version.ts
-dist/version.js
-dist/version.d.ts
+dist/
