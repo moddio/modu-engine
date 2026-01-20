@@ -5,6 +5,7 @@
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "scripts": {
+    "prepare": "npm run build",
     "version": "node update-version.js",
     "prebuild": "npm run version",
     "build": "tsc",
