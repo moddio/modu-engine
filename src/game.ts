@@ -869,10 +869,6 @@ export class Game {
                 console.error(`[state-sync] DESYNC DETECTED at frame ${frame}`);
                 console.error(`  Local hash:    ${localHash.toString(16).padStart(8, '0')}`);
                 console.error(`  Majority hash: ${majorityHash.toString(16).padStart(8, '0')}`);
-
-                // Dump local state for debugging - compare between browser tabs
-                this.dumpLocalStateForDebug(frame);
-
                 console.error(`  Requesting resync from authority...`);
 
                 // Request full state from authority for recovery
@@ -1027,55 +1023,7 @@ export class Game {
      * Log detailed diff between local state and authority snapshot.
      * Called during resync to help diagnose what went wrong.
      */
-    /**
-     * Dump local state for debugging when desync is detected.
-     * Compare output between browser tabs to find differences.
-     */
-    private dumpLocalStateForDebug(frame: number): void {
-        console.group(`[DESYNC DEBUG] Local state at frame ${frame}`);
-        console.log(`Entity count: ${this.world.getAllEntities().length}`);
-
-        // Group entities by type
-        const byType = new Map<string, any[]>();
-        for (const entity of this.world.getAllEntities()) {
-            if (!byType.has(entity.type)) byType.set(entity.type, []);
-            byType.get(entity.type)!.push(entity);
-        }
-
-        // Log counts by type
-        console.log('Entity counts by type:');
-        for (const [type, entities] of byType) {
-            console.log(`  ${type}: ${entities.length}`);
-        }
-
-        // Log first few entities of dynamic types with component values
-        const dynamicTypes = ['furniture', 'player'];
-        for (const type of dynamicTypes) {
-            const entities = byType.get(type) || [];
-            if (entities.length === 0) continue;
-
-            console.group(`${type} entities (first 5):`);
-            for (let i = 0; i < Math.min(5, entities.length); i++) {
-                const e = entities[i];
-                const data: Record<string, any> = { eid: e.eid };
-                for (const comp of e.getComponents()) {
-                    if (!comp.sync) continue;
-                    const index = e.eid & 0xFFFF;
-                    for (const field of comp.fieldNames) {
-                        const key = `${comp.name}.${field}`;
-                        data[key] = comp.storage.fields[field][index];
-                    }
-                }
-                console.log(`  [${i}]`, JSON.stringify(data));
-            }
-            console.groupEnd();
-        }
-
-        console.groupEnd();
-    }
-
     private logDesyncDiff(serverSnapshot: any, serverFrame: number): void {
-        const lines: string[] = [];
         const diffs: Array<{ entity: string; eid: number; comp: string; field: string; local: any; server: any }> = [];
 
         const types = serverSnapshot.types || [];
@@ -1175,65 +1123,83 @@ export class Game {
             }
         }
 
-        // Build readable output
+        // Calculate sync percentage
         const syncPercent = totalFields > 0 ? (matchingFields / totalFields) * 100 : 100;
+        const syncColor = syncPercent > 95 ? 'color: #4ade80' : syncPercent > 50 ? 'color: #fbbf24' : 'color: #f87171';
 
-        lines.push(`DIVERGENT FIELDS: ${diffs.length} differences found`);
-        lines.push(`  Sync: ${syncPercent.toFixed(1)}% (${matchingFields}/${totalFields} fields match)`);
-        lines.push(``);
+        // Start collapsible group
+        console.group(`%cState Comparison (${diffs.length} differences)`, 'color: #f87171; font-weight: bold; font-size: 14px');
 
-        // Try to find entity owners
-        const entityOwners = new Map<number, string>();
-        for (const entity of this.world.getAllEntities()) {
-            if (entity.has(Player)) {
-                const playerData = entity.get(Player);
-                const ownerClientId = this.numToClientId.get(playerData.clientId);
-                if (ownerClientId) {
-                    entityOwners.set(entity.eid, ownerClientId.slice(0, 8));
-                }
+        // Summary
+        console.log(
+            `%cSync: ${syncPercent.toFixed(1)}%  %c(${matchingFields}/${totalFields} fields match)`,
+            `${syncColor}; font-weight: bold`,
+            'color: #9ca3af'
+        );
+
+        // Field differences as table
+        if (diffs.length > 0) {
+            const fieldDiffs = diffs.filter(d => d.server !== 'MISSING' && d.local !== 'MISSING');
+            const localOnly = diffs.filter(d => d.server === 'MISSING');
+            const serverOnly = diffs.filter(d => d.local === 'MISSING');
+
+            // Field value differences
+            if (fieldDiffs.length > 0) {
+                console.groupCollapsed(`Divergent Fields (${fieldDiffs.length})`);
+                const tableData = fieldDiffs.map(d => ({
+                    entity: `${d.entity}#${d.eid.toString(16)}`,
+                    component: d.comp,
+                    field: d.field,
+                    local: d.local,
+                    server: d.server,
+                    delta: typeof d.local === 'number' && typeof d.server === 'number'
+                        ? (d.local - d.server).toFixed(4)
+                        : '-'
+                }));
+                console.table(tableData);
+                console.groupEnd();
             }
-        }
 
-        // Group diffs by entity for readability
-        const diffsByEntity = new Map<number, typeof diffs>();
-        for (const d of diffs) {
-            if (!diffsByEntity.has(d.eid)) {
-                diffsByEntity.set(d.eid, []);
+            // Entity existence mismatches
+            if (localOnly.length > 0) {
+                console.groupCollapsed(`%cLocal Only - ${localOnly.length} entities not on server`, 'color: #fbbf24');
+                const uniqueEntities = [...new Set(localOnly.map(d => d.eid))];
+                console.table(uniqueEntities.map(eid => {
+                    const d = localOnly.find(x => x.eid === eid)!;
+                    return { entity: d.entity, eid: `0x${eid.toString(16)}` };
+                }));
+                console.groupEnd();
             }
-            diffsByEntity.get(d.eid)!.push(d);
-        }
 
-        for (const [eid, entityDiffs] of diffsByEntity) {
-            const first = entityDiffs[0];
-            const owner = entityOwners.get(eid);
-            const ownerStr = owner ? ` [owner: ${owner}]` : '';
-            lines.push(`  ${first.entity}#${eid.toString(16)}${ownerStr}:`);
-
-            for (const d of entityDiffs) {
-                const delta = typeof d.local === 'number' && typeof d.server === 'number'
-                    ? ` (Δ ${(d.local - d.server).toFixed(4)})`
-                    : '';
-                lines.push(`    ${d.comp}.${d.field}: local=${d.local} server=${d.server}${delta}`);
+            if (serverOnly.length > 0) {
+                console.groupCollapsed(`%cServer Only - ${serverOnly.length} entities not on local`, 'color: #fbbf24');
+                const uniqueEntities = [...new Set(serverOnly.map(d => d.eid))];
+                console.table(uniqueEntities.map(eid => {
+                    const d = serverOnly.find(x => x.eid === eid)!;
+                    return { entity: d.entity, eid: `0x${eid.toString(16)}` };
+                }));
+                console.groupEnd();
             }
+        } else {
+            console.log('%cNo field differences found (hash mismatch may be due to RNG or string state)', 'color: #9ca3af; font-style: italic');
         }
 
-        if (diffs.length === 0) {
-            lines.push(`  No field differences found (hash mismatch may be due to RNG or string state)`);
-        }
-
-        // Log recent inputs that may have caused the divergence
+        // Recent inputs
         const recentInputCount = Math.min(this.recentInputs.length, 20);
         if (recentInputCount > 0) {
-            lines.push(``);
-            lines.push(`RECENT INPUTS (last ${recentInputCount}):`);
-            const recent = this.recentInputs.slice(-recentInputCount);
-            for (const input of recent) {
-                const shortId = input.clientId.slice(0, 8);
-                lines.push(`  f${input.frame} [${shortId}]: ${JSON.stringify(input.data)}`);
-            }
+            console.groupCollapsed(`Recent Inputs (last ${recentInputCount})`);
+            const recentData = this.recentInputs.slice(-recentInputCount).map(input => ({
+                frame: input.frame,
+                client: input.clientId.slice(0, 8),
+                move: input.data?.move ? `(${input.data.move.x},${input.data.move.y})` : '-',
+                shoot: input.data?.shoot ? 'yes' : '-',
+                target: input.data?.target ? `(${Math.round(input.data.target.x)},${Math.round(input.data.target.y)})` : '-'
+            }));
+            console.table(recentData);
+            console.groupEnd();
         }
 
-        console.error(lines.join('\n'));
+        console.groupEnd();
     }
 
     /**
