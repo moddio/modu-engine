@@ -256,8 +256,15 @@ export declare class Game {
     onCollision(typeA: string, typeB: string, handler: (a: Entity, b: Entity) => void): this;
     /**
      * Intern a client ID string, get back a number.
+     * Creates a new mapping if one doesn't exist.
      */
     internClientId(clientId: string): number;
+    /**
+     * Get the numeric ID for a client ID string WITHOUT creating a new mapping.
+     * Returns undefined if the clientId hasn't been interned yet.
+     * Use this in onDisconnect to avoid creating orphan mappings.
+     */
+    getClientIdNum(clientId: string): number | undefined;
     /**
      * Get client ID string from number.
      */

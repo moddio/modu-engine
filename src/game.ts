@@ -497,6 +497,7 @@ export class Game {
 
     /**
      * Intern a client ID string, get back a number.
+     * Creates a new mapping if one doesn't exist.
      */
     internClientId(clientId: string): number {
         let num = this.clientIdToNum.get(clientId);
@@ -506,6 +507,15 @@ export class Game {
             this.numToClientId.set(num, clientId);
         }
         return num;
+    }
+
+    /**
+     * Get the numeric ID for a client ID string WITHOUT creating a new mapping.
+     * Returns undefined if the clientId hasn't been interned yet.
+     * Use this in onDisconnect to avoid creating orphan mappings.
+     */
+    getClientIdNum(clientId: string): number | undefined {
+        return this.clientIdToNum.get(clientId);
     }
 
     /**
@@ -1325,10 +1335,12 @@ export class Game {
                 console.error(`[SNAPSHOT] HASH MISMATCH! loaded=0x${loadedHash.toString(16)} expected=0x${expectedHash?.toString(16)}`);
             }
 
-            // 3. Build authority chain from ALL inputs
-            for (const input of inputs) {
-                this.processAuthorityChainInput(input);
-            }
+            // 3. Authority chain for late joiners
+            // NOTE: We skip processAuthorityChainInput here because:
+            // - activeClients is already populated from Player entities in loadNetworkSnapshot()
+            // - Late joiner is never authority (authority is already established)
+            // - DISCONNECTs are handled via processInput in the lifecycle event loop below
+            // This avoids duplicate stale JOIN filtering logic.
 
             // 4. Call onSnapshot callback
             // CRITICAL: onSnapshot runs ONLY on late joiners, so we MUST isolate RNG.
@@ -1371,10 +1383,25 @@ export class Game {
             // These establish player presence and must happen regardless of catchup.
             // Simulation state (movement, physics) can be corrected by resync,
             // but player existence is needed immediately to avoid "stuck respawning".
+            //
+            // CRITICAL: Only process JOINs that happened AFTER the snapshot (seq > snapshotSeq).
+            // JOINs with seq <= snapshotSeq are "stale" - they might have been followed by
+            // a DISCONNECT that's also in the snapshot. Processing them would create
+            // duplicate entities.
+            // DISCONNECTs are always processed to ensure cleanup.
+            this.loadedSnapshotSeq = snapshotSeq;
             for (const input of pendingInputs) {
                 const inputType = getInputType(input);
-                if (inputType === 'join' || inputType === 'reconnect' || inputType === 'disconnect' || inputType === 'leave') {
+                if (inputType === 'disconnect' || inputType === 'leave') {
+                    // Always process disconnects for cleanup
                     this.processInput(input);
+                } else if (inputType === 'join' || inputType === 'reconnect') {
+                    // Only process JOINs that happened AFTER the snapshot
+                    // (stale JOINs are also filtered in processInput with warning)
+                    const inputSeq = (input as any).seq || 0;
+                    if (inputSeq > snapshotSeq) {
+                        this.processInput(input);
+                    }
                 }
             }
 
@@ -1672,6 +1699,21 @@ export class Game {
         }
 
         if (type === 'join') {
+            // CRITICAL FIX: Check if this JOIN is already reflected in the snapshot FIRST.
+            // JOINs with seq <= loadedSnapshotSeq are stale - the snapshot already contains
+            // the authoritative state for that point in time (either the client has an entity,
+            // or they already disconnected and shouldn't be in activeClients).
+            const inputSeq = (input as any).seq || 0;
+            const isAlreadyInSnapshot = this.inCatchupMode && inputSeq > 0 && inputSeq <= this.loadedSnapshotSeq;
+
+            // Skip ENTIRE join processing if already reflected in snapshot
+            // This includes activeClients update - snapshot's Player entities are authoritative
+            if (isAlreadyInSnapshot) {
+                // Server shouldn't send stale events - log warning for debugging
+                console.warn(`[ecs] Stale JOIN filtered (seq ${inputSeq} <= snapshotSeq ${this.loadedSnapshotSeq}): ${clientId.slice(0, 8)}`);
+                return;
+            }
+
             // Update activeClients for state sync (sorted for deterministic assignment)
             const wasActive = this.activeClients.includes(clientId);
             if (!wasActive) {
@@ -1684,31 +1726,12 @@ export class Game {
                 this.authorityClientId = clientId;
             }
 
-            // CRITICAL: Save RNG state before conditional callback.
-            // onConnect may be skipped for clients that already have entities from snapshot.
+            // CRITICAL: Save RNG state before callback.
             // If the callback uses dRandom(), we must ensure the global RNG is NOT affected,
             // so that all clients maintain identical RNG state regardless of which callbacks ran.
-            // The entity positions from callbacks are preserved in snapshots - only RNG sync matters.
             const rngState = saveRandomState();
 
-            // CRITICAL FIX: Only process JOINs that happened AFTER the snapshot was taken.
-            // JOINs with seq <= loadedSnapshotSeq are already reflected in the snapshot state.
-            // This is deterministic because each client uses their own snapshot.seq.
-            //
-            // NOTE: We do NOT skip "stale" JOINs (clients who disconnect later in catchup).
-            // Skipping them causes allocator divergence because:
-            // 1. We don't allocate the entity ID
-            // 2. So we don't free it when DISCONNECT happens
-            // 3. So allocator generations diverge -> different eids -> DESYNC
-            // Instead, process ALL JOINs and let DISCONNECT handle cleanup.
-            const inputSeq = (input as any).seq || 0;
-            // CRITICAL: Only filter by seq during catchup mode - outside catchup, all JOINs are fresh
-            const isAlreadyInSnapshot = this.inCatchupMode && inputSeq > 0 && inputSeq <= this.loadedSnapshotSeq;
-
-            // Skip only if JOIN is already reflected in snapshot (seq <= snapshot.seq)
-            if (!isAlreadyInSnapshot) {
-                this.callbacks.onConnect?.(clientId);
-            }
+            this.callbacks.onConnect?.(clientId);
 
             // Restore RNG state - callback's random usage doesn't affect global simulation RNG
             loadRandomState(rngState);
@@ -1780,6 +1803,10 @@ export class Game {
 
         const clientId = data?.clientId || input.clientId;
         const type = data?.type;
+
+        // NOTE: Stale JOIN filtering is handled in processInput().
+        // For late joiners, activeClients is populated from Player entities in loadNetworkSnapshot().
+        // This function only tracks authority chain for non-late-joiner flows.
 
         if (type === 'join') {
             // Update activeClients for state sync
@@ -2180,34 +2207,33 @@ export class Game {
         for (const entity of this.world.query(Player)) {
             const player = entity.get(Player);
             if (player.clientId === 0) {
-                // ERROR: clientId=0 should never happen!
-                console.error(`[DEBUG-SNAPSHOT] ERROR: eid=${entity.eid} has Player.clientId=0 (invalid!)`);
+                // ERROR: clientId=0 should never happen in networked games
+                console.error(`[ecs] Player entity ${entity.eid} has clientId=0 (invalid)`);
+                continue;
             }
-            if (player.clientId !== 0) {
-                const clientIdStr = this.getClientIdString(player.clientId);
-                if (clientIdStr) {
-                    this.clientsWithEntitiesFromSnapshot.add(clientIdStr);
+            const clientIdStr = this.getClientIdString(player.clientId);
+            if (clientIdStr) {
+                this.clientsWithEntitiesFromSnapshot.add(clientIdStr);
 
-                    // CRITICAL: Add to activeClients for partition assignment
-                    // Without this, partition assignment differs between authority and late joiner
-                    if (!this.activeClients.includes(clientIdStr)) {
-                        this.activeClients.push(clientIdStr);
-                    }
+                // CRITICAL: Add to activeClients for partition assignment
+                // Without this, partition assignment differs between authority and late joiner
+                if (!this.activeClients.includes(clientIdStr)) {
+                    this.activeClients.push(clientIdStr);
+                }
 
-                    // CRITICAL FIX: Register clientId with network SDK for TICK decoding
-                    // Without this, late joiners can't decode inputs from clients
-                    // whose JOIN event was already included in the snapshot.
-                    // The SDK uses a hash-to-clientId map for binary TICK decoding.
-                    if (network?.registerClientId) {
-                        network.registerClientId(clientIdStr);
-                        if (DEBUG_NETWORK) {
-                            console.log(`[ecs] Registered clientId ${clientIdStr.slice(0, 8)} from snapshot entity`);
-                        }
-                    }
-
+                // CRITICAL FIX: Register clientId with network SDK for TICK decoding
+                // Without this, late joiners can't decode inputs from clients
+                // whose JOIN event was already included in the snapshot.
+                // The SDK uses a hash-to-clientId map for binary TICK decoding.
+                if (network?.registerClientId) {
+                    network.registerClientId(clientIdStr);
                     if (DEBUG_NETWORK) {
-                        console.log(`[ecs] Snapshot has entity for client ${clientIdStr.slice(0, 8)}`);
+                        console.log(`[ecs] Registered clientId ${clientIdStr.slice(0, 8)} from snapshot entity`);
                     }
+                }
+
+                if (DEBUG_NETWORK) {
+                    console.log(`[ecs] Snapshot has entity for client ${clientIdStr.slice(0, 8)}`);
                 }
             }
         }

@@ -1,4 +1,4 @@
-/* Modu Engine - Built: 2026-01-18T00:19:47.840Z - Commit: e376586 */
+/* Modu Engine - Built: 2026-01-20T08:39:51.638Z - Commit: f5de42b */
 // Modu Engine + Network SDK Combined Bundle
 "use strict";
 var moduNetwork = (() => {
@@ -1237,7 +1237,6 @@ var moduNetwork = (() => {
               const isResync = initialConnectionComplete;
               console.log(`[modu-network] Received INITIAL_STATE, ${isResync ? "RESYNC" : "connecting"}...`);
               const { snapshot, frame, snapshotHash } = msg;
-              console.warn(`[SDK-INITIAL_STATE] frame=${frame} snapshot=${snapshot ? "exists" : "null"} entities=${snapshot?.entities?.length || 0} inputs=${(msg.inputs || msg.events || []).length}`);
               if (snapshot && snapshotHash) {
                 snapshot.snapshotHash = snapshotHash;
               }
@@ -5298,6 +5297,7 @@ var Modu = (() => {
     // ==========================================
     /**
      * Intern a client ID string, get back a number.
+     * Creates a new mapping if one doesn't exist.
      */
     internClientId(clientId) {
       let num = this.clientIdToNum.get(clientId);
@@ -5307,6 +5307,14 @@ var Modu = (() => {
         this.numToClientId.set(num, clientId);
       }
       return num;
+    }
+    /**
+     * Get the numeric ID for a client ID string WITHOUT creating a new mapping.
+     * Returns undefined if the clientId hasn't been interned yet.
+     * Use this in onDisconnect to avoid creating orphan mappings.
+     */
+    getClientIdNum(clientId) {
+      return this.clientIdToNum.get(clientId);
     }
     /**
      * Get client ID string from number.
@@ -5895,9 +5903,6 @@ var Modu = (() => {
         if (expectedHash !== void 0 && loadedHash !== expectedHash) {
           console.error(`[SNAPSHOT] HASH MISMATCH! loaded=0x${loadedHash.toString(16)} expected=0x${expectedHash?.toString(16)}`);
         }
-        for (const input of inputs) {
-          this.processAuthorityChainInput(input);
-        }
         const rngStateSnapshot = saveRandomState();
         if (this.callbacks.onSnapshot) {
           this.callbacks.onSnapshot(this.world.getAllEntities());
@@ -5921,6 +5926,18 @@ var Modu = (() => {
           }
           return i.seq > snapshotSeq;
         }).sort((a, b) => a.seq - b.seq);
+        this.loadedSnapshotSeq = snapshotSeq;
+        for (const input of pendingInputs) {
+          const inputType = getInputType(input);
+          if (inputType === "disconnect" || inputType === "leave") {
+            this.processInput(input);
+          } else if (inputType === "join" || inputType === "reconnect") {
+            const inputSeq = input.seq || 0;
+            if (inputSeq > snapshotSeq) {
+              this.processInput(input);
+            }
+          }
+        }
         const snapshotFrame = this.currentFrame;
         const isPostTick = snapshot.postTick === true;
         const startFrame = isPostTick ? snapshotFrame + 1 : snapshotFrame;
@@ -5931,6 +5948,10 @@ var Modu = (() => {
           if (this.connection?.requestResync) {
             this.connection.requestResync();
           }
+          this.currentFrame = frame;
+          this.lastProcessedFrame = frame;
+          this.prevSnapshot = this.world.getSparseSnapshot();
+          this.startGameLoop();
           return;
         }
         if (ticksToRun > 0) {
@@ -6102,6 +6123,12 @@ var Modu = (() => {
         this.lastInputSeq = input.seq;
       }
       if (type === "join") {
+        const inputSeq = input.seq || 0;
+        const isAlreadyInSnapshot = this.inCatchupMode && inputSeq > 0 && inputSeq <= this.loadedSnapshotSeq;
+        if (isAlreadyInSnapshot) {
+          console.warn(`[ecs] Stale JOIN filtered (seq ${inputSeq} <= snapshotSeq ${this.loadedSnapshotSeq}): ${clientId.slice(0, 8)}`);
+          return;
+        }
         const wasActive = this.activeClients.includes(clientId);
         if (!wasActive) {
           this.activeClients.push(clientId);
@@ -6111,11 +6138,7 @@ var Modu = (() => {
           this.authorityClientId = clientId;
         }
         const rngState = saveRandomState();
-        const inputSeq = input.seq || 0;
-        const isAlreadyInSnapshot = this.inCatchupMode && inputSeq > 0 && inputSeq <= this.loadedSnapshotSeq;
-        if (!isAlreadyInSnapshot) {
-          this.callbacks.onConnect?.(clientId);
-        }
+        this.callbacks.onConnect?.(clientId);
         loadRandomState(rngState);
         if (this.checkIsAuthority()) {
           this.pendingSnapshotUpload = true;
@@ -6425,24 +6448,23 @@ var Modu = (() => {
       for (const entity of this.world.query(Player)) {
         const player = entity.get(Player);
         if (player.clientId === 0) {
-          console.error(`[DEBUG-SNAPSHOT] ERROR: eid=${entity.eid} has Player.clientId=0 (invalid!)`);
+          console.error(`[ecs] Player entity ${entity.eid} has clientId=0 (invalid)`);
+          continue;
         }
-        if (player.clientId !== 0) {
-          const clientIdStr = this.getClientIdString(player.clientId);
-          if (clientIdStr) {
-            this.clientsWithEntitiesFromSnapshot.add(clientIdStr);
-            if (!this.activeClients.includes(clientIdStr)) {
-              this.activeClients.push(clientIdStr);
-            }
-            if (network?.registerClientId) {
-              network.registerClientId(clientIdStr);
-              if (DEBUG_NETWORK) {
-                console.log(`[ecs] Registered clientId ${clientIdStr.slice(0, 8)} from snapshot entity`);
-              }
-            }
+        const clientIdStr = this.getClientIdString(player.clientId);
+        if (clientIdStr) {
+          this.clientsWithEntitiesFromSnapshot.add(clientIdStr);
+          if (!this.activeClients.includes(clientIdStr)) {
+            this.activeClients.push(clientIdStr);
+          }
+          if (network?.registerClientId) {
+            network.registerClientId(clientIdStr);
             if (DEBUG_NETWORK) {
-              console.log(`[ecs] Snapshot has entity for client ${clientIdStr.slice(0, 8)}`);
+              console.log(`[ecs] Registered clientId ${clientIdStr.slice(0, 8)} from snapshot entity`);
             }
+          }
+          if (DEBUG_NETWORK) {
+            console.log(`[ecs] Snapshot has entity for client ${clientIdStr.slice(0, 8)}`);
           }
         }
       }
@@ -7702,7 +7724,7 @@ var Modu = (() => {
   }
 
   // src/version.ts
-  var ENGINE_VERSION = "e376586";
+  var ENGINE_VERSION = "f5de42b";
 
   // src/plugins/debug-ui.ts
   var debugDiv = null;
