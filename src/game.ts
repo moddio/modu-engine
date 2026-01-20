@@ -1293,14 +1293,32 @@ export class Game {
 
         if (hasValidSnapshot) {
             // === LATE JOINER PATH ===
-            // NOTE: We do NOT pre-intern clientIds from join inputs here.
-            // The snapshot's clientIdMap already contains all mappings we need.
-            // Pre-interning caused desync because different clients had different
-            // pre-existing state, leading to divergent nextClientNum values.
 
+            // 1. CRITICAL: Build clientId mappings BEFORE loading snapshot!
+            // The snapshot stores numeric clientIds, but we need to map them back to strings
+            // to correctly populate clientsWithEntitiesFromSnapshot.
+            // ONLY process join inputs that are IN the snapshot (seq <= snapshotSeq).
+            // Joins that happen AFTER the snapshot will be interned when processed normally.
             const snapshotSeq = snapshot.seq || 0;
+            for (const input of inputs) {
+                // Skip joins that happen AFTER the snapshot - they'll be interned during normal processing
+                // Also skip if seq is undefined (shouldn't happen, but be safe)
+                if (input.seq === undefined || input.seq > snapshotSeq) {
+                    continue;
+                }
 
-            // Restore snapshot (clientIdMap restores numToClientId for clientsWithEntitiesFromSnapshot)
+                let data = input.data;
+                if (data instanceof Uint8Array) {
+                    try { data = decode(data); } catch { continue; }
+                }
+                const inputClientId = data?.clientId || input.clientId;
+                if (inputClientId && (data?.type === 'join' || data?.type === 'reconnect')) {
+                    // Intern the clientId to build numToClientId mapping
+                    this.internClientId(inputClientId);
+                }
+            }
+
+            // 2. Restore snapshot (now numToClientId has mappings for clientsWithEntitiesFromSnapshot)
             this.currentFrame = snapshot.frame || frame;
 
             this.loadNetworkSnapshot(snapshot);
@@ -1950,11 +1968,9 @@ export class Game {
             this.world.strings.setState(snapshot.strings);
         }
 
-        // Restore clientId interning from snapshot - snapshot is authoritative.
-        // NOTE: We do NOT preserve pre-existing mappings. Clients that joined AFTER
-        // the snapshot will be interned when their JOIN inputs are processed during catchup.
-        // Preserving pre-existing mappings caused desync because different clients had
-        // different state before loading, leading to divergent nextClientNum values.
+        // Restore clientId interning - MERGE with existing mappings!
+        // CRITICAL: handleConnect may have already interned clientIds from join inputs
+        // that occurred AFTER the snapshot was taken. We must preserve those.
         if (snapshot.clientIdMap) {
             const snapshotMappings = Object.entries(snapshot.clientIdMap.toNum) as [string, number][];
 
@@ -1965,10 +1981,26 @@ export class Game {
                 this.clientIdsFromSnapshotMap.add(clientId);
             }
 
-            // Restore snapshot's mappings (authoritative)
+            // Save any NEW clientIds that were interned from join inputs (not in snapshot)
+            const newMappings: [string, number][] = [];
+            for (const [clientId, num] of this.clientIdToNum.entries()) {
+                const snapshotHas = snapshotMappings.some(([sid]) => sid === clientId);
+                if (!snapshotHas) {
+                    newMappings.push([clientId, num]);
+                }
+            }
+
+            // Restore snapshot's mappings (authoritative for entities in snapshot)
             this.clientIdToNum = new Map(snapshotMappings.map(([k, v]) => [k, v as number]));
             this.numToClientId = new Map(snapshotMappings.map(([k, v]) => [v as number, k]));
             this.nextClientNum = snapshot.clientIdMap.nextNum || 1;
+
+            // Re-add NEW clientIds with fresh numbers (clients that joined after snapshot)
+            for (const [clientId] of newMappings) {
+                const newNum = this.nextClientNum++;
+                this.clientIdToNum.set(clientId, newNum);
+                this.numToClientId.set(newNum, clientId);
+            }
         }
 
         // Format 5: type-indexed encoding
