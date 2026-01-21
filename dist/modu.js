@@ -2964,6 +2964,9 @@ var World = class {
   getStateHash() {
     const sortedEids = Array.from(this.activeEntities).sort((a, b) => a - b);
     const syncedEids = sortedEids.filter((eid) => {
+      if (eid & LOCAL_ENTITY_BIT) {
+        return false;
+      }
       const typeName = this.entityTypes.get(eid);
       if (!typeName)
         return true;
@@ -4126,6 +4129,13 @@ var Game = class {
     this.isDesynced = false;
     const newLocalHash = this.world.getStateHash();
     const serverHash = snapshot.hash;
+    const allEnts = this.world.getAllEntities();
+    const localEnts = allEnts.filter((e) => (e.eid & 1073741824) !== 0);
+    const syncedEnts = allEnts.filter((e) => (e.eid & 1073741824) === 0);
+    console.log(`[RESYNC-DEBUG] After load: ${allEnts.length} total, ${syncedEnts.length} synced, ${localEnts.length} local (camera etc). Hash=${newLocalHash.toString(16)}`);
+    if (localEnts.length > 0) {
+      console.log(`[RESYNC-DEBUG] Local entities: ${localEnts.map((e) => e.type + "#" + e.eid.toString(16)).join(", ")}`);
+    }
     if (serverHash && newLocalHash === serverHash) {
       console.log(`[state-sync] Hard recovery successful - hash=${newLocalHash.toString(16).padStart(8, "0")}`);
     } else if (!serverHash) {
@@ -6193,7 +6203,7 @@ function disableDeterminismGuard() {
 }
 
 // src/version.ts
-var ENGINE_VERSION = "06b7be4";
+var ENGINE_VERSION = "fbf437b";
 
 // src/plugins/debug-ui.ts
 var debugDiv = null;

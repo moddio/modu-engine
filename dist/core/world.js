@@ -929,8 +929,12 @@ export class World {
     getStateHash() {
         // Get all entity data in deterministic order
         const sortedEids = Array.from(this.activeEntities).sort((a, b) => a - b);
-        // Filter out syncNone entities (client-only, should not affect hash)
+        // Filter out local and syncNone entities (client-only, should not affect hash)
         const syncedEids = sortedEids.filter(eid => {
+            // Skip local entities (they have LOCAL_ENTITY_BIT set)
+            if (eid & LOCAL_ENTITY_BIT) {
+                return false;
+            }
             const typeName = this.entityTypes.get(eid);
             if (!typeName)
                 return true; // Include if no type (shouldn't happen)

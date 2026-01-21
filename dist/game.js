@@ -739,6 +739,14 @@ export class Game {
         // Verify resync worked
         const newLocalHash = this.world.getStateHash();
         const serverHash = snapshot.hash;
+        // DEBUG: Log entity breakdown after resync
+        const allEnts = this.world.getAllEntities();
+        const localEnts = allEnts.filter(e => (e.eid & 0x40000000) !== 0);
+        const syncedEnts = allEnts.filter(e => (e.eid & 0x40000000) === 0);
+        console.log(`[RESYNC-DEBUG] After load: ${allEnts.length} total, ${syncedEnts.length} synced, ${localEnts.length} local (camera etc). Hash=${newLocalHash.toString(16)}`);
+        if (localEnts.length > 0) {
+            console.log(`[RESYNC-DEBUG] Local entities: ${localEnts.map(e => e.type + '#' + e.eid.toString(16)).join(', ')}`);
+        }
         if (serverHash && newLocalHash === serverHash) {
             console.log(`[state-sync] Hard recovery successful - hash=${newLocalHash.toString(16).padStart(8, '0')}`);
         }
