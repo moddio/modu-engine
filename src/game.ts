@@ -20,6 +20,7 @@ import { QueryIterator } from './core/query';
 import { encode, decode } from './codec';
 import { loadRandomState, saveRandomState } from './math/random';
 import { INDEX_MASK } from './core/constants';
+import { ENGINE_VERSION } from './version';
 import {
     computePartitionAssignment,
     getClientPartitions,
@@ -64,7 +65,7 @@ interface Connection {
     // State sync callbacks (set by game)
     onReliabilityUpdate?: (scores: Record<string, number>, version: number) => void;
     onMajorityHash?: (frame: number, hash: number) => void;
-    onResyncSnapshot?: (data: Uint8Array, frame: number) => void;
+    onResyncSnapshot?: (data: Uint8Array, frame: number, inputs: ServerInput[]) => void;
 }
 
 /** Network SDK interface */
@@ -797,8 +798,8 @@ export class Game {
                 };
             }
             if ('onResyncSnapshot' in this.connection) {
-                this.connection.onResyncSnapshot = (data: Uint8Array, frame: number) => {
-                    this.handleResyncSnapshot(data, frame);
+                this.connection.onResyncSnapshot = (data: Uint8Array, frame: number, inputs: ServerInput[]) => {
+                    this.handleResyncSnapshot(data, frame, inputs);
                 };
             }
         } catch (err: any) {
@@ -885,8 +886,8 @@ export class Game {
      * Handle resync snapshot from authority (hard recovery after desync).
      * This compares state, logs detailed diff, then replaces local state.
      */
-    private handleResyncSnapshot(data: Uint8Array, serverFrame: number): void {
-        console.warn(`[ENGINE-RESYNC] Received resync snapshot (${data.length} bytes) for frame ${serverFrame}. currentFrame=${this.currentFrame} isDesynced=${this.isDesynced}`);
+    private handleResyncSnapshot(data: Uint8Array, serverFrame: number, inputs: ServerInput[] = []): void {
+        console.warn(`[ENGINE-RESYNC] Received resync snapshot (${data.length} bytes) for frame ${serverFrame}. currentFrame=${this.currentFrame} isDesynced=${this.isDesynced} inputs=${inputs.length}`);
 
         // Decode the snapshot - try binary format first, then JSON fallback
         let snapshot: any;
@@ -973,7 +974,21 @@ export class Game {
         // Load the authority snapshot (this resets and rebuilds world state)
         this.loadNetworkSnapshot(snapshot);
 
-        // Update frame to match server
+        // Update frame to match snapshot
+        const snapshotFrame = snapshot.frame || serverFrame;
+        this.currentFrame = snapshotFrame;
+
+        // CRITICAL: Run catchup simulation if we have inputs
+        // The server already filters inputs to those after snapshot seq
+        if (inputs.length > 0) {
+            const ticksToRun = serverFrame - snapshotFrame;
+            if (ticksToRun > 0) {
+                console.log(`[RESYNC-CATCHUP] Running ${ticksToRun} ticks with ${inputs.length} inputs (snapshotFrame=${snapshotFrame}, serverFrame=${serverFrame})`);
+                this.runCatchup(snapshotFrame, serverFrame, inputs);
+            }
+        }
+
+        // Update frame to match server after catchup
         this.currentFrame = serverFrame;
 
         // Clear the desync state
@@ -3014,6 +3029,6 @@ export class GameEntityBuilder {
  * Initialize a new game instance.
  */
 export function createGame(): Game {
-    console.log('[MODU] Engine version: BUILD_50');
+    console.log(`[MODU] Engine version: ${ENGINE_VERSION}`);
     return new Game();
 }
