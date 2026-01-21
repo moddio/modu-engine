@@ -3616,9 +3616,7 @@ var Game = class {
     this.clientIdsFromSnapshotMap = /* @__PURE__ */ new Set();
     /** ClientIds that have DISCONNECT inputs during current catchup (for robust stale JOIN detection) */
     this.clientsWithDisconnectInCatchup = /* @__PURE__ */ new Set();
-    /** Seq of the loaded snapshot - JOINs with seq <= this are already in snapshot */
-    this.loadedSnapshotSeq = 0;
-    /** True when we're running catchup simulation (only then should we filter JOINs by seq) */
+    /** True during catchup simulation */
     this.inCatchupMode = false;
     /** Attached renderer */
     this.renderer = null;
@@ -3789,6 +3787,7 @@ var Game = class {
   // ==========================================
   /**
    * Intern a client ID string, get back a number.
+   * Creates a new mapping if one doesn't exist.
    */
   internClientId(clientId) {
     let num = this.clientIdToNum.get(clientId);
@@ -3798,6 +3797,12 @@ var Game = class {
       this.numToClientId.set(num, clientId);
     }
     return num;
+  }
+  /**
+   * Get the numeric ID for a client ID string without creating a new mapping.
+   */
+  getClientIdNum(clientId) {
+    return this.clientIdToNum.get(clientId);
   }
   /**
    * Get client ID string from number.
@@ -4144,7 +4149,6 @@ var Game = class {
     this.clientsWithEntitiesFromSnapshot.clear();
     this.clientIdsFromSnapshotMap.clear();
     this.clientsWithDisconnectInCatchup.clear();
-    this.loadedSnapshotSeq = 0;
     console.log(`[state-sync] === END RESYNC ===`);
   }
   /**
@@ -4362,32 +4366,12 @@ var Game = class {
     const hasValidSnapshot = snapshot?.entities && snapshot.entities.length > 0;
     if (hasValidSnapshot) {
       const snapshotSeq = snapshot.seq || 0;
-      for (const input of inputs) {
-        if (input.seq === void 0 || input.seq > snapshotSeq) {
-          continue;
-        }
-        let data = input.data;
-        if (data instanceof Uint8Array) {
-          try {
-            data = decode(data);
-          } catch {
-            continue;
-          }
-        }
-        const inputClientId = data?.clientId || input.clientId;
-        if (inputClientId && (data?.type === "join" || data?.type === "reconnect")) {
-          this.internClientId(inputClientId);
-        }
-      }
       this.currentFrame = snapshot.frame || frame;
       this.loadNetworkSnapshot(snapshot);
       const loadedHash = this.world.getStateHash();
       const expectedHash = snapshot.hash;
       if (expectedHash !== void 0 && loadedHash !== expectedHash) {
         console.error(`[SNAPSHOT] HASH MISMATCH! loaded=0x${loadedHash.toString(16)} expected=0x${expectedHash?.toString(16)}`);
-      }
-      for (const input of inputs) {
-        this.processAuthorityChainInput(input);
       }
       const rngStateSnapshot = saveRandomState();
       if (this.callbacks.onSnapshot) {
@@ -4405,13 +4389,13 @@ var Game = class {
         }
         return data?.type;
       };
-      const pendingInputs = inputs.filter((i) => {
-        const inputType = getInputType(i);
+      const pendingInputs = inputs.filter((i) => i.seq > snapshotSeq).sort((a, b) => a.seq - b.seq);
+      for (const input of pendingInputs) {
+        const inputType = getInputType(input);
         if (inputType === "join" || inputType === "reconnect" || inputType === "disconnect" || inputType === "leave") {
-          return true;
+          this.processInput(input);
         }
-        return i.seq > snapshotSeq;
-      }).sort((a, b) => a.seq - b.seq);
+      }
       const snapshotFrame = this.currentFrame;
       const isPostTick = snapshot.postTick === true;
       const startFrame = isPostTick ? snapshotFrame + 1 : snapshotFrame;
@@ -4422,6 +4406,10 @@ var Game = class {
         if (this.connection?.requestResync) {
           this.connection.requestResync();
         }
+        this.currentFrame = frame;
+        this.lastProcessedFrame = frame;
+        this.prevSnapshot = this.world.getSparseSnapshot();
+        this.startGameLoop();
         return;
       }
       if (ticksToRun > 0) {
@@ -4602,11 +4590,7 @@ var Game = class {
         this.authorityClientId = clientId;
       }
       const rngState = saveRandomState();
-      const inputSeq = input.seq || 0;
-      const isAlreadyInSnapshot = this.inCatchupMode && inputSeq > 0 && inputSeq <= this.loadedSnapshotSeq;
-      if (!isAlreadyInSnapshot) {
-        this.callbacks.onConnect?.(clientId);
-      }
+      this.callbacks.onConnect?.(clientId);
       loadRandomState(rngState);
       if (this.checkIsAuthority()) {
         this.pendingSnapshotUpload = true;
@@ -4717,7 +4701,6 @@ var Game = class {
     this.clientsWithEntitiesFromSnapshot.clear();
     this.clientIdsFromSnapshotMap.clear();
     this.clientsWithDisconnectInCatchup.clear();
-    this.loadedSnapshotSeq = 0;
     this.inCatchupMode = false;
   }
   // ==========================================
@@ -4802,7 +4785,6 @@ var Game = class {
     if (DEBUG_NETWORK) {
       console.log(`[ecs] Loading snapshot: ${snapshot.entities?.length} entities`);
     }
-    this.loadedSnapshotSeq = snapshot.seq || 0;
     this.world.reset();
     if (this.physics) {
       this.physics.clear();
@@ -4819,21 +4801,9 @@ var Game = class {
       for (const [clientId] of snapshotMappings) {
         this.clientIdsFromSnapshotMap.add(clientId);
       }
-      const newMappings = [];
-      for (const [clientId, num] of this.clientIdToNum.entries()) {
-        const snapshotHas = snapshotMappings.some(([sid]) => sid === clientId);
-        if (!snapshotHas) {
-          newMappings.push([clientId, num]);
-        }
-      }
       this.clientIdToNum = new Map(snapshotMappings.map(([k, v]) => [k, v]));
       this.numToClientId = new Map(snapshotMappings.map(([k, v]) => [v, k]));
       this.nextClientNum = snapshot.clientIdMap.nextNum || 1;
-      for (const [clientId] of newMappings) {
-        const newNum = this.nextClientNum++;
-        this.clientIdToNum.set(clientId, newNum);
-        this.numToClientId.set(newNum, clientId);
-      }
     }
     const types = snapshot.types;
     const schema = snapshot.schema;
@@ -4916,24 +4886,23 @@ var Game = class {
     for (const entity of this.world.query(Player)) {
       const player = entity.get(Player);
       if (player.clientId === 0) {
-        console.error(`[DEBUG-SNAPSHOT] ERROR: eid=${entity.eid} has Player.clientId=0 (invalid!)`);
+        console.error(`[ecs] Player entity ${entity.eid} has clientId=0 (invalid)`);
+        continue;
       }
-      if (player.clientId !== 0) {
-        const clientIdStr = this.getClientIdString(player.clientId);
-        if (clientIdStr) {
-          this.clientsWithEntitiesFromSnapshot.add(clientIdStr);
-          if (!this.activeClients.includes(clientIdStr)) {
-            this.activeClients.push(clientIdStr);
-          }
-          if (network?.registerClientId) {
-            network.registerClientId(clientIdStr);
-            if (DEBUG_NETWORK) {
-              console.log(`[ecs] Registered clientId ${clientIdStr.slice(0, 8)} from snapshot entity`);
-            }
-          }
+      const clientIdStr = this.getClientIdString(player.clientId);
+      if (clientIdStr) {
+        this.clientsWithEntitiesFromSnapshot.add(clientIdStr);
+        if (!this.activeClients.includes(clientIdStr)) {
+          this.activeClients.push(clientIdStr);
+        }
+        if (network?.registerClientId) {
+          network.registerClientId(clientIdStr);
           if (DEBUG_NETWORK) {
-            console.log(`[ecs] Snapshot has entity for client ${clientIdStr.slice(0, 8)}`);
+            console.log(`[ecs] Registered clientId ${clientIdStr.slice(0, 8)} from snapshot entity`);
           }
+        }
+        if (DEBUG_NETWORK) {
+          console.log(`[ecs] Snapshot has entity for client ${clientIdStr.slice(0, 8)}`);
         }
       }
     }
@@ -6193,7 +6162,7 @@ function disableDeterminismGuard() {
 }
 
 // src/version.ts
-var ENGINE_VERSION = "06b7be4";
+var ENGINE_VERSION = "a7fb187";
 
 // src/plugins/debug-ui.ts
 var debugDiv = null;
@@ -9241,3 +9210,4 @@ export {
   xxhash32Combine,
   xxhash32String
 };
+//# sourceMappingURL=index-AVHPNTDI.js.map
