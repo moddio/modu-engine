@@ -1296,6 +1296,7 @@ export class Game {
             // ONLY process join inputs that are IN the snapshot (seq <= snapshotSeq).
             // Joins that happen AFTER the snapshot will be interned when processed normally.
             const snapshotSeq = snapshot.seq || 0;
+
             for (const input of inputs) {
                 // Skip joins that happen AFTER the snapshot - they'll be interned during normal processing
                 // Also skip if seq is undefined (shouldn't happen, but be safe)
@@ -1309,7 +1310,6 @@ export class Game {
                 }
                 const inputClientId = data?.clientId || input.clientId;
                 if (inputClientId && (data?.type === 'join' || data?.type === 'reconnect')) {
-                    // Intern the clientId to build numToClientId mapping
                     this.internClientId(inputClientId);
                 }
             }
@@ -1318,6 +1318,7 @@ export class Game {
             this.currentFrame = snapshot.frame || frame;
 
             this.loadNetworkSnapshot(snapshot);
+
             // Verify loaded state hash matches expected (from authority)
             const loadedHash = this.world.getStateHash();
             const expectedHash = snapshot.hash;
@@ -2007,14 +2008,13 @@ export class Game {
             this.world.strings.setState(snapshot.strings);
         }
 
-        // Restore clientId interning - MERGE with existing mappings!
-        // CRITICAL: handleConnect may have already interned clientIds from join inputs
+        // Restore clientId interning - MERGE with existing mappings
+        // handleConnect may have already interned clientIds from join inputs
         // that occurred AFTER the snapshot was taken. We must preserve those.
         if (snapshot.clientIdMap) {
             const snapshotMappings = Object.entries(snapshot.clientIdMap.toNum) as [string, number][];
 
             // Track ALL clientIds from snapshot (including those who joined then left)
-            // This is used to detect "stale" JOINs during catchup
             this.clientIdsFromSnapshotMap.clear();
             for (const [clientId] of snapshotMappings) {
                 this.clientIdsFromSnapshotMap.add(clientId);
