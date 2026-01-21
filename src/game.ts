@@ -1100,6 +1100,10 @@ export class Game {
         // Compare each local entity with server entity
         for (const entity of this.world.getAllEntities()) {
             const eid = entity.eid;
+
+            // Skip local-only entities (camera, etc.) - they're not synced
+            if (eid & 0x40000000) continue;
+
             const serverEntity = serverEntityMap.get(eid);
             const index = eid & INDEX_MASK;
 
