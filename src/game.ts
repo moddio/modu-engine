@@ -1346,14 +1346,6 @@ export class Game {
                 .filter(i => i.seq > snapshotSeq)
                 .sort((a, b) => a.seq - b.seq);
 
-            // Process lifecycle events before catchup so player exists immediately
-            for (const input of pendingInputs) {
-                const inputType = getInputType(input);
-                if (inputType === 'join' || inputType === 'reconnect' || inputType === 'disconnect' || inputType === 'leave') {
-                    this.processInput(input);
-                }
-            }
-
             // 6. Run catchup simulation
             const snapshotFrame = this.currentFrame;
             const isPostTick = snapshot.postTick === true;
@@ -1371,7 +1363,15 @@ export class Game {
                     this.connection.requestResync();
                 }
 
-                // Player lifecycle events already processed above, so player exists.
+                // Process lifecycle events so player exists while waiting for resync
+                // (normally these would be processed during catchup)
+                for (const input of pendingInputs) {
+                    const inputType = getInputType(input);
+                    if (inputType === 'join' || inputType === 'reconnect' || inputType === 'disconnect' || inputType === 'leave') {
+                        this.processInput(input);
+                    }
+                }
+
                 // Set up minimal state so game loop can run while waiting for resync.
                 this.currentFrame = frame;
                 this.lastProcessedFrame = frame;
@@ -1486,11 +1486,11 @@ export class Game {
             console.log(`[ecs] onTick frame=${frame}: ${inputs.length} inputs (${types})`);
         }
 
-        // 1. Process all inputs for this frame (sorted by seq for determinism)
-        // Multiple inputs can arrive in a single tick - seq determines order
-        const sortedInputs = inputs.length > 1
-            ? [...inputs].sort((a, b) => (a.seq || 0) - (b.seq || 0))
-            : inputs;
+        // 1. Process all inputs for this frame
+        // Server already sorts inputs by (clientFrame, clientId) for determinism.
+        // DO NOT re-sort by seq here - seq reflects arrival order at server,
+        // not the deterministic processing order. Trust the tick message order.
+        const sortedInputs = inputs;
 
         for (const input of sortedInputs) {
             this.processInput(input);
@@ -1652,20 +1652,20 @@ export class Game {
             if (!wasActive) {
                 this.activeClients.push(clientId);
                 this.activeClients.sort();
-            }
 
-            if (this.authorityClientId === null) {
-                this.authorityClientId = clientId;
-            }
+                if (this.authorityClientId === null) {
+                    this.authorityClientId = clientId;
+                }
 
-            // Isolate RNG for callback
-            const rngState = saveRandomState();
-            this.callbacks.onConnect?.(clientId);
-            loadRandomState(rngState);
+                // Isolate RNG for callback
+                const rngState = saveRandomState();
+                this.callbacks.onConnect?.(clientId);
+                loadRandomState(rngState);
 
-            // Mark snapshot needed
-            if (this.checkIsAuthority()) {
-                this.pendingSnapshotUpload = true;
+                // Mark snapshot needed
+                if (this.checkIsAuthority()) {
+                    this.pendingSnapshotUpload = true;
+                }
             }
         } else if (type === 'resync_request') {
             // Another client is requesting resync - authority should upload fresh snapshot
@@ -1678,22 +1678,22 @@ export class Game {
             const activeIdx = this.activeClients.indexOf(clientId);
             if (activeIdx !== -1) {
                 this.activeClients.splice(activeIdx, 1);
-            }
 
-            if (clientId === this.authorityClientId) {
-                this.authorityClientId = this.activeClients[0] || null;
-            }
+                if (clientId === this.authorityClientId) {
+                    this.authorityClientId = this.activeClients[0] || null;
+                }
 
-            this.clientsWithEntitiesFromSnapshot.delete(clientId);
+                this.clientsWithEntitiesFromSnapshot.delete(clientId);
 
-            // Isolate RNG for callback
-            const rngStateDisconnect = saveRandomState();
-            this.callbacks.onDisconnect?.(clientId);
-            loadRandomState(rngStateDisconnect);
+                // Isolate RNG for callback
+                const rngStateDisconnect = saveRandomState();
+                this.callbacks.onDisconnect?.(clientId);
+                loadRandomState(rngStateDisconnect);
 
-            // CRITICAL FIX: Upload snapshot after disconnect so late joiners get updated state.
-            if (this.checkIsAuthority()) {
-                this.pendingSnapshotUpload = true;
+                // CRITICAL FIX: Upload snapshot after disconnect so late joiners get updated state.
+                if (this.checkIsAuthority()) {
+                    this.pendingSnapshotUpload = true;
+                }
             }
         } else if (data) {
             // Game input - store in world's input registry
