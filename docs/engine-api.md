@@ -57,7 +57,7 @@ game.defineEntity('player')
 
 Add a component to the entity definition with optional default values.
 
-### `.sync(fields)`
+### `.syncOnly(fields)`
 
 Specify which component fields to include in network snapshots. If not called, all fields are synced (default).
 
@@ -66,7 +66,18 @@ game.defineEntity('snake-segment')
     .with(Transform2D)
     .with(Sprite)
     .with(SnakeSegment)
-    .sync(['x', 'y', 'ownerId', 'spawnFrame'])  // Only sync these 4 fields
+    .syncOnly(['x', 'y', 'ownerId', 'spawnFrame'])  // Only sync these 4 fields
+    .register();
+```
+
+### `.syncNone()`
+
+Exclude all fields from syncing. The entity will not be included in network snapshots at all. Use for purely client-local entities like cameras, UI, or effects.
+
+```javascript
+game.defineEntity('local-camera')
+    .with(Camera2D)
+    .syncNone()
     .register();
 ```
 
@@ -79,7 +90,7 @@ game.defineEntity('snake-segment')
     .with(Transform2D)
     .with(Sprite)
     .with(SnakeSegment)
-    .sync(['x', 'y', 'ownerId', 'spawnFrame'])
+    .syncOnly(['x', 'y', 'ownerId', 'spawnFrame'])
     .onRestore((entity, game) => {
         // Reconstruct color from owner
         const owner = game.world.getEntityByClientId(entity.get(SnakeSegment).ownerId);
@@ -152,14 +163,27 @@ for (const entity of game.query(Transform2D)) {
 
 ### Query Methods
 
+Queries return an iterator with additional helper methods:
+
 ```javascript
 const query = game.query('player');
 
-query.toArray()           // Convert to array
-query.first()             // Get first match
-query.count()             // Count without allocating
-query.find(e => e.x > 0)  // Find with predicate
+// Iteration
+for (const entity of query) { }
+
+// Helper methods
+query.toArray()              // Entity[] - Convert to array
+query.first()                // Entity | undefined - Get first match
+query.count()                // number - Count without allocating
+query.find(e => e.x > 0)     // Entity | undefined - Find with predicate
 ```
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `toArray()` | `Entity[]` | Collects all matching entities into an array |
+| `first()` | `Entity \| undefined` | Returns first entity or undefined if empty |
+| `count()` | `number` | Counts entities without creating an array |
+| `find(predicate)` | `Entity \| undefined` | Returns first entity matching predicate |
 
 ### `game.getEntitiesByType(type)`
 
@@ -414,6 +438,84 @@ game.world.entityCount  // Total active entities
 game.world.frame        // Current frame
 game.world.reset()      // Clear all entities
 ```
+
+### `game.world.getEntity(eid)`
+
+Get an entity by its entity ID. Returns `null` if entity doesn't exist or is destroyed.
+
+```javascript
+const entity = game.world.getEntity(eid);
+if (entity) {
+    console.log(entity.type);  // Entity type name
+}
+```
+
+### `game.world.getInput(clientId)`
+
+Get the current input data for a client. Returns the input object or `undefined` if no input recorded.
+
+```javascript
+// In a system or callback
+for (const player of game.query('player')) {
+    const clientId = player.get(Player).clientId;
+    const input = game.world.getInput(clientId);
+    if (input?.target) {
+        player.moveTowardsWithStop(input.target, 5, 20);
+    }
+}
+```
+
+## Entity Properties
+
+Entities have several important properties:
+
+### `entity.eid`
+
+The entity ID (number). Unique identifier for this entity.
+
+```javascript
+const entity = game.spawn('player', { x: 100, y: 100 });
+console.log(entity.eid);  // e.g., 1
+```
+
+### `entity.type`
+
+The entity type name (string).
+
+```javascript
+console.log(entity.type);  // 'player'
+```
+
+### `entity.destroyed`
+
+Whether the entity has been destroyed (boolean). Always check this before accessing entity data.
+
+```javascript
+if (!entity.destroyed) {
+    const pos = entity.get(Transform2D);
+    console.log(pos.x, pos.y);
+}
+```
+
+### `entity.render`
+
+Render-only state for interpolation and screen position. Client-only, never serialized.
+
+```javascript
+// In render callback
+const render = entity.render;
+console.log(render.interpX, render.interpY);  // Interpolated position
+console.log(render.screenX, render.screenY);  // Screen coordinates
+console.log(render.prevX, render.prevY);      // Previous tick position
+console.log(render.visible);                   // Visibility flag
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `prevX`, `prevY` | number | Previous tick position |
+| `interpX`, `interpY` | number | Interpolated position (computed each render) |
+| `screenX`, `screenY` | number | Screen coordinates after camera transform |
+| `visible` | boolean | Whether entity is visible |
 
 ## Complete Example
 

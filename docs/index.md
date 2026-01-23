@@ -22,6 +22,7 @@ Local-first multiplayer game engine. Play instantly, sync seamlessly.
 ### Reference
 - [Engine API](./engine-api.md) - Full API reference
 - [Determinism](./determinism.md) - Rules for sync
+- [State Sync Design](./STATE_SYNC_DESIGN.md) - Network synchronization internals
 
 ## Quick Example
 

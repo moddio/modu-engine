@@ -55,7 +55,7 @@ body.bodyType = BODY_KINEMATIC;
 | `friction` | number | 0 | Surface friction |
 | `damping` | number | 0 | Velocity damping (0-1, applied each frame) |
 | `bodyType` | number | 0 | BODY_DYNAMIC, BODY_STATIC, or BODY_KINEMATIC |
-| `shapeType` | number | 0 | SHAPE_RECT or SHAPE_CIRCLE |
+| `shapeType` | number | 1 | SHAPE_RECT (0) or SHAPE_CIRCLE (1) |
 | `isSensor` | boolean | false | Detect overlaps without collision response |
 
 **Body Types:**
@@ -82,7 +82,7 @@ sprite.layer = 1;
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `shape` | number | 0 | SHAPE_RECT, SHAPE_CIRCLE, or SPRITE_IMAGE |
+| `shape` | number | 1 | SHAPE_RECT (0), SHAPE_CIRCLE (1), or SPRITE_IMAGE (2) |
 | `width` | number | 0 | Width for rectangles |
 | `height` | number | 0 | Height for rectangles |
 | `radius` | number | 0 | Radius for circles |
@@ -200,6 +200,28 @@ const Stats = defineComponent('Stats', {
 ```
 
 **Important:** Avoid floats in components for game state. Use fixed-point math for determinism.
+
+### Explicit Field Types
+
+For advanced use cases, you can explicitly specify field types using object syntax:
+
+```javascript
+const RenderData = defineComponent('RenderData', {
+    // Explicit type declarations
+    animFrame: { type: 'u8', default: 0 },      // 8-bit unsigned (0-255)
+    isFlipped: { type: 'bool', default: false }, // boolean
+    renderAlpha: { type: 'f32', default: 1.0 }   // 32-bit float (NON-DETERMINISTIC)
+});
+```
+
+| Type | Storage | Range | Use Case |
+|------|---------|-------|----------|
+| `i32` | Int32Array | -2^31 to 2^31-1 | Default for all numbers (deterministic) |
+| `u8` | Uint8Array | 0-255 | Flags, enums, small counts |
+| `bool` | Uint8Array | true/false | Boolean flags |
+| `f32` | Float32Array | IEEE 754 | **Render-only data** (non-deterministic!) |
+
+**Warning:** `f32` fields are **non-deterministic** and should only be used for render-only data that is not synced across clients. Never use `f32` for game state that affects simulation.
 
 ### Sync Options
 

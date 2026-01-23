@@ -23,7 +23,8 @@ game.defineEntity('player')
     .with(Transform2D)
     .with(Sprite, { shape: SHAPE_CIRCLE, radius: 20 })
     .with(Body2D, { radius: 20, bodyType: BODY_KINEMATIC })
-    .with(Player);
+    .with(Player)
+    .register();
 
 // Runs every frame on all clients
 game.addSystem(() => {
