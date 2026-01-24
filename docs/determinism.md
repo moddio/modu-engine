@@ -31,7 +31,6 @@ The guard warns you when dangerous functions are called during simulation:
 | `Math.random()` | `dRandom()` |
 | `Math.sqrt(x)` | `dSqrt(x)` |
 | `Date.now()` | `game.time` |
-| `game.frame` | `game.time` (more intuitive) |
 | `performance.now()` | `game.time` |
 
 ## Common Pitfalls

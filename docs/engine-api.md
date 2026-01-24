@@ -57,7 +57,7 @@ game.defineEntity('player')
 
 Add a component to the entity definition with optional default values.
 
-### `.sync(fields)`
+### `.syncOnly(fields)`
 
 Specify which component fields to include in network snapshots. If not called, all fields are synced (default).
 
@@ -66,7 +66,7 @@ game.defineEntity('snake-segment')
     .with(Transform2D)
     .with(Sprite)
     .with(SnakeSegment)
-    .sync(['x', 'y', 'ownerId', 'spawnFrame'])  // Only sync these 4 fields
+    .syncOnly(['x', 'y', 'ownerId', 'spawnFrame'])  // Only sync these 4 fields
     .register();
 ```
 
@@ -328,7 +328,7 @@ if (game.time >= respawnTime) {
 
 ### `game.localClientId`
 
-The local client's ID (string).
+The local client's ID (`string | null`). Returns `null` until connected to the network.
 
 ```javascript
 if (entity.get(Player).clientId === game.localClientId) {

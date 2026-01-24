@@ -848,9 +848,6 @@ export class World {
     /** Current sequence number */
     seq: number = 0;
 
-    /** RNG state (for determinism) - deprecated, now uses global random state */
-    rngState?: { s0: number; s1: number };
-
     /**
      * Get sparse snapshot (efficient format).
      */
