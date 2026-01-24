@@ -1,4 +1,4 @@
-/* Modu Engine - Built: 2026-01-11T21:53:04.537Z - Commit: 61e8993 */
+/* Modu Engine - Built: 2026-01-24T08:20:32.357Z - Commit: 91e8dc2 */
 // Modu Engine + Network SDK Combined Bundle
 "use strict";
 var moduNetwork = (() => {
@@ -27,12 +27,112 @@ var moduNetwork = (() => {
     decodeBinaryMessage: () => decodeBinaryMessage,
     encodeSyncHash: () => encodeSyncHash,
     getRandomRoom: () => getRandomRoom,
+    getUrlRoomPrefix: () => getUrlRoomPrefix,
     hashClientId: () => hashClientId,
     listRooms: () => listRooms,
+    lookupClientHash: () => lookupClientHash,
     modd: () => modd,
+    prefixRoomId: () => prefixRoomId,
     registerClientId: () => registerClientId,
     unregisterClientId: () => unregisterClientId
   });
+
+  // src/codec/binary.ts
+  var TYPE_NULL = 0;
+  var TYPE_FALSE = 1;
+  var TYPE_TRUE = 2;
+  var TYPE_INT32 = 5;
+  var TYPE_FLOAT64 = 6;
+  var TYPE_STRING = 7;
+  var TYPE_ARRAY = 8;
+  var TYPE_OBJECT = 9;
+  var TYPE_UINT8 = 10;
+  var TYPE_UINT16 = 11;
+  var TYPE_UINT32 = 12;
+  var BinaryDecoder = class {
+    constructor(data) {
+      this.pos = 0;
+      this.data = data;
+    }
+    readByte() {
+      return this.data[this.pos++];
+    }
+    readUint16() {
+      const b1 = this.data[this.pos++];
+      const b2 = this.data[this.pos++];
+      return b1 << 8 | b2;
+    }
+    readUint32() {
+      const b1 = this.data[this.pos++];
+      const b2 = this.data[this.pos++];
+      const b3 = this.data[this.pos++];
+      const b4 = this.data[this.pos++];
+      return (b1 << 24 | b2 << 16 | b3 << 8 | b4) >>> 0;
+    }
+    readInt32() {
+      const u = this.readUint32();
+      return u > 2147483647 ? u - 4294967296 : u;
+    }
+    readFloat64() {
+      const view = new DataView(new ArrayBuffer(8));
+      for (let i = 0; i < 8; i++) {
+        view.setUint8(i, this.data[this.pos++]);
+      }
+      return view.getFloat64(0, false);
+    }
+    readString() {
+      const len = this.readUint16();
+      const bytes = this.data.slice(this.pos, this.pos + len);
+      this.pos += len;
+      return new TextDecoder().decode(bytes);
+    }
+    readValue() {
+      const type = this.readByte();
+      switch (type) {
+        case TYPE_NULL:
+          return null;
+        case TYPE_FALSE:
+          return false;
+        case TYPE_TRUE:
+          return true;
+        case TYPE_UINT8:
+          return this.readByte();
+        case TYPE_UINT16:
+          return this.readUint16();
+        case TYPE_INT32:
+          return this.readInt32();
+        case TYPE_UINT32:
+          return this.readUint32();
+        case TYPE_FLOAT64:
+          return this.readFloat64();
+        case TYPE_STRING:
+          return this.readString();
+        case TYPE_ARRAY: {
+          const len = this.readUint16();
+          const arr = [];
+          for (let i = 0; i < len; i++) {
+            arr.push(this.readValue());
+          }
+          return arr;
+        }
+        case TYPE_OBJECT: {
+          const len = this.readUint16();
+          const obj = {};
+          for (let i = 0; i < len; i++) {
+            const key = this.readString();
+            obj[key] = this.readValue();
+          }
+          return obj;
+        }
+        default:
+          return null;
+      }
+    }
+  };
+  function decode(data) {
+    const decoder = new BinaryDecoder(data);
+    return decoder.readValue();
+  }
 
   // src/auth.ts
   var TOKEN_KEY = "modd_auth_token";
@@ -64,11 +164,6 @@ var moduNetwork = (() => {
       this.debug = options.debug || false;
       if (options.centralServiceUrl) {
         this.centralServiceUrl = options.centralServiceUrl;
-      } else if (typeof window !== "undefined") {
-        const hostname = window.location.hostname;
-        if (hostname === "localhost" || hostname === "127.0.0.1") {
-          this.centralServiceUrl = "http://localhost:9001";
-        }
       }
       this.initialized = true;
       this.log("Auth module initialized", { appId: this.appId, centralServiceUrl: this.centralServiceUrl });
@@ -663,6 +758,21 @@ var moduNetwork = (() => {
     }
     return hash;
   }
+  function getUrlRoomPrefix() {
+    if (typeof window === "undefined") return "";
+    const url = window.location.origin + window.location.pathname;
+    let hash = 2166136261;
+    for (let i = 0; i < url.length; i++) {
+      hash ^= url.charCodeAt(i);
+      hash = Math.imul(hash, 16777619) >>> 0;
+    }
+    return hash.toString(16).padStart(8, "0");
+  }
+  function prefixRoomId(roomId) {
+    const prefix = getUrlRoomPrefix();
+    if (!prefix) return roomId;
+    return `${prefix}-${roomId}`;
+  }
   var clientHashMap = /* @__PURE__ */ new Map();
   function registerClientId(clientId) {
     const hash = hashClientId(clientId);
@@ -733,7 +843,7 @@ var moduNetwork = (() => {
               return { type: "TICK", frame, snapshotFrame, snapshotHash, majorityHash, inputs, events: inputs };
             }
             const inputCount = view.getUint8(offset);
-            offset++;
+            offset += 1;
             for (let i = 0; i < inputCount && offset + 10 <= buffer.byteLength; i++) {
               const clientHash = view.getUint32(offset, true);
               offset += 4;
@@ -757,11 +867,9 @@ var moduNetwork = (() => {
                 data = rawBytes;
               }
               let clientId;
-              if (typeof data === "object" && !(data instanceof Uint8Array)) {
-                if (data.clientId && !lookupClientHash(clientHash)) {
-                  registerClientId(data.clientId);
-                }
-                clientId = data.clientId || lookupClientHash(clientHash) || `hash_${clientHash.toString(16)}`;
+              if (typeof data === "object" && !(data instanceof Uint8Array) && data.clientId) {
+                clientId = data.clientId;
+                registerClientId(clientId);
               } else {
                 clientId = lookupClientHash(clientHash) || `hash_${clientHash.toString(16)}`;
               }
@@ -790,6 +898,34 @@ var moduNetwork = (() => {
           }
           const snapshotBytes = new Uint8Array(buffer, offset, snapshotLen);
           offset += snapshotLen;
+          let snapshot = null;
+          let snapshotHash = "";
+          if (snapshotLen > 0) {
+            const firstByte = snapshotBytes[0];
+            if (firstByte === 123) {
+              try {
+                const jsonStr = new TextDecoder().decode(snapshotBytes);
+                const parsed = JSON.parse(jsonStr);
+                snapshot = parsed.snapshot || parsed;
+                snapshotHash = parsed.snapshotHash || "";
+              } catch {
+                snapshot = null;
+              }
+            } else {
+              try {
+                const decoded = decode(snapshotBytes);
+                snapshot = decoded?.snapshot || decoded;
+                snapshotHash = decoded?.hash || "";
+              } catch {
+                snapshot = null;
+              }
+            }
+          }
+          if (snapshot?.clientIdMap?.toNum) {
+            for (const clientId of Object.keys(snapshot.clientIdMap.toNum)) {
+              registerClientId(clientId);
+            }
+          }
           const inputCount = view.getUint16(offset, true);
           offset += 2;
           const inputs = [];
@@ -818,17 +954,15 @@ var moduNetwork = (() => {
               data = rawBytes;
             }
             let clientId;
-            if (typeof data === "object" && !(data instanceof Uint8Array)) {
-              if (data.clientId && !lookupClientHash(clientHash)) {
-                registerClientId(data.clientId);
-              }
-              clientId = data.clientId || lookupClientHash(clientHash) || `hash_${clientHash.toString(16)}`;
+            if (typeof data === "object" && !(data instanceof Uint8Array) && data.clientId) {
+              clientId = data.clientId;
+              registerClientId(clientId);
             } else {
               clientId = lookupClientHash(clientHash) || `hash_${clientHash.toString(16)}`;
             }
             inputs.push({ seq, frame: inputFrame, data, clientId, clientHash });
           }
-          return { type: "INITIAL_STATE", frame, snapshot: snapshotBytes, snapshotHash: "", inputs, events: inputs };
+          return { type: "INITIAL_STATE", frame, snapshot, snapshotHash, inputs, events: inputs };
         }
         case BinaryMessageType.ROOM_CREATED: {
           let offset = 1;
@@ -909,6 +1043,9 @@ var moduNetwork = (() => {
     return new Uint8Array(data).buffer;
   }
   async function connect(roomId, options) {
+    const originalRoomId = roomId;
+    roomId = prefixRoomId(roomId);
+    console.log(`[ecs] Starting game locally, connecting to room "${roomId}" (original: "${originalRoomId}")...`);
     const initialSnapshot = options.snapshot || {};
     const user = options.user || null;
     const onConnect = options.onConnect || (() => {
@@ -924,7 +1061,7 @@ var moduNetwork = (() => {
     if (!appId) {
       throw new Error("[modu-network] appId is required. Pass appId in connect options.");
     }
-    const centralServiceUrl = options.centralServiceUrl || (typeof window !== "undefined" && (window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1") ? "http://localhost:9001" : "https://nodes.modd.io");
+    const centralServiceUrl = options.centralServiceUrl || "https://nodes.modd.io";
     console.log("[modu-network] Central service URL:", centralServiceUrl);
     let connected = false;
     let initialConnectionComplete = false;
@@ -1014,6 +1151,14 @@ var moduNetwork = (() => {
         const wsUrl = nodeToken ? `${nodeUrl}?token=${encodeURIComponent(nodeToken)}` : nodeUrl;
         ws = new WS(wsUrl);
         ws.binaryType = "arraybuffer";
+        const handleBeforeUnload = () => {
+          if (ws && ws.readyState === 1) {
+            ws.close();
+          }
+        };
+        if (typeof window !== "undefined") {
+          window.addEventListener("beforeunload", handleBeforeUnload);
+        }
         const instance = {
           send(data) {
             if (!connected || !ws || ws.readyState !== 1) return;
@@ -1169,6 +1314,9 @@ var moduNetwork = (() => {
           connected = false;
           if (bandwidthInterval) clearInterval(bandwidthInterval);
           if (hashInterval) clearInterval(hashInterval);
+          if (typeof window !== "undefined") {
+            window.removeEventListener("beforeunload", handleBeforeUnload);
+          }
           onDisconnect();
         };
         ws.onmessage = async (e) => {
@@ -1253,14 +1401,14 @@ var moduNetwork = (() => {
               }
               if (isResync) {
                 if (instance.onResyncSnapshot && msg.binaryData) {
-                  console.log(`[modu-network] Calling onResyncSnapshot with ${msg.binaryData.length} bytes, frame=${frame}`);
-                  instance.onResyncSnapshot(msg.binaryData, frame);
+                  console.log(`[modu-network] Calling onResyncSnapshot with ${msg.binaryData.length} bytes, frame=${frame}, inputs=${inputs?.length || 0}`);
+                  instance.onResyncSnapshot(msg.binaryData, frame, inputs || []);
                 } else if (instance.onResyncSnapshot && snapshot) {
                   const snapshotJson = JSON.stringify({ snapshot, snapshotHash });
                   const encoder = new TextEncoder();
                   const binaryData = encoder.encode(snapshotJson);
-                  console.log(`[modu-network] Calling onResyncSnapshot with JSON snapshot (${binaryData.length} bytes), frame=${frame}`);
-                  instance.onResyncSnapshot(binaryData, frame);
+                  console.log(`[modu-network] Calling onResyncSnapshot with JSON snapshot (${binaryData.length} bytes), frame=${frame}, inputs=${inputs?.length || 0}`);
+                  instance.onResyncSnapshot(binaryData, frame, inputs || []);
                 } else {
                   console.warn("[modu-network] RESYNC received but no onResyncSnapshot callback registered!");
                 }
@@ -1268,6 +1416,16 @@ var moduNetwork = (() => {
                 connected = true;
                 initialConnectionComplete = true;
                 clearConnectionTimeout();
+                if (snapshot?.clientIdMap?.toNum) {
+                  for (const [clientId] of Object.entries(snapshot.clientIdMap.toNum)) {
+                    registerClientId(clientId);
+                  }
+                }
+                if (inputs && inputs.length > 0) {
+                  for (const inp of inputs) {
+                    reResolveClientId(inp);
+                  }
+                }
                 onConnect(snapshot, inputs || [], frame, nodeUrl, tickRate, myClientId);
                 if (pendingTicks.length > 0) {
                   pendingTicks.sort((a, b) => a.frame - b.frame);
@@ -1323,7 +1481,7 @@ var moduNetwork = (() => {
     }
   }
   function getCentralServiceUrl(centralServiceUrl) {
-    return centralServiceUrl || (typeof window !== "undefined" && (window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1") ? "http://localhost:9001" : "https://nodes.modd.io");
+    return centralServiceUrl || "https://nodes.modd.io";
   }
   async function listRooms(appId, options = {}) {
     const centralUrl = getCentralServiceUrl(options.centralServiceUrl);
@@ -7556,7 +7714,7 @@ var Modu = (() => {
   }
 
   // src/version.ts
-  var ENGINE_VERSION = "61e8993";
+  var ENGINE_VERSION = "91e8dc2";
 
   // src/plugins/debug-ui.ts
   var debugDiv = null;
