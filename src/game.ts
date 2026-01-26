@@ -1406,11 +1406,8 @@ export class Game {
 
             // First joiner is always authority
             this.authorityClientId = clientId;
-            // Add to activeClients for state sync
-            if (!this.activeClients.includes(clientId)) {
-                this.activeClients.push(clientId);
-                this.activeClients.sort();
-            }
+            // NOTE: Do NOT add clientId to activeClients here - let processInput handle it
+            // when it processes the join event. This ensures onConnect callback is called.
 
             // LOCAL-FIRST HANDOFF: If start() was called before connect(),
             // flush local state and recreate fresh with server identity.
@@ -1428,7 +1425,7 @@ export class Game {
                 this.clientIdToNum.clear();
                 this.numToClientId.clear();
                 this.nextClientNum = 1;
-                this.activeClients = [clientId];
+                this.activeClients = [];  // Clear - will be populated by processInput
                 this.stateHashHistory.clear(); // Clear old local hashes to prevent false desync
                 this.localRoomCreated = false; // Reset so callbacks run fresh
 
@@ -1440,7 +1437,8 @@ export class Game {
                 this.callbacks.onRoomCreate?.();
             }
 
-            // Process all inputs (may include our own join event which calls onConnect)
+            // Process all inputs - server always includes our join event in INITIAL_STATE
+            // which will call onConnect and add us to activeClients
             for (const input of inputs) {
                 this.processInput(input);
             }
