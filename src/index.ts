@@ -102,3 +102,8 @@ export * as codec from './codec';
 // Hash (xxHash32)
 // ============================================
 export * from './hash';
+
+// ============================================
+// Prediction (Client-Side Prediction)
+// ============================================
+export * from './prediction';

@@ -30,6 +30,13 @@ import {
     isDeltaEmpty,
     getDeltaSize
 } from './sync';
+import {
+    PredictionManager,
+    PredictionConfig,
+    PredictionStats,
+    TimeSyncStats,
+    ServerInput as PredictionServerInput
+} from './prediction';
 
 // ==========================================
 // Types
@@ -301,6 +308,22 @@ export class Game {
     /** Installed plugins */
     private plugins: Map<string, any> = new Map();
 
+    // ==========================================
+    // Client-Side Prediction
+    // ==========================================
+
+    /** Prediction manager (null when prediction disabled) */
+    private predictionManager: PredictionManager | null = null;
+
+    /** Pending sync timestamp for time synchronization */
+    private pendingSyncTimestamp: number | null = null;
+
+    /** Last time sync was performed */
+    private lastTimeSyncTime: number = 0;
+
+    /** Time sync re-sync interval (ms) - resync every 30 seconds */
+    private timeSyncResyncInterval: number = 30000;
+
     constructor() {
         this.world = new World();
     }
@@ -358,6 +381,83 @@ export class Game {
      */
     get time(): number {
         return this.currentFrame * this.tickIntervalMs;
+    }
+
+    // ==========================================
+    // Client-Side Prediction API
+    // ==========================================
+
+    /**
+     * Enable client-side prediction with optional configuration.
+     *
+     * When enabled, the client predicts game state ahead of the server
+     * and rolls back/resimulates when predictions are incorrect.
+     *
+     * @example
+     * game.enablePrediction({
+     *     inputDelayFrames: 2,      // Buffer for network latency
+     *     maxPredictionFrames: 8,   // Max frames to predict ahead
+     *     maxRollbackFrames: 10     // Max frames to rollback
+     * });
+     *
+     * @param config Optional prediction configuration
+     */
+    enablePrediction(config?: Partial<PredictionConfig>): void {
+        if (!this.predictionManager) {
+            this.predictionManager = new PredictionManager(this.world, config);
+        } else if (config) {
+            this.predictionManager.enable(config);
+        } else {
+            this.predictionManager.enable();
+        }
+
+        // Set local client ID if already known
+        if (this.localClientIdStr) {
+            this.predictionManager.setLocalClientId(this.localClientIdStr);
+        }
+
+        // Set tick interval
+        this.predictionManager.setTickInterval(this.tickIntervalMs);
+
+        console.log('[CSP] Client-side prediction enabled');
+    }
+
+    /**
+     * Disable client-side prediction.
+     */
+    disablePrediction(): void {
+        if (this.predictionManager) {
+            this.predictionManager.disable();
+            console.log('[CSP] Client-side prediction disabled');
+        }
+    }
+
+    /**
+     * Check if prediction is enabled.
+     */
+    isPredictionEnabled(): boolean {
+        return this.predictionManager?.enabled ?? false;
+    }
+
+    /**
+     * Get prediction statistics (rollback count, avg depth, etc.).
+     */
+    getPredictionStats(): PredictionStats | null {
+        return this.predictionManager?.getStats() ?? null;
+    }
+
+    /**
+     * Get time sync statistics.
+     */
+    getTimeSyncStats(): TimeSyncStats | null {
+        return this.predictionManager?.getTimeSyncManager().getStats() ?? null;
+    }
+
+    /**
+     * Get estimated latency to server (ms).
+     */
+    getEstimatedLatency(): number {
+        return this.predictionManager?.getEstimatedLatency() ?? 0;
     }
 
     // ==========================================
@@ -769,8 +869,8 @@ export class Game {
                     this.handleConnect(snapshot, inputs, frame, fps, clientId);
                 },
 
-                onTick: (frame: number, inputs: ServerInput[], _snapshotFrame?: number, _snapshotHash?: string, majorityHash?: number) => {
-                    this.handleTick(frame, inputs, majorityHash);
+                onTick: (frame: number, inputs: ServerInput[], _snapshotFrame?: number, _snapshotHash?: string, majorityHash?: number, serverTimestamp?: number, echoSyncTimestamp?: number) => {
+                    this.handleTick(frame, inputs, majorityHash, serverTimestamp, echoSyncTimestamp);
                 },
 
                 onDisconnect: () => {
@@ -806,6 +906,18 @@ export class Game {
                 this.connection.onResyncSnapshot = (data: Uint8Array, frame: number, inputs: ServerInput[]) => {
                     this.handleResyncSnapshot(data, frame, inputs);
                 };
+            }
+
+            // Set up time sync callback for client-side prediction
+            if ('onTimeSync' in this.connection && this.predictionManager) {
+                this.connection.onTimeSync = (sentTime: number, serverTime: number, receiveTime: number) => {
+                    this.predictionManager?.onTimeSync(sentTime, serverTime, receiveTime);
+                };
+            }
+
+            // Start initial time sync if prediction is enabled
+            if (this.predictionManager) {
+                this.startTimeSync();
             }
         } catch (err: any) {
             const connectDuration = (typeof performance !== 'undefined' ? performance.now() : Date.now()) - connectStartTime;
@@ -1268,6 +1380,14 @@ export class Game {
         this.tickIntervalMs = 1000 / fps;
         this.currentFrame = frame;
 
+        // Initialize prediction manager if enabled
+        if (this.predictionManager) {
+            this.predictionManager.setLocalClientId(clientId);
+            this.predictionManager.setTickInterval(this.tickIntervalMs);
+            this.predictionManager.initialize(frame);
+            console.log(`[CSP] Prediction initialized at frame ${frame}`);
+        }
+
         // Store snapshot hash for debug UI
         if (snapshot?.hash !== undefined) {
             this.lastSnapshotHash = typeof snapshot.hash === 'number'
@@ -1467,7 +1587,64 @@ export class Game {
     /**
      * Handle server tick.
      */
-    private handleTick(frame: number, inputs: ServerInput[], majorityHash?: number): void {
+    private handleTick(frame: number, inputs: ServerInput[], majorityHash?: number, serverTimestamp?: number, echoSyncTimestamp?: number): void {
+        // Handle time sync response if we sent a sync timestamp
+        if (echoSyncTimestamp !== undefined && serverTimestamp !== undefined && this.predictionManager) {
+            const receiveTime = Date.now();
+            this.predictionManager.onTimeSync(echoSyncTimestamp, serverTimestamp, receiveTime);
+        }
+
+        // Call drift correction on tick received
+        if (this.predictionManager) {
+            this.predictionManager.onTickReceived();
+
+            // Periodic re-sync
+            const now = Date.now();
+            if (now - this.lastTimeSyncTime >= this.timeSyncResyncInterval) {
+                this.startTimeSync();
+            }
+        }
+
+        // When prediction is enabled, route to prediction manager
+        // The prediction manager handles confirmation and rollback
+        if (this.predictionManager?.enabled) {
+            // Convert ServerInput to PredictionServerInput format
+            const predInputs: PredictionServerInput[] = inputs.map(i => ({
+                seq: i.seq,
+                clientId: i.clientId,
+                data: i.data,
+                frame: i.frame
+            }));
+
+            // Let prediction manager handle the tick (may trigger rollback)
+            this.predictionManager.receiveServerTick(frame, predInputs);
+
+            // Still process lifecycle events (join, leave, etc.) directly
+            for (const input of inputs) {
+                const inputType = input.data?.type;
+                if (inputType === 'join' || inputType === 'leave' || inputType === 'disconnect' || inputType === 'reconnect') {
+                    this.processInput(input);
+                }
+            }
+
+            // Update confirmed frame tracking
+            this.currentFrame = frame;
+            this.lastProcessedFrame = frame;
+
+            // Still need to handle majority hash for desync detection
+            if (majorityHash !== undefined && majorityHash !== 0) {
+                const hashFrame = frame - 1;
+                this.handleMajorityHash(hashFrame, majorityHash);
+            }
+
+            // Record tick time for interpolation
+            this.lastTickTime = typeof performance !== 'undefined' ? performance.now() : Date.now();
+
+            return;
+        }
+
+        // === Standard (non-prediction) path ===
+
         // Skip frames we've already processed (e.g., during catchup)
         if (frame <= this.lastProcessedFrame) {
             if (DEBUG_NETWORK) {
@@ -1526,6 +1703,22 @@ export class Game {
         // 7. Send state sync data (stateHash + partition data if assigned)
         // This must happen AFTER desync check so the cache is still valid
         this.sendStateSync(frame);
+    }
+
+    /**
+     * Start time synchronization for client-side prediction.
+     * Sends sync timestamps with inputs to measure RTT and clock delta.
+     */
+    private startTimeSync(): void {
+        if (!this.connection || !this.predictionManager) return;
+
+        // Use SDK's sendSyncTimestamp method if available
+        if ('sendSyncTimestamp' in this.connection) {
+            const syncTimestamp = Date.now();
+            (this.connection as any).sendSyncTimestamp(syncTimestamp);
+            this.lastTimeSyncTime = syncTimestamp;
+            console.log('[CSP] Started time sync');
+        }
     }
 
     /**
@@ -2501,24 +2694,45 @@ export class Game {
     // ==========================================
 
     /**
-     * Start the game loop (render + local simulation when offline).
+     * Start the game loop (render + local simulation when offline or prediction mode).
      *
-     * When connected to server: server TICK messages drive simulation via handleTick().
+     * When connected to server (no prediction): server TICK messages drive simulation via handleTick().
      * When offline: simulation ticks locally at tickRate.
+     * When prediction enabled: client advances frames independently, server confirms.
      */
     private startGameLoop(): void {
         if (this.gameLoop) return;
 
         let lastTickTime = typeof performance !== 'undefined' ? performance.now() : Date.now();
+        let tickAccumulator = 0;
 
         const loop = () => {
             const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
+            const deltaTime = now - lastTickTime;
+            lastTickTime = now;
 
+            // Client-side prediction mode: advance frames independently
+            if (this.predictionManager?.enabled && this.connection) {
+                // Apply drift-corrected tick interval
+                const adjustedInterval = this.predictionManager.getAdjustedTickInterval();
+                tickAccumulator += deltaTime;
+
+                // Run prediction ticks (may run multiple if we're behind)
+                while (tickAccumulator >= adjustedInterval) {
+                    this.predictionManager.advanceFrame();
+
+                    // Call game's onTick callback with predicted frame
+                    this.callbacks.onTick?.(this.predictionManager.localFrame);
+
+                    tickAccumulator -= adjustedInterval;
+                }
+            }
             // Local simulation when not connected to server
-            // When connected, server TICK messages drive simulation via handleTick()
-            if (!this.connection) {
+            // When connected (without prediction), server TICK messages drive simulation via handleTick()
+            else if (!this.connection) {
                 // Fixed timestep accumulator for deterministic simulation
-                while (now - lastTickTime >= this.tickIntervalMs) {
+                tickAccumulator += deltaTime;
+                while (tickAccumulator >= this.tickIntervalMs) {
                     this.currentFrame++;
 
                     // Run ECS world tick (systems)
@@ -2527,7 +2741,7 @@ export class Game {
                     // Call game's onTick callback
                     this.callbacks.onTick?.(this.currentFrame);
 
-                    lastTickTime += this.tickIntervalMs;
+                    tickAccumulator -= this.tickIntervalMs;
                 }
             }
 
