@@ -318,8 +318,10 @@ export class PredictionManager {
         this.inputHistory.markFrameConfirmed(frame);
         this._confirmedFrame = frame;
 
-        // Execute rollback if we mispredicted and the frame is in the past
-        if (needsRollback && frame < this._localFrame) {
+        // Execute rollback if we mispredicted and the frame has been simulated.
+        // localFrame has already been ticked (advanceFrame increments then ticks),
+        // so frame <= localFrame means we've simulated it with potentially wrong inputs.
+        if (needsRollback && frame <= this._localFrame) {
             this.executeRollback(frame);
             return true;
         }

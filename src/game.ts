@@ -1625,11 +1625,13 @@ export class Game {
         // When prediction is enabled, route to prediction manager
         // The prediction manager handles confirmation and rollback
         if (this.predictionManager?.enabled) {
-            // Convert ServerInput to PredictionServerInput format
+            // Convert ServerInput to PredictionServerInput format.
+            // Game inputs arrive as binary Uint8Array from the network — decode them
+            // so the prediction system stores decoded objects (not raw bytes).
             const predInputs: PredictionServerInput[] = inputs.map(i => ({
                 seq: i.seq,
                 clientId: i.clientId,
-                data: i.data,
+                data: i.data instanceof Uint8Array ? decode(i.data) : i.data,
                 frame: i.frame
             }));
 
