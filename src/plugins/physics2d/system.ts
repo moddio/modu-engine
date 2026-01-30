@@ -246,6 +246,7 @@ export class Physics2DSystem {
         body.linearVelocity = { x: toFixed(bodyData.vx), y: toFixed(bodyData.vy) };
         body.angularVelocity = toFixed(bodyData.angularVelocity);
         body.isSensor = bodyData.isSensor;
+        body.lockRotation = bodyData.lockRotation;
 
         // CRITICAL: All new bodies start awake for determinism
         // Without this, late joiners would have awake bodies while existing clients
@@ -379,10 +380,18 @@ export class Physics2DSystem {
             const transform = entity.get(Transform2D);
             const bodyData = entity.get(Body2D);
 
-            // Sync position and angle from physics
+            // Sync position from physics
             transform.x = toFloat(body.position.x);
             transform.y = toFloat(body.position.y);
-            transform.angle = toFloat(body.angle);
+
+            // Sync angle based on lockRotation:
+            // - If locked: game controls angle, sync physics FROM transform
+            // - If not locked: physics controls angle, sync transform FROM physics
+            if (body.lockRotation) {
+                body.angle = toFixed(transform.angle);
+            } else {
+                transform.angle = toFloat(body.angle);
+            }
 
             // Sync velocity (linear and angular)
             bodyData.vx = toFloat(body.linearVelocity.x);
