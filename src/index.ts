@@ -1,6 +1,9 @@
 /**
  * Modu Engine - Deterministic Multiplayer Sync Engine
- *
+ * LOCAL V5 - Skip kinematic integration (game code controls kinematic positions)
+ */
+console.log('[Modu Engine] v24-jitter-fix');
+/*
  * Features:
  * - Fixed-point math for 100% cross-platform determinism
  * - 2D/3D physics with ECS architecture

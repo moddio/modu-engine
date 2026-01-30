@@ -53,7 +53,10 @@ export const Body2D = defineComponent('Body2D', {
 
     // Is sensor (no collision response, just events)
     damping: 0,
-    isSensor: false
+    isSensor: false,
+
+    // Lock rotation (game controls angle, physics doesn't affect it)
+    lockRotation: false
 });
 
 /**
