@@ -19,12 +19,17 @@ import { SpatialHash2D } from './spatial-hash';
 
 const GRAVITY_2D: Vec2 = { x: 0, y: toFixed(-30) };  // -30 units/s² (down in Y)
 const LINEAR_DAMPING = toFixed(0.1);
-const ANGULAR_DAMPING = toFixed(0.15);  // Increased to reduce angular jitter
+const ANGULAR_DAMPING = toFixed(0.3);  // Doubled from 0.15 to reduce angular jitter
 const SLEEP_THRESHOLD = toFixed(0.12);
 const SLEEP_FRAMES_REQUIRED = 20;
 
 // Default spatial hash cell size - should be >= largest entity diameter
 const DEFAULT_CELL_SIZE = 64;
+
+// Substepping: divide physics step into smaller substeps for stability
+// Research shows smaller timesteps are more effective than more iterations
+// (Box2D Solver2D, Rapier, XPBD papers)
+const NUM_SUBSTEPS = 4;
 
 // ============================================
 // Trigger Event 2D
@@ -199,11 +204,34 @@ export function stepWorld2D(world: World2D): { contacts: Contact2D[]; triggers: 
         return eidA2 - eidB2;
     });
 
-    // Use Rapier-style iterative constraint solver
-    // This solves all contacts together with multiple iterations for better stability
-    // Pass bodies so solver can do position integration in correct order
+    // SUBSTEPPING: Run solver multiple times with smaller dt for stability
+    // Research shows smaller timesteps are more effective than more iterations
+    // (Box2D Solver2D, Rapier, XPBD papers)
+    // Contact detection is done once per frame (expensive), but solver runs NUM_SUBSTEPS times
     const sortedContacts = pendingContacts.map(pc => pc.contact);
-    solveConstraints(sortedContacts, dt, bodies);
+    const subDt = fpDiv(dt, toFixed(NUM_SUBSTEPS));
+
+    for (let substep = 0; substep < NUM_SUBSTEPS; substep++) {
+        // Re-detect contact geometry for substeps > 0 (bodies have moved)
+        // This updates depth, normal, point for existing contact pairs
+        if (substep > 0 && sortedContacts.length > 0) {
+            for (const contact of sortedContacts) {
+                const newContacts = detectCollision2D(contact.bodyA, contact.bodyB);
+                if (newContacts.length > 0) {
+                    // Update contact with new geometry
+                    contact.depth = newContacts[0].depth;
+                    contact.normal = newContacts[0].normal;
+                    contact.point = newContacts[0].point;
+                } else {
+                    // No longer colliding - set depth to 0
+                    contact.depth = 0 as Fixed;
+                }
+            }
+        }
+
+        // Solve constraints with smaller timestep
+        solveConstraints(sortedContacts, subDt, bodies);
+    }
 
     // Fire entity collision callbacks AFTER all detection is complete
     // Sort by both labels (eids) NUMERICALLY to ensure deterministic ordering across clients

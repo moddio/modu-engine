@@ -113,11 +113,14 @@ const contactCache = new Map<string, { normalImpulse: Fixed; tangentImpulse: Fix
 /**
  * Generate deterministic contact key from two bodies.
  * Always uses smaller eid first for consistency.
+ * For multi-point manifolds, pointIndex distinguishes contact points.
  */
-function getContactKey(bodyA: RigidBody2D, bodyB: RigidBody2D): string {
+function getContactKey(bodyA: RigidBody2D, bodyB: RigidBody2D, pointIndex: number = 0): string {
     const eidA = parseInt(bodyA.label, 10) || 0;
     const eidB = parseInt(bodyB.label, 10) || 0;
-    return eidA < eidB ? `${eidA}:${eidB}` : `${eidB}:${eidA}`;
+    const base = eidA < eidB ? `${eidA}:${eidB}` : `${eidB}:${eidA}`;
+    // Include point index for multi-point manifolds to prevent sharing cached impulses
+    return pointIndex > 0 ? `${base}:${pointIndex}` : base;
 }
 
 /**
@@ -765,6 +768,9 @@ function detectCircleBox(circle: RigidBody2D, box: RigidBody2D): Contact2D | nul
 export function createContactConstraints(contacts: Contact2D[], dt: Fixed): ContactConstraint[] {
     const constraints: ContactConstraint[] = [];
 
+    // Track point index per body pair for multi-point manifolds
+    const pairPointIndex = new Map<string, number>();
+
     for (const contact of contacts) {
         const { bodyA, bodyB, normal, point, depth } = contact;
 
@@ -823,7 +829,11 @@ export function createContactConstraints(contacts: Contact2D[], dt: Fixed): Cont
         const bias = fpMul(baumgarte, penetration);
 
         // Generate contact key and get cached impulses
-        const key = getContactKey(bodyA, bodyB);
+        // Use point index to distinguish multi-point manifolds (box-box contacts)
+        const baseKey = getContactKey(bodyA, bodyB, 0);
+        const pointIdx = pairPointIndex.get(baseKey) || 0;
+        pairPointIndex.set(baseKey, pointIdx + 1);
+        const key = getContactKey(bodyA, bodyB, pointIdx);
         const cached = contactCache.get(key);
 
         // Initialize impulses (warmstart from cache or zero)
@@ -1257,6 +1267,50 @@ export function solveVelocityConstraints(constraints: ContactConstraint[]): void
 }
 
 /**
+ * Phase 2.2: Relaxation pass to remove excess energy after velocity solving.
+ * Runs soft iterations that only damp velocities, never add energy.
+ * This prevents jitter from accumulated impulses overshooting.
+ */
+export function relaxationPass(constraints: ContactConstraint[]): void {
+    const RELAXATION_ITERATIONS = 2;
+    const RELAXATION_FACTOR = toFixed(0.5);  // Apply only 50% of computed impulse
+
+    for (let iter = 0; iter < RELAXATION_ITERATIONS; iter++) {
+        for (const c of constraints) {
+            const { bodyA, bodyB, normal, rA, rB, normalMass } = c;
+
+            // Get effective inverse masses
+            const invMassA = bodyA.type === BodyType2D.Dynamic ? bodyA.invMass : 0 as Fixed;
+            const invMassB = bodyB.type === BodyType2D.Dynamic ? bodyB.invMass : 0 as Fixed;
+            const invInertiaA = (bodyA.type === BodyType2D.Dynamic && !bodyA.lockRotation) ? bodyA.invInertia : 0 as Fixed;
+            const invInertiaB = (bodyB.type === BodyType2D.Dynamic && !bodyB.lockRotation) ? bodyB.invInertia : 0 as Fixed;
+
+            // Get angular velocities
+            const wA = bodyA.type === BodyType2D.Dynamic ? bodyA.angularVelocity : 0 as Fixed;
+            const wB = bodyB.type === BodyType2D.Dynamic ? bodyB.angularVelocity : 0 as Fixed;
+
+            // Compute relative velocity at contact point
+            const relVel = computeRelativeVelocity(bodyA, bodyB, rA, rB, wA, wB);
+            const vn = (fpMul(relVel.x, normal.x) + fpMul(relVel.y, normal.y)) as Fixed;
+
+            // Only damp if bodies are still approaching (vn < 0)
+            // This removes energy without adding it
+            if (vn >= 0) continue;
+
+            // Compute damping impulse (reduced by relaxation factor)
+            let lambda = fpMul(fpMul(-vn, normalMass), RELAXATION_FACTOR);
+
+            // Ensure we only remove energy (lambda must be positive for separation)
+            if (lambda <= 0) continue;
+
+            // Apply impulse
+            const impulse: Vec2 = { x: fpMul(normal.x, lambda), y: fpMul(normal.y, lambda) };
+            applyImpulse(bodyA, bodyB, impulse, rA, rB, invMassA, invMassB, invInertiaA, invInertiaB);
+        }
+    }
+}
+
+/**
  * Solve position constraints iteratively.
  * Directly adjusts positions to resolve remaining penetration.
  *
@@ -1273,10 +1327,28 @@ export function solvePositionConstraints(constraints: ContactConstraint[]): bool
     for (let iter = 0; iter < iterations; iter++) {
         let maxPenetration = 0 as Fixed;
 
+        // Phase 2.1: Re-detect contact geometry at start of each iteration
+        // This ensures we're working with accurate depth/normal after position changes
+        for (const c of constraints) {
+            const newContacts = detectCollision2D(c.bodyA, c.bodyB);
+            if (newContacts.length > 0) {
+                // Update with fresh collision data
+                c.depth = newContacts[0].depth;
+                c.normal = newContacts[0].normal;
+                c.point = newContacts[0].point;
+                // Update lever arms
+                c.rA = vec2Sub(c.point, c.bodyA.position);
+                c.rB = vec2Sub(c.point, c.bodyB.position);
+            } else {
+                // No longer colliding
+                c.depth = 0 as Fixed;
+            }
+        }
+
         for (const c of constraints) {
             const { bodyA, bodyB, normal } = c;
 
-            // Recompute penetration depth (positions may have changed)
+            // Use freshly detected depth
             const depth = c.depth;
 
             // Skip if penetration is within tolerance
@@ -1353,9 +1425,7 @@ export function solvePositionConstraints(constraints: ContactConstraint[]): bool
                 bodyB.position.x = (bodyB.position.x + fpMul(normal.x, corrB)) as Fixed;
                 bodyB.position.y = (bodyB.position.y + fpMul(normal.y, corrB)) as Fixed;
             }
-
-            // Update stored depth for next iteration
-            c.depth = (c.depth - correction) as Fixed;
+            // Note: depth is re-detected at start of next iteration, no manual update needed
         }
 
         // Check if all penetrations are resolved
@@ -1528,6 +1598,9 @@ export function solveConstraints(contacts: Contact2D[], dt: Fixed, bodies?: Rigi
 
     // 3. Velocity solver - iteratively solve velocity constraints
     solveVelocityConstraints(constraints);
+
+    // 3.5 Relaxation pass - remove excess energy to prevent jitter
+    relaxationPass(constraints);
 
     // 4. Position integration (if bodies provided)
     // This MUST happen between velocity and position solving!
