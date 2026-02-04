@@ -2,6 +2,7 @@ import * as esbuild from 'esbuild';
 import * as path from 'path';
 import * as fs from 'fs';
 import { execSync } from 'child_process';
+import { generateDtsBundle } from 'dts-bundle-generator';
 
 const docsDir = path.join(process.cwd(), '..', 'docs', 'public', 'sdk');
 const distDir = path.join(process.cwd(), 'dist');
@@ -36,44 +37,60 @@ if (fs.existsSync(networkSdkPath)) {
     console.log('Warning: Network SDK not found at', networkSdkPath);
 }
 
-// Footer to expose common APIs directly on window
+// ==============================================
+// SINGLE SOURCE OF TRUTH: Window Global Exports
+// ==============================================
+// Add new exports here - they will automatically be:
+// 1. Exposed on window at runtime
+// 2. Added to TypeScript declarations
+const WINDOW_GLOBALS = [
+    // Game creation
+    'createGame',
+    // Components
+    'Transform2D',
+    'Body2D',
+    'Player',
+    'Sprite',
+    'Camera2D',
+    // Constants
+    'SHAPE_CIRCLE',
+    'SHAPE_RECT',
+    'SPRITE_IMAGE',
+    'BODY_DYNAMIC',
+    'BODY_STATIC',
+    'BODY_KINEMATIC',
+    // Plugins
+    'Physics2DSystem',
+    'Simple2DRenderer',
+    'InputPlugin',
+    // Utilities
+    'defineComponent',
+    'enableDebugUI',
+    'dRandom',
+    'dSqrt',
+    'toFixed',
+    'toFloat',
+    'fpMul',
+    'fpDiv',
+    'fpSqrt',
+    'fpAbs',
+];
+
+// Generate runtime code to expose globals on window
 const globalExports = `
 // Expose common APIs directly on window for cleaner usage
+// Auto-generated from WINDOW_GLOBALS in build-browser.js
 if (typeof window !== 'undefined') {
-    // Game creation
-    window.createGame = Modu.createGame;
-
-    // Components
-    window.Transform2D = Modu.Transform2D;
-    window.Body2D = Modu.Body2D;
-    window.Player = Modu.Player;
-    window.Sprite = Modu.Sprite;
-
-    // Constants
-    window.SHAPE_CIRCLE = Modu.SHAPE_CIRCLE;
-    window.SHAPE_RECT = Modu.SHAPE_RECT;
-    window.SPRITE_IMAGE = Modu.SPRITE_IMAGE;
-    window.BODY_DYNAMIC = Modu.BODY_DYNAMIC;
-    window.BODY_STATIC = Modu.BODY_STATIC;
-    window.BODY_KINEMATIC = Modu.BODY_KINEMATIC;
-
-    // Plugins
-    window.Physics2DSystem = Modu.Physics2DSystem;
-    window.Simple2DRenderer = Modu.Simple2DRenderer;
-    window.InputPlugin = Modu.InputPlugin;
-
-    // Utilities
-    window.defineComponent = Modu.defineComponent;
-    window.dRandom = Modu.dRandom;
-    window.dSqrt = Modu.dSqrt;
-    window.toFixed = Modu.toFixed;
-    window.toFloat = Modu.toFloat;
-    window.fpMul = Modu.fpMul;
-    window.fpDiv = Modu.fpDiv;
-    window.fpSqrt = Modu.fpSqrt;
-    window.fpAbs = Modu.fpAbs;
+${WINDOW_GLOBALS.map(name => `    window.${name} = Modu.${name};`).join('\n')}
 }
 `;
+
+// Generate TypeScript declarations for window globals
+function generateWindowGlobalTypes() {
+    return WINDOW_GLOBALS.map(name =>
+        `  const ${name}: typeof ModuEngine.${name};`
+    ).join('\n');
+}
 
 // Build standalone IIFE bundle (engine only)
 async function buildEngineIIFE() {
@@ -146,14 +163,103 @@ async function buildESM(outDir, filename) {
     console.log('Built:', path.join(outDir, filename));
 }
 
+// Build bundled TypeScript declarations for CDN
+async function buildTypes(outDir, filename) {
+    console.log('Generating bundled type declarations...');
+
+    try {
+        // Generate bundled .d.ts from the entry point
+        const result = generateDtsBundle([{
+            filePath: 'src/index.ts',
+            output: {
+                noBanner: true,
+            }
+        }], {
+            preferredConfigPath: 'tsconfig.json',
+        });
+
+        let moduleTypes = result[0];
+
+        // Strip 'declare' keywords - they're invalid inside 'declare module' block
+        // 'export declare function' -> 'export function'
+        // 'declare class' -> 'class'
+        moduleTypes = moduleTypes
+            .replace(/export declare /g, 'export ')
+            .replace(/^declare /gm, '');
+
+        // Auto-generate window global type declarations from WINDOW_GLOBALS
+        const windowGlobalTypes = generateWindowGlobalTypes();
+
+        // Create global namespace declaration that mirrors the module exports
+        // This allows using Modu.* in browser without imports
+        const globalTypes = `/**
+ * Modu Engine Type Definitions
+ * Built: ${buildDate} - Commit: ${commitHash}
+ *
+ * Usage:
+ *   - CDN (global): const game = Modu.createGame();
+ *   - ESM import: import { createGame } from 'modu-engine';
+ */
+
+// ==============================================
+// Engine Types Namespace
+// ==============================================
+// All engine exports in a namespace for type references
+declare namespace ModuEngine {
+${moduleTypes.split('\n').map(line => '  ' + line).join('\n')}
+}
+
+// ==============================================
+// Module Declaration (for ESM imports)
+// ==============================================
+declare module 'modu-engine' {
+  export = ModuEngine;
+}
+
+// ==============================================
+// Global Declarations (for CDN/browser usage)
+// ==============================================
+// When loaded via <script src="modu.min.js">,
+// all exports are available on the global Modu object
+// and common APIs are exposed directly on window.
+
+declare global {
+  interface Window {
+    __MODU_APP_ID__?: string;
+    game?: ModuEngine.Game;
+  }
+
+  /**
+   * Global Modu namespace containing all engine exports.
+   * Available when loaded via CDN script tag.
+   */
+  const Modu: typeof ModuEngine;
+
+  // Direct window exports (auto-generated from WINDOW_GLOBALS)
+${windowGlobalTypes}
+}
+
+export {};
+`;
+
+        fs.writeFileSync(path.join(outDir, filename), globalTypes);
+        console.log('Built:', path.join(outDir, filename));
+    } catch (error) {
+        console.error('Warning: Failed to generate type declarations:', error.message);
+        console.error('Continuing without .d.ts file...');
+    }
+}
+
 // Build to docs/public/sdk (for website)
 await buildCombinedIIFE(docsDir, 'modu.iife.js');
 await buildMinifiedCombined(docsDir, 'modu.min.js');
 await buildESM(docsDir, 'modu.js');
+await buildTypes(docsDir, 'modu.d.ts');
 
 // Build to dist (for examples and CDN)
 await buildCombinedIIFE(distDir, 'modu.iife.js');
 await buildMinifiedCombined(distDir, 'modu.min.js');
 await buildESM(distDir, 'modu.js');
+await buildTypes(distDir, 'modu.d.ts');
 
 console.log('\nBuild complete!');
