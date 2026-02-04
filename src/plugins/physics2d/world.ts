@@ -8,7 +8,7 @@
 import { Fixed, FP_ONE, FP_HALF, toFixed, toFloat, fpMul, fpDiv, fpAbs } from '../../math/fixed';
 import { aabb2DOverlap, Shape2D, Shape2DType, CircleShape, BoxShape2D } from './shapes';
 import { RigidBody2D, BodyType2D, Vec2, vec2, vec2Zero, vec2Add, vec2Scale, vec2LengthSq, createBody2D, setBody2DIdCounter, getBody2DIdCounter } from './rigid-body';
-import { Contact2D, computeAABB2D, detectCollision2D, resolveCollision2D } from './collision';
+import { Contact2D, computeAABB2D, detectCollision2D, resolveCollision2D, solveConstraints } from './collision';
 import { shouldCollide, CollisionFilter, DEFAULT_FILTER } from './layers';
 import { TriggerState, TriggerEvent } from './trigger';
 import { SpatialHash2D } from './spatial-hash';
@@ -19,12 +19,17 @@ import { SpatialHash2D } from './spatial-hash';
 
 const GRAVITY_2D: Vec2 = { x: 0, y: toFixed(-30) };  // -30 units/s² (down in Y)
 const LINEAR_DAMPING = toFixed(0.1);
-const ANGULAR_DAMPING = toFixed(0.1);
+const ANGULAR_DAMPING = toFixed(0.3);  // Doubled from 0.15 to reduce angular jitter
 const SLEEP_THRESHOLD = toFixed(0.12);
 const SLEEP_FRAMES_REQUIRED = 20;
 
 // Default spatial hash cell size - should be >= largest entity diameter
 const DEFAULT_CELL_SIZE = 64;
+
+// Substepping: divide physics step into smaller substeps for stability
+// Research shows smaller timesteps are more effective than more iterations
+// (Box2D Solver2D, Rapier, XPBD papers)
+const NUM_SUBSTEPS = 4;
 
 // ============================================
 // Trigger Event 2D
@@ -142,9 +147,10 @@ export function stepWorld2D(world: World2D): { contacts: Contact2D[]; triggers: 
         if (!aabb2DOverlap(aabbA, aabbB)) return;
 
         // Narrow phase: precise collision detection
-        const contact = detectCollision2D(bodyA, bodyB);
+        // Returns array of contacts (0 = no collision, 1-2 for box-box manifold)
+        const detectedContacts = detectCollision2D(bodyA, bodyB);
 
-        if (!contact) return;
+        if (detectedContacts.length === 0) return;
 
         // CRITICAL: Normalize pair order so smaller label (eid) is always first.
         // Without this, spatial hash iteration order determines (A,B) vs (B,A),
@@ -155,6 +161,7 @@ export function stepWorld2D(world: World2D): { contacts: Contact2D[]; triggers: 
         const shouldSwap = eidA > eidB;
 
         // Collect entity pairs for callback firing (all collisions including sensors)
+        // Only add once per body pair, not per contact point
         const entityA = bodyA.userData;
         const entityB = bodyB.userData;
         if (entityA || entityB) {
@@ -173,12 +180,14 @@ export function stepWorld2D(world: World2D): { contacts: Contact2D[]; triggers: 
             return;
         }
 
-        // Store contact for later resolution (don't resolve inside callback!)
+        // Store all contact points for later resolution (don't resolve inside callback!)
         // Use normalized labels (smaller first) for deterministic sorting
         const normLabelA = shouldSwap ? bodyB.label : bodyA.label;
         const normLabelB = shouldSwap ? bodyA.label : bodyB.label;
-        pendingContacts.push({ contact, labelA: normLabelA, labelB: normLabelB });
-        contacts.push(contact);
+        for (const contact of detectedContacts) {
+            pendingContacts.push({ contact, labelA: normLabelA, labelB: normLabelB });
+            contacts.push(contact);
+        }
         // NOTE: contactListener.onContact was removed here - it was firing collision handlers
         // in non-deterministic (spatial hash iteration) order, causing multiplayer desync.
         // Collision handlers are now called only via collisionPairs (sorted) below.
@@ -195,9 +204,33 @@ export function stepWorld2D(world: World2D): { contacts: Contact2D[]; triggers: 
         return eidA2 - eidB2;
     });
 
-    // Now resolve all collisions in sorted order
-    for (const { contact } of pendingContacts) {
-        resolveCollision2D(contact);
+    // SUBSTEPPING: Run solver multiple times with smaller dt for stability
+    // Research shows smaller timesteps are more effective than more iterations
+    // (Box2D Solver2D, Rapier, XPBD papers)
+    // Contact detection is done once per frame (expensive), but solver runs NUM_SUBSTEPS times
+    const sortedContacts = pendingContacts.map(pc => pc.contact);
+    const subDt = fpDiv(dt, toFixed(NUM_SUBSTEPS));
+
+    for (let substep = 0; substep < NUM_SUBSTEPS; substep++) {
+        // Re-detect contact geometry for substeps > 0 (bodies have moved)
+        // This updates depth, normal, point for existing contact pairs
+        if (substep > 0 && sortedContacts.length > 0) {
+            for (const contact of sortedContacts) {
+                const newContacts = detectCollision2D(contact.bodyA, contact.bodyB);
+                if (newContacts.length > 0) {
+                    // Update contact with new geometry
+                    contact.depth = newContacts[0].depth;
+                    contact.normal = newContacts[0].normal;
+                    contact.point = newContacts[0].point;
+                } else {
+                    // No longer colliding - set depth to 0
+                    contact.depth = 0 as Fixed;
+                }
+            }
+        }
+
+        // Solve constraints with smaller timestep
+        solveConstraints(sortedContacts, subDt, bodies);
     }
 
     // Fire entity collision callbacks AFTER all detection is complete
@@ -230,7 +263,8 @@ export function stepWorld2D(world: World2D): { contacts: Contact2D[]; triggers: 
         }
     }
 
-    // Integrate positions
+    // Post-solver: clamp tiny velocities and handle sleep detection
+    // NOTE: Position integration is now done inside solveConstraints (between velocity and position solving)
     for (const body of bodies) {
         if (body.type === BodyType2D.Static) continue;
         if (body.isSleeping) continue;
@@ -242,14 +276,6 @@ export function stepWorld2D(world: World2D): { contacts: Contact2D[]; triggers: 
         if (fpAbs(body.linearVelocity.x) < linearClamp) body.linearVelocity.x = 0;
         if (fpAbs(body.linearVelocity.y) < linearClamp) body.linearVelocity.y = 0;
         if (fpAbs(body.angularVelocity) < angularClamp) body.angularVelocity = 0;
-
-        // Update position
-        body.position = vec2Add(body.position, vec2Scale(body.linearVelocity, dt));
-
-        // Update angle
-        if (!body.lockRotation && body.angularVelocity !== 0) {
-            body.angle = (body.angle + fpMul(body.angularVelocity, dt)) as Fixed;
-        }
 
         // Sleep detection
         const speedSq = vec2LengthSq(body.linearVelocity);
