@@ -372,7 +372,7 @@ export class Game {
    * @returns The created plugin instance
    */
   addPlugin<T>(
-    Plugin: new (game: Game, ...args: any[]) => T,
+    Plugin: new (...args: any[]) => T,
     ...args: any[]
   ): T {
     const plugin = new Plugin(this, ...args);
