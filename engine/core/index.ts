@@ -11,3 +11,4 @@ export type { BodyDef, ColliderDef } from './physics/index';
 export { Map2d, TileMap, Pathfinding } from './map/index';
 export type { TileData } from './map/index';
 export { ScriptEngine, ScriptAPI } from './scripting/index';
+export { Serializer, DeltaCompressor, InputBuffer, WorldSnapshot, InterestManagement, MessageType } from './network/index';
