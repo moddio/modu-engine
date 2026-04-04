@@ -1,0 +1,26 @@
+{
+  "name": "modu-engine",
+  "version": "0.1.0",
+  "description": "Modu Engine — a modern multiplayer game engine",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "dev:multi": "concurrently \"vite\" \"tsx watch engine/server/Server.ts\"",
+    "build": "npm run build:client && npm run build:server",
+    "build:client": "vite build",
+    "build:server": "tsc -p tsconfig.server.json",
+    "test": "vitest",
+    "test:run": "vitest run",
+    "bench": "vitest bench"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.0",
+    "vite": "^6.0.0",
+    "vitest": "^3.0.0",
+    "tsx": "^4.19.0",
+    "concurrently": "^9.0.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
