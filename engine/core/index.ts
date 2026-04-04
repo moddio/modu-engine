@@ -8,6 +8,8 @@ export { Unit, Player, Item, Projectile, Prop, Region, Sensor } from './game/ind
 export { Clock } from './time/index';
 export { PhysicsWorld, RigidBody } from './physics/index';
 export type { BodyDef, ColliderDef } from './physics/index';
+export { PhysicsWorld3d, RigidBody3d } from './physics/index';
+export type { BodyDef3d, ColliderDef3d } from './physics/index';
 export { Map2d, TileMap, Pathfinding } from './map/index';
 export type { TileData } from './map/index';
 export { ScriptEngine, ScriptAPI } from './scripting/index';

@@ -46,7 +46,7 @@ engine/
   core/           # Shared isomorphic game logic (runs everywhere)
     ecs/          # Entity-Component-System (Entity, Component, System)
     math/         # Vec2, Vec3, Matrix2d, Rect, Polygon
-    physics/      # Rapier 2D physics (PhysicsWorld, RigidBody, Collider)
+    physics/      # Rapier 2D + 3D physics (PhysicsWorld, RigidBody, Collider, PhysicsWorld3d, RigidBody3d)
     network/      # Protocol, Serializer, DeltaCompressor, InputBuffer, InterestManagement
     scripting/    # ScriptEngine, ScriptAPI, Sandbox, JSON-to-JS transpiler
     game/         # Game entities (Unit, Player, Item, Projectile, Prop, Region, Sensor)
