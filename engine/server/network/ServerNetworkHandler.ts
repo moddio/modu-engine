@@ -12,9 +12,11 @@ export class ServerNetworkHandler {
   readonly bandwidthBudget = new BandwidthBudget();
 
   constructor(private _socket: ServerSocket) {
-    this._socket.events.on('message', (clientId: string, rawData: unknown) => {
+    this._socket.events.on('message', (...args: unknown[]) => {
+      const clientId = args[0] as string;
+      const rawData = args[1];
       try {
-        const buffer = rawData instanceof Buffer ? new Uint8Array(rawData) : rawData as Uint8Array;
+        const buffer = rawData instanceof Uint8Array ? rawData : new Uint8Array(rawData as ArrayBufferLike);
         const message = Serializer.decode(buffer) as NetworkMessage;
 
         if (!this.rateLimiter.check(clientId, String(message.type))) return;
@@ -25,12 +27,12 @@ export class ServerNetworkHandler {
       }
     });
 
-    this._socket.events.on('connect', (clientId: string) => {
-      this.events.emit('connect', clientId);
+    this._socket.events.on('connect', (...args: unknown[]) => {
+      this.events.emit('connect', args[0] as string);
     });
 
-    this._socket.events.on('disconnect', (clientId: string) => {
-      this.events.emit('disconnect', clientId);
+    this._socket.events.on('disconnect', (...args: unknown[]) => {
+      this.events.emit('disconnect', args[0] as string);
     });
   }
 
