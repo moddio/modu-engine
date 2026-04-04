@@ -44,7 +44,8 @@ export class Client {
     this._lastTime = now;
 
     this.engine.step(dt);
-    this.renderer.render(dt);
+    this.camera.update();
+    this.renderer.render(this.camera.threeCamera, dt);
     this.input.endFrame();
 
     this._animFrameId = requestAnimationFrame(() => this._loop());
