@@ -6,7 +6,7 @@ A modern, TypeScript-first multiplayer game engine with sandboxed JavaScript scr
 
 - **TypeScript throughout** — strict mode, ES modules, full type safety
 - **Three.js rendering** — sprites, animated sprites, entity renderers, HUD, post-processing
-- **Rapier 2D physics** — WASM-based, fast, with collision events and sensor support
+- **Rapier 2D + 3D physics** — WASM-based, fast, with collision events and sensor support
 - **Sandboxed JS scripting** — game logic written in plain JavaScript with a fluent API, executed in an isolated environment
 - **Client-side prediction** — near-zero input latency with server reconciliation
 - **Interest management** — area-of-interest filtering for 200 CCU per game
@@ -138,53 +138,6 @@ Player presses W
 - **Bandwidth budgets** — per-player outbound byte cap per tick
 - **XSS prevention** — centralized string sanitization
 - **Script sandbox** — isolated execution, no shared references with host
-
-## Deployment
-
-Each game runs on a dedicated Fly Machine:
-
-```bash
-fly deploy
-```
-
-- Auto-stop when idle, auto-start on connection
-- 200 CCU per machine (shared-cpu-2x, 1GB RAM)
-- Health checks with auto-restart
-
-## Tech Stack
-
-| Component | Technology |
-|-----------|-----------|
-| Language | TypeScript (strict) |
-| Renderer | Three.js |
-| Physics | Rapier 2D (WASM) |
-| Build (client) | Vite |
-| Build (server) | tsc + tsx |
-| Tests | Vitest |
-| Networking | WebSocket (ws) + msgpack |
-| Deployment | Fly.io |
-
-## Testing
-
-```bash
-npm run test          # Watch mode
-npm run test:run      # Single run (CI)
-npm run bench         # Performance benchmarks
-```
-
-376 tests across 48 test files covering:
-- Math library (Vec2, Vec3, Matrix2d, Rect, Polygon)
-- Event system
-- Entity-Component-System
-- Physics (Rapier integration)
-- Maps and pathfinding
-- Game entities and systems
-- Scripting engine
-- Network protocol and serialization
-- Client prediction/interpolation
-- Server security (rate limiting, input validation, bandwidth)
-- UI components
-- Editor tools
 
 ## License
 
