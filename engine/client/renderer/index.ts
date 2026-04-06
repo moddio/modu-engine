@@ -4,6 +4,8 @@ export { Camera } from './Camera';
 export { ObjectPool } from './ObjectPool';
 export { SpatialIndex } from './SpatialIndex';
 export { PostProcessing } from './PostProcessing';
+export { CameraController } from './CameraController';
+export type { CameraConfig } from './CameraController';
 export * from './sprites/index';
 export * from './entities/index';
 export * from './hud/index';
