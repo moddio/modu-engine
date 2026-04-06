@@ -304,22 +304,29 @@ export class GameServer {
         inputY /= len;
       }
 
-      // In taro Box2D: impulse applied = speed / scaleRatio per tick
-      // With density=3 and damping=5, we need a stronger push.
-      // Taro applies: body.applyImpulse(vel.x, vel.y) where vel = direction * speed / scaleRatio
-      // The scaleRatio=30, speed=40 → impulse = 40/30 = 1.33 per tick
-      if (movementMethod === 'impulse') {
-        if (len > 0) {
-          body.applyImpulse(new Vec2(inputX * physicsSpeed, inputY * physicsSpeed));
-        }
-      } else if (movementMethod === 'force') {
-        if (len > 0) {
-          body.applyForce(new Vec2(inputX * physicsSpeed * 50, inputY * physicsSpeed * 50));
-        }
-      } else {
-        // velocity — direct set
-        body.linearVelocity = new Vec2(inputX * physicsSpeed * 3, inputY * physicsSpeed * 3);
+      // Taro: vector = direction * speed (raw attr value)
+      // Then applyImpulse(vector.x, vector.y) into Box2D (scaleRatio=30)
+      // Box2D: impulse = mass * deltaV. With density=3, mass ≈ 3 * area.
+      // Our Rapier world: 1 tile = 1 unit. Rapier uses SI-like units.
+      //
+      // Match taro feel: set linear velocity directly each tick when input is held.
+      // Damping=5 provides deceleration when input stops.
+      // Target velocity = speed / 30 (taro scaleRatio) = 40/30 ≈ 1.33 units/sec
+      // Adjusted for our tile scale: * (30/16) ≈ 2.5 tiles/sec
+      const targetVel = physicsSpeed * (30 / 16);
+
+      if (len > 0) {
+        // Blend toward target velocity (not instant set — damping provides smoothing)
+        const currentVel = body.linearVelocity;
+        const targetX = inputX * targetVel;
+        const targetY = inputY * targetVel;
+        const blendRate = 0.3; // How quickly to reach target velocity
+        body.linearVelocity = new Vec2(
+          currentVel.x + (targetX - currentVel.x) * blendRate,
+          currentVel.y + (targetY - currentVel.y) * blendRate,
+        );
       }
+      // When no input, damping handles deceleration naturally
     }
   }
 
