@@ -29,5 +29,6 @@ export { CoordinateUtils } from '../core/CoordinateUtils';
 export { LocalGameSession } from '../core/LocalGameSession';
 export type { LocalGameConfig } from '../core/LocalGameSession';
 export { VoxelTileMap } from './renderer/tilemap/index';
+export type { ClientTransport } from './transport/ClientTransport';
 export * as THREE from 'three';
 export { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';

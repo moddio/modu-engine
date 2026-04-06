@@ -6,3 +6,4 @@ export { InputValidator } from './network/InputValidator';
 export { BandwidthBudget } from './network/BandwidthBudget';
 export { EntityStreamManager } from './network/EntityStreamManager';
 export type { StreamEntityData } from './network/EntityStreamManager';
+export type { ServerTransport } from './transport/ServerTransport';
