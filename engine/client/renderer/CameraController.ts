@@ -94,6 +94,64 @@ export class CameraController {
     this._followTarget = null;
   }
 
+  /** Whether pointer lock is active */
+  get isPointerLocked(): boolean { return this._pointerLocked; }
+  private _pointerLocked = false;
+
+  /** Attach pointer lock + scroll zoom controls. Returns cleanup function. */
+  attachControls(canvas: HTMLCanvasElement): () => void {
+    const rotateSpeed = 0.0035; // radians per pixel of mouse movement
+    const zoomSpeed = 0.5;
+
+    const onClick = () => {
+      if (!this._pointerLocked) {
+        canvas.requestPointerLock();
+      }
+    };
+
+    const onPointerLockChange = () => {
+      this._pointerLocked = document.pointerLockElement === canvas;
+    };
+
+    const onMouseMove = (e: MouseEvent) => {
+      if (!this._pointerLocked) return;
+      this.azimuth -= e.movementX * rotateSpeed;
+      this.elevation = Math.max(this._pitchMin, Math.min(this._pitchMax,
+        this.elevation - e.movementY * rotateSpeed));
+    };
+
+    const onWheel = (e: WheelEvent) => {
+      e.preventDefault();
+      this.distance = Math.max(0.5, Math.min(30,
+        this.distance + (e.deltaY > 0 ? zoomSpeed : -zoomSpeed)));
+    };
+
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && this._pointerLocked) {
+        document.exitPointerLock();
+      }
+    };
+
+    const onCtx = (e: Event) => e.preventDefault();
+
+    canvas.addEventListener('click', onClick);
+    document.addEventListener('pointerlockchange', onPointerLockChange);
+    document.addEventListener('mousemove', onMouseMove);
+    canvas.addEventListener('wheel', onWheel, { passive: false });
+    document.addEventListener('keydown', onKeyDown);
+    canvas.addEventListener('contextmenu', onCtx);
+
+    return () => {
+      canvas.removeEventListener('click', onClick);
+      document.removeEventListener('pointerlockchange', onPointerLockChange);
+      document.removeEventListener('mousemove', onMouseMove);
+      canvas.removeEventListener('wheel', onWheel);
+      document.removeEventListener('keydown', onKeyDown);
+      canvas.removeEventListener('contextmenu', onCtx);
+      if (this._pointerLocked) document.exitPointerLock();
+    };
+  }
+
   resize(width: number, height: number): void {
     this._width = width;
     this._height = height;
@@ -131,10 +189,13 @@ export class CameraController {
     const cosAz = Math.cos(this.azimuth);
     const sinAz = Math.sin(this.azimuth);
 
+    // Taro zoom maps to camera distance. zoom=1 is close, zoom=3 is medium, zoom=10 is far.
+    const actualDistance = this.distance * 3;
+
     this.position.set(
-      this.target.x + this.distance * cosEl * sinAz,
-      this.target.y + this.distance * sinEl,
-      this.target.z + this.distance * cosEl * cosAz,
+      this.target.x + actualDistance * cosEl * sinAz,
+      this.target.y + actualDistance * sinEl,
+      this.target.z + actualDistance * cosEl * cosAz,
     );
   }
 

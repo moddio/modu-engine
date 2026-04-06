@@ -39,12 +39,14 @@ describe('SinglePlayer', () => {
 
   it('loads and runs scripts', () => {
     sp.start();
-    let called = false;
-    sp.engine.events.on('test', () => { called = true; });
-    sp.loadScript('test', `on('test', function() {});`);
-    sp.engine.events.emit('test');
-    // Script registered a handler, event system works
+    sp.loadScript('test', {
+      name: 'TestScript',
+      triggers: ['gameStart'],
+      actions: [{ type: 'setVariable', variableName: 'loaded', value: true }],
+    });
     expect(sp.scripts.scriptCount).toBe(1);
+    sp.scripts.trigger('gameStart');
+    expect(sp.scripts.variables.getGlobal('loaded')).toBe(true);
   });
 
   it('destroy resets engine', () => {

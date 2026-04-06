@@ -4,7 +4,7 @@ import { resolve } from 'path';
 export default defineConfig({
   build: {
     lib: {
-      entry: resolve(__dirname, 'engine/client/Client.ts'),
+      entry: resolve(__dirname, 'engine/client/index.ts'),
       name: 'ModuEngine',
       fileName: 'modu',
     },

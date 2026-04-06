@@ -1,6 +1,7 @@
 import { Engine } from '../core/Engine';
 import { GameMode } from '../core/GameMode';
 import { ScriptEngine } from '../core/scripting/ScriptEngine';
+import type { ScriptDef } from '../core/GameLoader';
 
 export class SinglePlayer {
   readonly engine: Engine;
@@ -11,7 +12,7 @@ export class SinglePlayer {
   constructor() {
     this.engine = Engine.instance();
     this.mode = new GameMode('singleplayer');
-    this.scripts = new ScriptEngine(this.engine.events);
+    this.scripts = new ScriptEngine(this.engine);
   }
 
   get isRunning(): boolean { return this._running; }
@@ -23,11 +24,10 @@ export class SinglePlayer {
   step(dt: number): void {
     if (!this._running) return;
     this.engine.step(dt);
-    this.scripts.update(dt);
   }
 
-  loadScript(name: string, code: string): void {
-    this.scripts.load(name, code);
+  loadScript(name: string, script: ScriptDef): void {
+    this.scripts.load({ [name]: script });
   }
 
   stop(): void {

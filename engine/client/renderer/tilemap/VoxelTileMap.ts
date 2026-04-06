@@ -36,6 +36,8 @@ export interface TiledTileset {
   tileheight: number;
   tilecount: number;
   columns: number;
+  spacing?: number;
+  margin?: number;
 }
 
 export class VoxelTileMap {
@@ -60,11 +62,15 @@ export class VoxelTileMap {
         });
         texture.magFilter = THREE.NearestFilter;
         texture.minFilter = THREE.NearestFilter;
+        texture.generateMipmaps = false;
         texture.colorSpace = THREE.SRGBColorSpace;
         this._tilesetTextures.set(ts.image, texture);
       } catch { continue; }
 
-      const cols = ts.columns || Math.floor(ts.imagewidth / ts.tilewidth);
+      const spacing = (ts as any).spacing ?? 0;
+      const margin = (ts as any).margin ?? 0;
+      const cols = ts.columns || Math.floor((ts.imagewidth - 2 * margin + spacing) / (ts.tilewidth + spacing));
+      console.log('[VoxelTileMap] tileset:', ts.name, 'spacing:', spacing, 'margin:', margin, 'cols:', cols, 'image:', ts.imagewidth, 'x', ts.imageheight, 'tile:', ts.tilewidth, 'x', ts.tileheight);
       tilesetDefs.push({
         firstgid: ts.firstgid || 1,
         columns: cols,
@@ -75,6 +81,8 @@ export class VoxelTileMap {
         imageheight: ts.imageheight,
         image: ts.image,
         name: ts.name,
+        spacing,
+        margin,
       });
     }
 
@@ -120,9 +128,9 @@ export class VoxelTileMap {
 
           const material = new THREE.MeshBasicMaterial({
             map: primaryTexture,
-            transparent: true,
-            alphaTest: 0.1,
-            depthWrite: li === 0,
+            transparent: false,
+            alphaTest: 0.5,
+            depthWrite: true,
             side: THREE.DoubleSide,
           });
 

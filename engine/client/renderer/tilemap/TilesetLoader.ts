@@ -8,6 +8,8 @@ export interface TilesetDef {
   imageheight: number;
   image: string;
   name?: string;
+  spacing?: number;
+  margin?: number;
 }
 
 export interface TileUV {
@@ -44,12 +46,21 @@ export class TilesetLookup {
     const col = localId % ts.columns;
     const row = Math.floor(localId / ts.columns);
 
+    const spacing = ts.spacing ?? 0;
+    const margin = ts.margin ?? 0;
+
+    // Pixel position of this tile in the atlas, accounting for margin and spacing
+    const pixelX = margin + col * (ts.tilewidth + spacing);
+    const pixelY = margin + row * (ts.tileheight + spacing);
+
+    const u = pixelX / ts.imagewidth;
+    const v = 1 - (pixelY + ts.tileheight) / ts.imageheight;
     const uSize = ts.tilewidth / ts.imagewidth;
     const vSize = ts.tileheight / ts.imageheight;
 
     return {
-      u: col * uSize,
-      v: 1 - (row + 1) * vSize,
+      u,
+      v,
       uSize,
       vSize,
       tilesetIndex: this._tilesets.indexOf(ts),

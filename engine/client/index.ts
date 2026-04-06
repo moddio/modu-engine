@@ -30,3 +30,4 @@ export { LocalGameSession } from '../core/LocalGameSession';
 export type { LocalGameConfig } from '../core/LocalGameSession';
 export { VoxelTileMap } from './renderer/tilemap/index';
 export * as THREE from 'three';
+export { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';

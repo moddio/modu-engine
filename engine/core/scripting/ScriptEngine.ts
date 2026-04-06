@@ -1,38 +1,52 @@
-import { EventEmitter } from '../events/EventEmitter';
-import { ScriptAPI } from './ScriptAPI';
-import { Sandbox } from './Sandbox';
+import { Engine } from '../Engine';
+import { TriggerManager, TriggerContext } from './TriggerManager';
+import { ActionRunner, ActionVars } from './ActionRunner';
+import { VariableStore } from './VariableStore';
+import type { ScriptDef } from '../GameLoader';
 
 export class ScriptEngine {
-  readonly api: ScriptAPI;
-  readonly events: EventEmitter;
-  private _sandbox: Sandbox;
-  private _scripts: Map<string, string> = new Map();
+  readonly triggers: TriggerManager;
+  readonly actions: ActionRunner;
+  readonly variables: VariableStore;
+  private _engine: Engine;
 
-  constructor(events?: EventEmitter) {
-    this.events = events ?? new EventEmitter();
-    this.api = new ScriptAPI(this.events);
-    this._sandbox = new Sandbox(this.api);
+  constructor(engine?: Engine) {
+    this._engine = engine ?? Engine.instance();
+    this.variables = new VariableStore();
+    this.triggers = new TriggerManager();
+    this.actions = new ActionRunner(this._engine, this.variables);
   }
 
-  load(name: string, code: string): void {
-    this._scripts.set(name, code);
-    this._sandbox.execute(code);
+  /** Load scripts from game data */
+  load(scripts: Record<string, ScriptDef>): void {
+    this.triggers.load(scripts);
   }
 
-  unload(name: string): void {
-    this._scripts.delete(name);
+  /** Load variables from game data */
+  loadVariables(variables: Record<string, { value: unknown; type: string }>): void {
+    this.variables.loadGlobals(variables);
+  }
+
+  /** Fire a trigger — runs all matching scripts */
+  trigger(name: string, context: TriggerContext = {}): void {
+    const scriptIds = this.triggers.getScriptsForTrigger(name);
+    for (const id of scriptIds) {
+      this.runScript(id, { triggeredBy: context });
+    }
+  }
+
+  /** Run a specific script by ID */
+  runScript(scriptId: string, vars: ActionVars = {}): void {
+    const script = this.triggers.getScript(scriptId);
+    if (!script) return;
+    this.actions.run(script.actions, vars);
   }
 
   get scriptCount(): number {
-    return this._scripts.size;
-  }
-
-  update(dt: number): void {
-    this.api.update(dt);
+    return this.triggers.scriptCount;
   }
 
   reset(): void {
-    this._scripts.clear();
-    this.api.reset();
+    this.variables.reset();
   }
 }

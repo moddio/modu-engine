@@ -53,4 +53,24 @@ describe('TilesetLookup', () => {
   it('reports tileset count', () => {
     expect(lookup.tilesetCount).toBe(2);
   });
+
+  it('accounts for spacing in UV calculation', () => {
+    const spacedTileset = [
+      { firstgid: 1, columns: 4, tilecount: 16, tilewidth: 16, tileheight: 16, imagewidth: 67, imageheight: 67, image: 'spaced.png', name: 'spaced', spacing: 1, margin: 0 },
+    ];
+    const spacedLookup = new TilesetLookup(spacedTileset);
+    // Tile 2 (col=1): pixelX = 0 + 1*(16+1) = 17
+    const uv = spacedLookup.getUV(2);
+    expect(uv!.u).toBeCloseTo(17 / 67, 4);
+  });
+
+  it('accounts for margin in UV calculation', () => {
+    const marginTileset = [
+      { firstgid: 1, columns: 4, tilecount: 16, tilewidth: 16, tileheight: 16, imagewidth: 70, imageheight: 70, image: 'margin.png', name: 'margin', spacing: 0, margin: 3 },
+    ];
+    const marginLookup = new TilesetLookup(marginTileset);
+    // Tile 1 (col=0): pixelX = 3 + 0*(16+0) = 3
+    const uv = marginLookup.getUV(1);
+    expect(uv!.u).toBeCloseTo(3 / 70, 4);
+  });
 });
