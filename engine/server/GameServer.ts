@@ -241,6 +241,10 @@ export class GameServer {
       mask: DefaultCollisionMask[CollisionCategory.UNIT],
     });
 
+    // Lock rotation so body doesn't spin from collisions.
+    // Rotation is controlled by the game logic (facing mouse direction), not physics.
+    body.raw.lockRotations(true, true);
+
     this._entityBodies.set(entityId, body);
   }
 
@@ -260,6 +264,17 @@ export class GameServer {
 
     // Sync physics positions back to entities
     this._syncPhysicsToEntities();
+
+    // Rotate units to face camera direction (taro: rotateToFaceMouseCursor)
+    for (const [, playerData] of this._players) {
+      const unit = this._entities.get(playerData.unitId);
+      if (unit && unit._cameraYaw !== undefined) {
+        const typeDef = this.types.get('unitTypes', unit.stats?.type) as any;
+        if (typeDef?.controls?.mouseBehaviour?.rotateToFaceMouseCursor) {
+          unit.rotation = unit._cameraYaw;
+        }
+      }
+    }
 
     this.engine.step(dt);
 
