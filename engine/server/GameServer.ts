@@ -3,12 +3,16 @@ import { ScriptEngine } from '../core/scripting/ScriptEngine';
 import { EntityTypeRegistry } from '../core/game/EntityTypeRegistry';
 import { Unit } from '../core/game/Unit';
 import { Player } from '../core/game/Player';
+import { PhysicsWorld } from '../core/physics/PhysicsWorld';
+import { Vec2 } from '../core/math/Vec2';
+import { CollisionCategory, DefaultCollisionMask } from '../core/physics/CollisionFilter';
 import { GameLoop } from './GameLoop';
 import { MessageType, encodeTransform } from '../core/protocol/Messages';
 import { buildEntityCreatePayload } from '../core/protocol/EntityStream';
 import type { ServerTransport } from './transport/ServerTransport';
 import type { GameMessage } from '../core/protocol/Messages';
 import type { GameData, ScriptDef } from '../core/GameLoader';
+import type { RigidBody } from '../core/physics/RigidBody';
 
 export class GameServer {
   readonly engine: Engine;
@@ -17,9 +21,12 @@ export class GameServer {
   private _transport: ServerTransport;
   private _loop: GameLoop;
   private _gameData: GameData | null = null;
+  private _rawGameData: Record<string, any> | null = null;
   private _entities = new Map<string, any>();
   private _players = new Map<string, { player: Player; clientId: string; unitId: string }>();
   private _tickCount = 0;
+  private _physics: PhysicsWorld | null = null;
+  private _entityBodies = new Map<string, RigidBody>(); // entityId → physics body
 
   constructor(transport: ServerTransport) {
     this._transport = transport;
@@ -37,8 +44,24 @@ export class GameServer {
   get entityCount(): number { return this._entities.size; }
   get gameData(): GameData | null { return this._gameData; }
 
-  init(gameData: GameData): void {
+  /** Initialize with migrated game data. Optionally pass raw (pre-migration) data for initialize scripts. */
+  async init(gameData: GameData, rawGameData?: Record<string, any>): Promise<void> {
     this._gameData = gameData;
+    this._rawGameData = rawGameData || null;
+
+    // Initialize Rapier physics (WASM — requires async init)
+    try {
+      const RAPIER = await import('@dimforge/rapier2d-compat');
+      await RAPIER.init();
+      const gravity = new Vec2(0, 0); // Top-down game: no gravity
+      this._physics = new PhysicsWorld(gravity);
+
+      // Create wall bodies from tilemap
+      this._createWallBodies();
+    } catch {
+      // Physics initialization failed — continue without physics
+      console.warn('[GameServer] Rapier physics not available, running without physics');
+    }
     if (typeof gameData.settings?.frameRate === 'number') {
       this._loop.tickRate = gameData.settings.frameRate as number;
     }
@@ -63,8 +86,54 @@ export class GameServer {
     });
   }
 
+  /** Process initialize script to spawn props, NPCs, items */
+  initializeEntities(): void {
+    // Use raw game data for initialize scripts (pre-migration format)
+    const raw = this._rawGameData;
+    if (!raw) return;
+    const initScript = raw.scripts?.initialize;
+    if (!initScript?.actions) return;
+
+    for (const action of initScript.actions) {
+      if (action.type !== 'createEntityAtPositionWithDimensions') continue;
+
+      const pos = action.position || {};
+      const rot = action.rotation || {};
+      const scl = action.scale || {};
+
+      // Create a static entity record and broadcast it
+      const entityId = `init_${action.actionId || Math.random().toString(36).slice(2)}`;
+      const typeMaps: Record<string, Record<string, unknown> | undefined> = {
+        propTypes: raw.propTypes || (this._gameData as any)?.entities?.propTypes,
+        unitTypes: raw.unitTypes || (this._gameData as any)?.entities?.unitTypes,
+        itemTypes: raw.itemTypes || (this._gameData as any)?.entities?.itemTypes,
+      };
+      const entityDef = typeMaps[action.entityType]?.[action.entity];
+      if (!entityDef) continue;
+
+      const classId = action.entityType === 'unitTypes' ? 'unit' : action.entityType === 'itemTypes' ? 'item' : 'prop';
+
+      this._transport.broadcast({
+        type: MessageType.EntityCreate,
+        data: buildEntityCreatePayload(
+          classId, entityId,
+          pos.x ?? 0, pos.y ?? 0,
+          ((rot.y ?? 0) * Math.PI) / 180,
+          {
+            ...(entityDef as Record<string, unknown>),
+            _initAction: true,
+            _rotation: rot,
+            _scale: scl,
+            _worldY: (pos.z ?? 0) - 0.501,
+          },
+        ),
+      });
+    }
+  }
+
   start(): void {
     this.scripts.trigger('gameStart');
+    this.initializeEntities();
     this._loop.start();
   }
 
@@ -74,7 +143,12 @@ export class GameServer {
       if (entity.destroy) entity.destroy();
     }
     this._entities.clear();
+    this._entityBodies.clear();
     this._players.clear();
+    if (this._physics) {
+      this._physics.destroy();
+      this._physics = null;
+    }
     this.scripts.reset();
     Engine.reset();
   }
@@ -84,10 +158,85 @@ export class GameServer {
     return this._entities.get(id);
   }
 
+  /** Create static wall bodies from the tilemap wall layer */
+  private _createWallBodies(): void {
+    if (!this._physics || !this._rawGameData?.map) return;
+    const map = this._rawGameData.map;
+    const layers = map.layers || [];
+
+    for (const layer of layers) {
+      if (layer.name !== 'walls' || !layer.data) continue;
+      for (let y = 0; y < map.height; y++) {
+        for (let x = 0; x < map.width; x++) {
+          if (layer.data[y * map.width + x] === 0) continue;
+          // Each tile = 1 world unit, centered at (x+0.5, y+0.5)
+          const body = this._physics!.createBody({
+            type: 'static',
+            position: new Vec2(x + 0.5, y + 0.5),
+          });
+          body.addCollider({
+            shape: 'box',
+            width: 0.5,  // half-extent
+            height: 0.5,
+            friction: 0.1,
+            restitution: 0,
+            category: CollisionCategory.WALL,
+            mask: DefaultCollisionMask[CollisionCategory.WALL],
+          });
+        }
+      }
+    }
+  }
+
+  /** Create a physics body for a dynamic entity */
+  private _createEntityBody(entityId: string, x: number, z: number, typeDef: Record<string, any>): void {
+    if (!this._physics) return;
+    const bodyDef = typeDef.body || typeDef.bodies?.default;
+    if (!bodyDef || bodyDef.type === 'none' || bodyDef.type === 'spriteOnly') return;
+
+    const body = this._physics.createBody({
+      type: (bodyDef.type === 'static' ? 'static' : bodyDef.type === 'kinematic' ? 'kinematic' : 'dynamic') as any,
+      position: new Vec2(x, z),
+    });
+
+    // Set damping
+    if (bodyDef.linearDamping) {
+      body.raw.setLinearDamping(bodyDef.linearDamping);
+    }
+
+    // Add collider
+    const hw = (bodyDef.width || 40) / 128; // pixel body width → half-extent in world units
+    const hh = (bodyDef.height || 40) / 128;
+    body.addCollider({
+      shape: 'box',
+      width: hw,
+      height: hh,
+      density: 1,
+      friction: bodyDef.friction ?? 0.1,
+      restitution: bodyDef.restitution ?? 0,
+      category: CollisionCategory.UNIT,
+      mask: DefaultCollisionMask[CollisionCategory.UNIT],
+    });
+
+    this._entityBodies.set(entityId, body);
+  }
+
   // --- Tick ---
 
   private _tick(dt: number): void {
     this._tickCount++;
+
+    // Process input → apply forces to physics bodies
+    this._processMovement(dt);
+
+    // Step physics
+    if (this._physics) {
+      this._physics.step(dt);
+    }
+
+    // Sync physics positions back to entities
+    this._syncPhysicsToEntities();
+
     this.engine.step(dt);
 
     // Attribute regeneration
@@ -104,6 +253,61 @@ export class GameServer {
 
     this.scripts.trigger('frameTick');
     this._streamTransforms();
+  }
+
+  /** Apply movement forces based on player input */
+  private _processMovement(dt: number): void {
+    for (const [clientId, playerData] of this._players) {
+      const unit = this._entities.get(playerData.unitId);
+      if (!unit || !unit._inputKeys) continue;
+
+      const body = this._entityBodies.get(playerData.unitId);
+      if (!body) continue;
+
+      const typeDef = this.types.get('unitTypes', unit.stats?.type) as any;
+      const speedAttr = typeDef?.attributes?.speed?.value ?? 10;
+      const movementMethod = typeDef?.controls?.movementMethod ?? 'velocity';
+      const speed = speedAttr / 16; // Convert pixel speed to world units per second
+
+      // Calculate input direction
+      let inputX = 0, inputY = 0;
+      if (unit._inputKeys.has('w') || unit._inputKeys.has('arrowup')) inputY -= 1;
+      if (unit._inputKeys.has('s') || unit._inputKeys.has('arrowdown')) inputY += 1;
+      if (unit._inputKeys.has('a') || unit._inputKeys.has('arrowleft')) inputX -= 1;
+      if (unit._inputKeys.has('d') || unit._inputKeys.has('arrowright')) inputX += 1;
+
+      // Normalize
+      const len = Math.sqrt(inputX * inputX + inputY * inputY);
+      if (len > 0) {
+        inputX /= len;
+        inputY /= len;
+      }
+
+      if (movementMethod === 'impulse') {
+        if (len > 0) {
+          body.applyImpulse(new Vec2(inputX * speed * dt * 0.1, inputY * speed * dt * 0.1));
+        }
+      } else if (movementMethod === 'force') {
+        if (len > 0) {
+          body.applyForce(new Vec2(inputX * speed, inputY * speed));
+        }
+      } else {
+        // velocity — direct set
+        body.linearVelocity = new Vec2(inputX * speed, inputY * speed);
+      }
+    }
+  }
+
+  /** Sync physics body positions back to entity positions */
+  private _syncPhysicsToEntities(): void {
+    for (const [entityId, body] of this._entityBodies) {
+      const entity = this._entities.get(entityId);
+      if (!entity) continue;
+      const pos = body.position;
+      entity.position.x = pos.x;
+      entity.position.z = pos.y; // Physics Y → Three.js Z
+      entity.rotation = body.angle;
+    }
   }
 
   private _streamTransforms(): void {
@@ -199,6 +403,12 @@ export class GameServer {
         const mapH = (this._gameData.map as any).height || 10;
         unit.position.x = mapW / 2;
         unit.position.z = mapH / 2;
+
+        // Update physics body position to match
+        const body = this._entityBodies.get(unitId);
+        if (body) {
+          body.position = new Vec2(mapW / 2, mapH / 2);
+        }
       }
     }
 
@@ -278,6 +488,9 @@ export class GameServer {
 
     unit.mount(this.engine.root);
     this._entities.set(unit.id, unit);
+
+    // Create physics body for the unit
+    this._createEntityBody(unit.id, unit.position.x, unit.position.z, typeDef as Record<string, any>);
 
     this._transport.broadcast({
       type: MessageType.EntityCreate,
