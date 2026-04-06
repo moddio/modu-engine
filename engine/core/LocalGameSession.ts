@@ -126,7 +126,7 @@ export class LocalGameSession {
       const dt = now - lastTime;
       lastTime = now;
 
-      // Regenerate attributes
+      // Regenerate attributes and NPC idle behavior
       for (const [id, entity] of this._entities) {
         const stats = entity.stats;
         if (!stats) continue;
@@ -135,6 +135,14 @@ export class LocalGameSession {
           const attr = stats[key];
           if (attr.regenerateSpeed && attr.value < attr.max) {
             attr.value = Math.min(attr.max, attr.value + attr.regenerateSpeed * (dt / 1000));
+          }
+        }
+
+        // Simple NPC behavior — occasionally change facing direction
+        if (entity.category === 'unit' && entity.id !== this._localPlayer?.stats?.selectedUnitId) {
+          if (Math.random() < 0.001) {
+            const randomAngle = Math.random() * Math.PI * 2;
+            this._config.onEntityUpdate?.(id, entity.position.x, entity.position.z, randomAngle);
           }
         }
       }

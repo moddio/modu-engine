@@ -57,6 +57,31 @@ export class ActionRunner {
         return undefined;
       }
 
+      case 'while': {
+        const maxIterations = 10000; // Safety limit
+        let iterations = 0;
+        while (iterations < maxIterations) {
+          const cond = this._conditions.evaluate(action.conditions, (v) => this._resolveValue(v, vars));
+          if (!cond) break;
+          const result = this.run((action.actions as any[]) ?? [], vars);
+          if (result === 'break') break;
+          if (result === 'return') return 'return';
+          iterations++;
+        }
+        return undefined;
+      }
+
+      case 'for': {
+        const start = Number(this._resolveValue(action.start, vars)) || 0;
+        const stop = Number(this._resolveValue(action.stop, vars)) || 0;
+        for (let i = start; i < stop; i++) {
+          const result = this.run((action.actions as any[]) ?? [], { ...vars, i });
+          if (result === 'break') break;
+          if (result === 'return') return 'return';
+        }
+        return undefined;
+      }
+
       case 'break':
         return 'break';
       case 'continue':
@@ -458,6 +483,72 @@ export class ActionRunner {
       }
       case 'undefinedValue':
         return undefined;
+
+      // --- Count functions ---
+      case 'getPlayerCount':
+        return this._engine.root.children.filter(e => e.category === 'player').length;
+      case 'getUnitCount':
+        return this._engine.root.children.filter(e => e.category === 'unit').length;
+      case 'getItemCount':
+        return this._engine.root.children.filter(e => e.category === 'item').length;
+
+      // --- Timestamp ---
+      case 'currentTimeStamp':
+        return Date.now();
+
+      // --- Math functions ---
+      case 'abs':
+        return Math.abs(Number(this._resolveValue(obj.value, vars)));
+      case 'sin':
+        return Math.sin(Number(this._resolveValue(obj.value, vars)));
+      case 'cos':
+        return Math.cos(Number(this._resolveValue(obj.value, vars)));
+      case 'sqrt':
+        return Math.sqrt(Number(this._resolveValue(obj.value, vars)));
+      case 'floor':
+        return Math.floor(Number(this._resolveValue(obj.value, vars)));
+      case 'ceil':
+        return Math.ceil(Number(this._resolveValue(obj.value, vars)));
+      case 'log':
+        return Math.log(Number(this._resolveValue(obj.value, vars)));
+
+      // --- Coordinate and position functions ---
+      case 'xyCoordinate':
+        return {
+          x: Number(this._resolveValue(obj.x, vars)) || 0,
+          y: Number(this._resolveValue(obj.y, vars)) || 0,
+        };
+
+      case 'entityPosition':
+      case 'getEntityPosition': {
+        const eid = this._resolveValue(obj.entity, vars) as string;
+        const ent = this._engine.findById(eid);
+        if (ent) return { x: ent.position.x * 64, y: ent.position.z * 64 };
+        return { x: 0, y: 0 };
+      }
+
+      case 'distanceBetweenPositions': {
+        const posA = this._resolveValue(obj.positionA, vars) as any;
+        const posB = this._resolveValue(obj.positionB, vars) as any;
+        if (!posA || !posB) return 0;
+        const dx = (posA.x || 0) - (posB.x || 0);
+        const dy = (posA.y || 0) - (posB.y || 0);
+        return Math.sqrt(dx * dx + dy * dy);
+      }
+
+      case 'angleBetweenPositions': {
+        const pA = this._resolveValue(obj.positionA, vars) as any;
+        const pB = this._resolveValue(obj.positionB, vars) as any;
+        if (!pA || !pB) return 0;
+        return Math.atan2((pB.y || 0) - (pA.y || 0), (pB.x || 0) - (pA.x || 0));
+      }
+
+      // --- Trigger context ---
+      case 'lastTriggeringRegion':
+        return vars.triggeredBy && (vars.triggeredBy as any).regionId;
+      case 'getEntityType':
+        return vars.triggeredBy && (vars.triggeredBy as any).entityType;
+
       case 'calculate': {
         const items = obj.items as any[];
         if (!items || items.length < 3) return 0;
