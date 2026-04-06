@@ -176,10 +176,10 @@ export class GameServer {
           });
           body.addCollider({
             shape: 'box',
-            width: 0.5,  // half-extent
+            width: 0.5,  // half-extent (1 tile = 1 unit)
             height: 0.5,
-            friction: 0.1,
-            restitution: 0,
+            friction: 0.01,     // Low friction so units slide along walls
+            restitution: 0.01,  // Slight bounce to prevent sticking
             category: CollisionCategory.WALL,
             mask: DefaultCollisionMask[CollisionCategory.WALL],
           });
@@ -204,19 +204,32 @@ export class GameServer {
       body.raw.setLinearDamping(bodyDef.linearDamping);
     }
 
-    // Add collider
-    const hw = (bodyDef.width || 40) / 128; // pixel body width → half-extent in world units
-    const hh = (bodyDef.height || 40) / 128;
+    // Taro uses scaleRatio=30 to convert pixel dimensions to physics units.
+    // Our world: 1 tile = 1 unit. Taro: 1 tile = 16px. Physics: 16px / 30 = 0.533 units per tile.
+    // To match: body pixels / 30 gives physics size, then / (16/30) = * 30/16 gives world units.
+    // Simplified: bodyPixels / 16 = world units for the body dimension.
+    // Half-extent = bodyPixels / 16 / 2
+    const TILE_PX = 16;
+    const hw = ((bodyDef.width || 40) / TILE_PX) / 2;
+    const hh = ((bodyDef.height || 40) / TILE_PX) / 2;
+
+    // Use fixture settings from game data
+    const fixture = bodyDef.fixtures?.[0] || {};
     body.addCollider({
       shape: 'box',
       width: hw,
       height: hh,
-      density: 1,
-      friction: bodyDef.friction ?? 0.1,
-      restitution: bodyDef.restitution ?? 0,
+      density: fixture.density ?? 3,
+      friction: fixture.friction ?? 0.01,
+      restitution: fixture.restitution ?? 0.01,
       category: CollisionCategory.UNIT,
       mask: DefaultCollisionMask[CollisionCategory.UNIT],
     });
+
+    // Fixed rotation prevents spinning on wall contact
+    if (bodyDef.fixedRotation !== false) {
+      body.raw.setEnabledRotations(false, true);
+    }
 
     this._entityBodies.set(entityId, body);
   }
@@ -267,7 +280,15 @@ export class GameServer {
       const typeDef = this.types.get('unitTypes', unit.stats?.type) as any;
       const speedAttr = typeDef?.attributes?.speed?.value ?? 10;
       const movementMethod = typeDef?.controls?.movementMethod ?? 'velocity';
-      const speed = speedAttr / 16; // Convert pixel speed to world units per second
+
+      // Taro speed attribute is in pixels/tick. Convert to world units.
+      // In taro: speed is applied as velocity in pixels, then scaleRatio=30 converts to physics.
+      // Our world: 1 tile = 1 unit = 16px. Speed 40 px/tick → 40/16 = 2.5 tiles/tick.
+      // At 20 ticks/sec, that's 2.5 * 20 = 50 tiles/sec. Too fast.
+      // Taro applies speed/scaleRatio = 40/30 = 1.33 physics units per tick.
+      // In our world: 1.33 * (16/30) tiles = 0.71 tiles/tick, at 20Hz = 14.2 tiles/sec.
+      // Simplified: speed / 30 gives the physics impulse magnitude.
+      const physicsSpeed = speedAttr / 30;
 
       // Calculate input direction
       let inputX = 0, inputY = 0;
@@ -285,15 +306,16 @@ export class GameServer {
 
       if (movementMethod === 'impulse') {
         if (len > 0) {
-          body.applyImpulse(new Vec2(inputX * speed * dt * 0.1, inputY * speed * dt * 0.1));
+          // Impulse is applied once per tick, not multiplied by dt
+          body.applyImpulse(new Vec2(inputX * physicsSpeed * 0.05, inputY * physicsSpeed * 0.05));
         }
       } else if (movementMethod === 'force') {
         if (len > 0) {
-          body.applyForce(new Vec2(inputX * speed, inputY * speed));
+          body.applyForce(new Vec2(inputX * physicsSpeed * 10, inputY * physicsSpeed * 10));
         }
       } else {
         // velocity — direct set
-        body.linearVelocity = new Vec2(inputX * speed, inputY * speed);
+        body.linearVelocity = new Vec2(inputX * physicsSpeed, inputY * physicsSpeed);
       }
     }
   }
