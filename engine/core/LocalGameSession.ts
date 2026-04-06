@@ -3,6 +3,8 @@ import { ScriptEngine } from './scripting/ScriptEngine';
 import { VariableStore } from './scripting/VariableStore';
 import { EntityTypeRegistry } from './game/EntityTypeRegistry';
 import { Unit } from './game/Unit';
+import { Item } from './game/Item';
+import { Projectile } from './game/Projectile';
 import { Player } from './game/Player';
 import { EventEmitter } from './events/EventEmitter';
 import type { GameData, ScriptDef } from './GameLoader';
@@ -64,14 +66,15 @@ export class LocalGameSession {
     }
 
     // Listen for script actions that create/destroy entities
-    this.engine.events.on('scriptAction', (args: unknown) => {
-      const [type, action, vars] = args as [string, Record<string, unknown>, Record<string, unknown>];
-      this._handleScriptAction(type, action, vars);
+    this.engine.events.on('scriptAction', (type: unknown, action: unknown, vars: unknown) => {
+      this._handleScriptAction(type as string, action as Record<string, unknown>, (vars || {}) as Record<string, unknown>);
     });
 
     // Handle setEntityAttribute events from ActionRunner
-    this.engine.events.on('setEntityAttribute', (args: unknown) => {
-      const [entityId, attrId, value] = args as [string, string, number];
+    this.engine.events.on('setEntityAttribute', (eId: unknown, aId: unknown, val: unknown) => {
+      const entityId = eId as string;
+      const attrId = aId as string;
+      const value = val as number;
       const entity = this._entities.get(entityId);
       if (entity?.stats) {
         const attr = entity.stats[`attr_${attrId}`];
@@ -79,6 +82,23 @@ export class LocalGameSession {
           attr.value = Math.max(attr.min, Math.min(attr.max, value));
           if (attr.value <= attr.min) {
             this.scripts.trigger('entityAttributeBecomesZero', { entityId, attributeId: attrId });
+            // Death/respawn: when health reaches zero, hide entity and respawn after 3s
+            if (attrId === 'health') {
+              this._config.onEntityDestroy?.(entityId);
+              setTimeout(() => {
+                const ent = this._entities.get(entityId);
+                if (ent) {
+                  attr.value = attr.max; // Restore health
+                  this._config.onEntityCreate?.({
+                    id: entityId,
+                    category: ent.category,
+                    x: ent.position.x,
+                    y: ent.position.z,
+                    stats: ent.stats as any,
+                  });
+                }
+              }, 3000);
+            }
           }
           if (attr.value >= attr.max) {
             this.scripts.trigger('entityAttributeBecomesFulll', { entityId, attributeId: attrId });
@@ -213,6 +233,126 @@ export class LocalGameSession {
     return unit;
   }
 
+  /** Spawn an item at a position */
+  spawnItem(typeId: string, position: { x: number; z: number }): void {
+    const typeDef = this.types.get('itemTypes', typeId);
+    if (!typeDef) return;
+
+    const item = new Item(undefined, {
+      name: (typeDef as any).name || typeId,
+      type: typeId,
+      quantity: 1,
+      maxQuantity: (typeDef as any).maxQuantity || 99,
+      cost: (typeDef as any).cost?.quantity || 0,
+    });
+
+    item.position.x = position.x;
+    item.position.z = position.z;
+    item.mount(this.engine.root);
+    this._entities.set(item.id, item);
+
+    this._config.onEntityCreate?.({
+      id: item.id,
+      category: 'item',
+      x: position.x,
+      y: position.z,
+      stats: { ...item.stats, ...typeDef } as any,
+    });
+
+    this.scripts.trigger('entityCreatedGlobal', { entityId: item.id, itemId: item.id });
+  }
+
+  /** Pick up an item (move from world to unit inventory) */
+  pickupItem(unitId: string, itemId: string): boolean {
+    const unit = this._entities.get(unitId);
+    const item = this._entities.get(itemId);
+    if (!unit || !item) return false;
+
+    // Remove from world
+    this._config.onEntityDestroy?.(itemId);
+
+    // Add to unit's inventory (simplified)
+    (unit.stats as any).currentItemId = itemId;
+
+    this.scripts.trigger('unitPicksUpItem', { unitId, itemId });
+    return true;
+  }
+
+  /** Drop the unit's current item */
+  dropItem(unitId: string): void {
+    const unit = this._entities.get(unitId);
+    if (!unit) return;
+
+    const itemId = (unit.stats as any).currentItemId;
+    if (!itemId) return;
+
+    const item = this._entities.get(itemId);
+    if (!item) return;
+
+    item.position.x = unit.position.x;
+    item.position.z = unit.position.z;
+
+    this._config.onEntityCreate?.({
+      id: item.id,
+      category: 'item',
+      x: item.position.x,
+      y: item.position.z,
+      stats: item.stats as any,
+    });
+
+    (unit.stats as any).currentItemId = null;
+    this.scripts.trigger('unitDroppedAnItem', { unitId, itemId });
+  }
+
+  /** Spawn a projectile at a position moving in a direction */
+  spawnProjectile(typeId: string, position: { x: number; z: number }, angle: number, sourceUnitId: string): void {
+    const typeDef = this.types.get('projectileTypes', typeId);
+    if (!typeDef) return;
+
+    const proj = new Projectile(undefined, {
+      name: (typeDef as any).name || typeId,
+      type: typeId,
+      sourceUnitId,
+      speed: (typeDef as any).speed || 300,
+      damage: (typeDef as any).damage || 10,
+      lifeSpan: (typeDef as any).lifeSpan || 2000,
+    });
+
+    proj.position.x = position.x;
+    proj.position.z = position.z;
+    proj.mount(this.engine.root);
+    this._entities.set(proj.id, proj);
+
+    this._config.onEntityCreate?.({
+      id: proj.id,
+      category: 'projectile',
+      x: position.x,
+      y: position.z,
+      stats: { ...proj.stats, ...typeDef } as any,
+    });
+
+    // Move projectile in direction
+    const speed = (typeDef as any).speed || 300;
+    const lifeSpan = (typeDef as any).lifeSpan || 2000;
+    const worldSpeed = speed / 64;
+    const vx = Math.sin(angle) * worldSpeed;
+    const vz = -Math.cos(angle) * worldSpeed;
+
+    const projInterval = setInterval(() => {
+      proj.position.x += vx * 0.016;
+      proj.position.z += vz * 0.016;
+      this._config.onEntityUpdate?.(proj.id, proj.position.x, proj.position.z, angle);
+    }, 16);
+
+    // Destroy after lifespan
+    setTimeout(() => {
+      clearInterval(projInterval);
+      this._entities.delete(proj.id);
+      this._config.onEntityDestroy?.(proj.id);
+      proj.destroy();
+    }, lifeSpan);
+  }
+
   /** Get an entity by ID */
   getEntity(id: string): any {
     return this._entities.get(id);
@@ -236,6 +376,24 @@ export class LocalGameSession {
           entity.destroy();
           this._entities.delete(entityId);
           this._config.onEntityDestroy?.(entityId);
+        }
+        break;
+      }
+      case 'createItemAtPosition': {
+        const typeId = action.itemType as string;
+        const pos = action.position as { x: number; z: number } | undefined;
+        if (typeId) {
+          this.spawnItem(typeId, pos || { x: 0, z: 0 });
+        }
+        break;
+      }
+      case 'createProjectileAtPosition': {
+        const typeId = action.projectileType as string;
+        const pos = action.position as { x: number; z: number } | undefined;
+        const angle = (action.angle as number) || 0;
+        const sourceUnitId = (action.sourceUnitId as string) || '';
+        if (typeId) {
+          this.spawnProjectile(typeId, pos || { x: 0, z: 0 }, angle, sourceUnitId);
         }
         break;
       }
