@@ -394,6 +394,258 @@ export class ActionRunner {
         return undefined;
       }
 
+      // --- Quest system ---
+      case 'addQuestToPlayer': {
+        this._engine.events.emit('quest:add', [
+          this._resolveValue(action.player, vars),
+          this._resolveValue(action.quest, vars),
+        ]);
+        return undefined;
+      }
+
+      case 'removeQuestForPlayer': {
+        this._engine.events.emit('quest:remove', [
+          this._resolveValue(action.player, vars),
+          this._resolveValue(action.quest, vars),
+        ]);
+        return undefined;
+      }
+
+      case 'completeQuest': {
+        this._engine.events.emit('quest:complete', [
+          this._resolveValue(action.player, vars),
+          this._resolveValue(action.quest, vars),
+        ]);
+        return undefined;
+      }
+
+      case 'setQuestProgress': {
+        this._engine.events.emit('quest:setProgress', [
+          this._resolveValue(action.player, vars),
+          this._resolveValue(action.quest, vars),
+          this._resolveValue(action.progress, vars),
+        ]);
+        return undefined;
+      }
+
+      // --- Buff system ---
+      case 'addAttributeBuffToUnit': {
+        this._engine.events.emit('buff:add', [
+          this._resolveValue(action.unit, vars),
+          this._resolveValue(action.attribute, vars),
+          Number(this._resolveValue(action.value, vars)),
+          Number(this._resolveValue(action.duration, vars)),
+        ]);
+        return undefined;
+      }
+
+      case 'addPercentageAttributeBuffToUnit': {
+        this._engine.events.emit('buff:addPercent', [
+          this._resolveValue(action.unit, vars),
+          this._resolveValue(action.attribute, vars),
+          Number(this._resolveValue(action.percentage, vars)),
+          Number(this._resolveValue(action.duration, vars)),
+        ]);
+        return undefined;
+      }
+
+      case 'removeAllAttributeBuffs': {
+        this._engine.events.emit('buff:removeAll', [
+          this._resolveValue(action.unit, vars),
+        ]);
+        return undefined;
+      }
+
+      // --- Trading ---
+      case 'makePlayerTradeWithPlayer': {
+        this._engine.events.emit('trade:initiate', [
+          this._resolveValue(action.playerA, vars),
+          this._resolveValue(action.playerB, vars),
+        ]);
+        return undefined;
+      }
+
+      case 'sendCoinsToPlayer': {
+        this._engine.events.emit('coins:send', [
+          this._resolveValue(action.player, vars),
+          Number(this._resolveValue(action.coins, vars)),
+        ]);
+        return undefined;
+      }
+
+      // --- More entity actions ---
+      case 'changeUnitType': {
+        this._engine.events.emit('entity:changeType', [
+          this._resolveValue(action.entity, vars),
+          this._resolveValue(action.unitType, vars),
+        ]);
+        return undefined;
+      }
+
+      case 'changeEntityModelSprite': {
+        this._engine.events.emit('entity:changeModel', [
+          this._resolveValue(action.entity, vars),
+          this._resolveValue(action.sprite, vars),
+        ]);
+        return undefined;
+      }
+
+      case 'flipEntitySprite': {
+        this._engine.events.emit('entity:flip', [
+          this._resolveValue(action.entity, vars),
+          this._resolveValue(action.flip, vars),
+        ]);
+        return undefined;
+      }
+
+      case 'setUnitSpeed': {
+        this._engine.events.emit('entity:setSpeed', [
+          this._resolveValue(action.entity, vars),
+          Number(this._resolveValue(action.speed, vars)),
+        ]);
+        return undefined;
+      }
+
+      case 'setUnitNameLabel': {
+        this._engine.events.emit('entity:setNameLabel', [
+          this._resolveValue(action.entity, vars),
+          this._resolveValue(action.name, vars),
+        ]);
+        return undefined;
+      }
+
+      case 'hideUnitNameLabel': {
+        this._engine.events.emit('entity:hideNameLabel', [this._resolveValue(action.entity, vars)]);
+        return undefined;
+      }
+
+      case 'showUnitNameLabel': {
+        this._engine.events.emit('entity:showNameLabel', [this._resolveValue(action.entity, vars)]);
+        return undefined;
+      }
+
+      case 'changeScaleOfEntityBody':
+      case 'changeScaleOfEntitySprite': {
+        this._engine.events.emit('entity:setScale', [
+          this._resolveValue(action.entity, vars),
+          Number(this._resolveValue(action.scale, vars)),
+        ]);
+        return undefined;
+      }
+
+      case 'makeUnitInvisible': {
+        this._engine.events.emit('entity:setVisible', [this._resolveValue(action.entity, vars), false]);
+        return undefined;
+      }
+
+      case 'makeUnitVisible': {
+        this._engine.events.emit('entity:setVisible', [this._resolveValue(action.entity, vars), true]);
+        return undefined;
+      }
+
+      case 'applyForceOnEntityXY':
+      case 'applyForceOnEntityAngle': {
+        this._engine.events.emit('physics:applyForce', [
+          this._resolveValue(action.entity, vars),
+          this._resolveValue(action.force, vars),
+          this._resolveValue(action.angle, vars),
+        ]);
+        return undefined;
+      }
+
+      case 'applyImpulseOnEntityXY':
+      case 'applyImpulseOnEntityAngle': {
+        this._engine.events.emit('physics:applyImpulse', [
+          this._resolveValue(action.entity, vars),
+          this._resolveValue(action.impulse, vars),
+          this._resolveValue(action.angle, vars),
+        ]);
+        return undefined;
+      }
+
+      case 'makePlayerSelectUnit': {
+        this._engine.events.emit('player:selectUnit', [
+          this._resolveValue(action.player, vars),
+          this._resolveValue(action.unit, vars),
+        ]);
+        return undefined;
+      }
+
+      case 'assignPlayerType': {
+        this._engine.events.emit('player:assignType', [
+          this._resolveValue(action.player, vars),
+          this._resolveValue(action.playerType, vars),
+        ]);
+        return undefined;
+      }
+
+      case 'kickPlayer': {
+        this._engine.events.emit('player:kick', [this._resolveValue(action.player, vars)]);
+        return undefined;
+      }
+
+      case 'sendPlayerToMap':
+      case 'sendPlayerToGame': {
+        this._engine.events.emit('player:sendTo', [
+          this._resolveValue(action.player, vars),
+          this._resolveValue(action.map, vars) || this._resolveValue(action.game, vars),
+        ]);
+        return undefined;
+      }
+
+      case 'makePlayerSendChatMessage': {
+        this._engine.events.emit('chat:systemMessage', [
+          this._resolveValue(action.message, vars),
+        ]);
+        return undefined;
+      }
+
+      case 'startEmittingParticles': {
+        this._engine.events.emit('particle:start', [
+          this._resolveValue(action.entity, vars),
+          this._resolveValue(action.particle, vars),
+        ]);
+        return undefined;
+      }
+
+      case 'stopEmittingParticles': {
+        this._engine.events.emit('particle:stop', [this._resolveValue(action.entity, vars)]);
+        return undefined;
+      }
+
+      case 'editMapTile':
+      case 'editMapTiles': {
+        this._engine.events.emit('map:editTile', [action]);
+        return undefined;
+      }
+
+      case 'loadMapFromString': {
+        this._engine.events.emit('map:loadFromString', [this._resolveValue(action.mapData, vars)]);
+        return undefined;
+      }
+
+      case 'sendPostRequest':
+      case 'requestPost': {
+        this._engine.events.emit('network:postRequest', [
+          this._resolveValue(action.url, vars),
+          this._resolveValue(action.data, vars),
+        ]);
+        return undefined;
+      }
+
+      case 'sendDataFromClientToServer': {
+        this._engine.events.emit('network:clientToServer', [this._resolveValue(action.data, vars)]);
+        return undefined;
+      }
+
+      case 'sendDataFromServerToClient': {
+        this._engine.events.emit('network:serverToClient', [
+          this._resolveValue(action.client, vars),
+          this._resolveValue(action.data, vars),
+        ]);
+        return undefined;
+      }
+
       default: {
         // Unknown action — emit as event for extensibility
         this._engine.events.emit('scriptAction', [type, action, vars]);
@@ -466,9 +718,12 @@ export class ActionRunner {
         return vars.selectedItem;
       case 'thisEntity':
         return vars.thisEntity ?? (vars.triggeredBy && (vars.triggeredBy as any).unitId);
-      case 'getOwner':
-        // Get the owner player of an entity
-        return undefined; // Will be wired later
+      case 'getOwnerOfUnit':
+      case 'getOwner': {
+        const eid = this._resolveValue(obj.entity, vars) as string;
+        const ent = this._engine.findById(eid);
+        return (ent as any)?.stats?.ownerId;
+      }
       case 'stringToNumber':
         return Number(this._resolveValue(obj.value, vars));
       case 'numberToString':
@@ -548,6 +803,72 @@ export class ActionRunner {
         return vars.triggeredBy && (vars.triggeredBy as any).regionId;
       case 'getEntityType':
         return vars.triggeredBy && (vars.triggeredBy as any).entityType;
+
+      case 'getUnitTypeOfUnit': {
+        const eid = this._resolveValue(obj.entity, vars) as string;
+        const ent = this._engine.findById(eid);
+        return (ent as any)?.stats?.type;
+      }
+
+      case 'getItemTypeOfItem': {
+        const eid = this._resolveValue(obj.entity, vars) as string;
+        const ent = this._engine.findById(eid);
+        return (ent as any)?.stats?.type;
+      }
+
+      case 'getValueOfEntityVariable': {
+        return this._variables.getEntityVar(
+          this._resolveValue(obj.entity, vars) as string,
+          obj.variableName as string,
+        );
+      }
+
+      case 'getValueOfPlayerVariable': {
+        return this._variables.getPlayerVar(
+          this._resolveValue(obj.player, vars) as string,
+          obj.variableName as string,
+        );
+      }
+
+      case 'allUnits':
+        return this._engine.root.children.filter(e => e.category === 'unit').map(e => e.id);
+
+      case 'allPlayers':
+        return this._engine.root.children.filter(e => e.category === 'player').map(e => e.id);
+
+      case 'allItems':
+        return this._engine.root.children.filter(e => e.category === 'item').map(e => e.id);
+
+      case 'getEntityName': {
+        const eid = this._resolveValue(obj.entity, vars) as string;
+        const ent = this._engine.findById(eid);
+        return (ent as any)?.stats?.name;
+      }
+
+      case 'getPlayerName': {
+        const pid = this._resolveValue(obj.player, vars) as string;
+        const player = this._engine.findById(pid);
+        return (player as any)?.stats?.name;
+      }
+
+      case 'lastPlayedTimeOfPlayer':
+        return Date.now();
+
+      case 'getMapWidth':
+        return this._engine.root.children.length; // placeholder
+
+      case 'getMapHeight':
+        return this._engine.root.children.length; // placeholder
+
+      case 'true':
+        return true;
+
+      case 'false':
+        return false;
+
+      case 'null':
+      case 'undefined':
+        return undefined;
 
       case 'calculate': {
         const items = obj.items as any[];
