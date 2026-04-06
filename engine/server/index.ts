@@ -9,3 +9,5 @@ export { BandwidthBudget } from './network/BandwidthBudget';
 export { EntityStreamManager } from './network/EntityStreamManager';
 export type { StreamEntityData } from './network/EntityStreamManager';
 export type { ServerTransport } from './transport/ServerTransport';
+export { WebSocketServerTransport } from './transport/WebSocketServerTransport';
+export { WebWorkerServerTransport } from './transport/WebWorkerServerTransport';
