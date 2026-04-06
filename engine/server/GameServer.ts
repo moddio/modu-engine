@@ -304,18 +304,21 @@ export class GameServer {
         inputY /= len;
       }
 
+      // In taro Box2D: impulse applied = speed / scaleRatio per tick
+      // With density=3 and damping=5, we need a stronger push.
+      // Taro applies: body.applyImpulse(vel.x, vel.y) where vel = direction * speed / scaleRatio
+      // The scaleRatio=30, speed=40 → impulse = 40/30 = 1.33 per tick
       if (movementMethod === 'impulse') {
         if (len > 0) {
-          // Impulse is applied once per tick, not multiplied by dt
-          body.applyImpulse(new Vec2(inputX * physicsSpeed * 0.05, inputY * physicsSpeed * 0.05));
+          body.applyImpulse(new Vec2(inputX * physicsSpeed, inputY * physicsSpeed));
         }
       } else if (movementMethod === 'force') {
         if (len > 0) {
-          body.applyForce(new Vec2(inputX * physicsSpeed * 10, inputY * physicsSpeed * 10));
+          body.applyForce(new Vec2(inputX * physicsSpeed * 50, inputY * physicsSpeed * 50));
         }
       } else {
         // velocity — direct set
-        body.linearVelocity = new Vec2(inputX * physicsSpeed, inputY * physicsSpeed);
+        body.linearVelocity = new Vec2(inputX * physicsSpeed * 3, inputY * physicsSpeed * 3);
       }
     }
   }
