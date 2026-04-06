@@ -104,6 +104,7 @@ export class VoxelTileMap {
 
       const chunksX = Math.ceil(mapW / CHUNK_SIZE);
       const chunksY = Math.ceil(mapH / CHUNK_SIZE);
+      const layerY = -0.501 + tileLayerIndex;
 
       for (let cy = 0; cy < chunksY; cy++) {
         for (let cx = 0; cx < chunksX; cx++) {
@@ -128,28 +129,25 @@ export class VoxelTileMap {
           bufGeo.setAttribute('normal', new THREE.Float32BufferAttribute(geo.normals, 3));
           bufGeo.setIndex(geo.indices);
 
-          const material = new THREE.MeshBasicMaterial({
+          const material = new THREE.MeshStandardMaterial({
             map: primaryTexture,
             transparent: false,
             alphaTest: 0.5,
-            depthWrite: true,
             side: THREE.DoubleSide,
           });
 
           const mesh = new THREE.Mesh(bufGeo, material);
           const offsetX = cx * CHUNK_SIZE * worldTileW;
           const offsetZ = cy * CHUNK_SIZE * worldTileH;
-          // Taro Voxels.ts: y = yOffset(-0.501) + layerIndex
-          // First layer at -0.501, second at 0.499, etc.
-          const layerY = -0.501 + tileLayerIndex;
           mesh.position.set(offsetX, layerY, offsetZ);
-          tileLayerIndex++;
           mesh.name = `chunk_${layer.name}_${cx}_${cy}`;
+          mesh.receiveShadow = true;
 
           this.group.add(mesh);
           this._meshes.push(mesh);
         }
       }
+      tileLayerIndex++;
     }
   }
 
