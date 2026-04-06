@@ -4,7 +4,7 @@ import { MenuUI } from '../../../engine/client/ui/MenuUI';
 import { ShopUI } from '../../../engine/client/ui/ShopUI';
 import { ScoreboardUI } from '../../../engine/client/ui/ScoreboardUI';
 import { DevConsole } from '../../../engine/client/ui/DevConsole';
-import { GameText } from '../../../engine/client/ui/GameText';
+import { GameTextUI } from '../../../engine/client/ui/GameText';
 
 describe('UIManager', () => {
   it('registers and retrieves components', () => {
@@ -105,19 +105,19 @@ describe('DevConsole', () => {
   });
 });
 
-describe('GameText', () => {
+describe('GameTextUI', () => {
   it('creates notifications with unique ids', () => {
-    const gt = new GameText();
-    const id1 = gt.notify('Hello');
-    const id2 = gt.notify('World');
+    const gt = new GameTextUI();
+    const id1 = gt.show('Hello');
+    const id2 = gt.show('World');
     expect(id1).not.toBe(id2);
     expect(gt.notifications.length).toBe(2);
   });
 
-  it('clear removes all', () => {
-    const gt = new GameText();
-    gt.notify('test');
-    gt.clear();
+  it('destroy removes all', () => {
+    const gt = new GameTextUI();
+    gt.show('test');
+    gt.destroy();
     expect(gt.notifications.length).toBe(0);
   });
 });

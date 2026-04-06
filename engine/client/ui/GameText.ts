@@ -1,41 +1,47 @@
 import type { UIComponent } from './UIManager';
 import { EventEmitter } from '../../core/events/EventEmitter';
 
-export interface TextNotification {
+export type NotificationType = 'info' | 'warning' | 'error' | 'success';
+
+export interface GameNotification {
   id: string;
   text: string;
-  duration: number;
+  type: NotificationType;
+  duration: number;  // ms
   createdAt: number;
 }
 
-export class GameText implements UIComponent {
+export class GameTextUI implements UIComponent {
   readonly name = 'gameText';
   readonly events = new EventEmitter();
   visible = true;
-  notifications: TextNotification[] = [];
+  private _notifications: GameNotification[] = [];
   private _nextId = 0;
 
-  show(): void { this.visible = true; }
-  hide(): void { this.visible = false; }
+  get notifications(): GameNotification[] { return this._notifications; }
 
-  notify(text: string, duration: number = 3000): string {
+  show(text: string, type: NotificationType = 'info', duration: number = 3000): string {
     const id = `notif_${++this._nextId}`;
-    const notif: TextNotification = { id, text, duration, createdAt: Date.now() };
-    this.notifications.push(notif);
-    this.events.emit('notify', notif);
+    const notif: GameNotification = { id, text, type, duration, createdAt: Date.now() };
+    this._notifications.push(notif);
+    this.events.emit('notification', notif);
     return id;
   }
 
-  update(): void {
-    const now = Date.now();
-    const before = this.notifications.length;
-    this.notifications = this.notifications.filter(n => now - n.createdAt < n.duration);
-    if (this.notifications.length !== before) {
-      this.events.emit('updated', this.notifications);
+  remove(id: string): void {
+    this._notifications = this._notifications.filter(n => n.id !== id);
+  }
+
+  /** Remove expired notifications */
+  update(now: number): void {
+    const before = this._notifications.length;
+    this._notifications = this._notifications.filter(n => now - n.createdAt < n.duration);
+    if (this._notifications.length !== before) {
+      this.events.emit('updated', { notifications: this._notifications });
     }
   }
 
-  clear(): void { this.notifications = []; }
-
-  destroy(): void { this.clear(); }
+  // UIComponent interface — show(text) overrides, so provide explicit hide/destroy
+  hide(): void { this.visible = false; }
+  destroy(): void { this._notifications = []; }
 }
