@@ -3,6 +3,7 @@ import * as THREE from 'three';
 export class Sprite {
   readonly mesh: THREE.Sprite;
   private _material: THREE.SpriteMaterial;
+  billboard = false;
 
   constructor(texture?: THREE.Texture) {
     this._material = new THREE.SpriteMaterial({
@@ -35,6 +36,12 @@ export class Sprite {
 
   setTint(color: number): void {
     this._material.color.setHex(color);
+  }
+
+  /** Make sprite face the camera each frame */
+  faceCamera(camera: THREE.Camera): void {
+    if (!this.billboard) return;
+    this.mesh.quaternion.copy(camera.quaternion);
   }
 
   destroy(): void {

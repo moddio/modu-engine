@@ -74,6 +74,12 @@ export class AnimatedSprite extends Sprite {
     }
   }
 
+  /** Delegate billboard facing to base Sprite */
+  override faceCamera(camera: THREE.Camera): void {
+    if (!this.billboard) return;
+    this.mesh.quaternion.copy(camera.quaternion);
+  }
+
   private _applyFrame(): void {
     if (!this._currentAnim) return;
     const frame = this._currentAnim.frames[this._frameIndex];
