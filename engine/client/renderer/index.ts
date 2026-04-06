@@ -6,6 +6,7 @@ export { SpatialIndex } from './SpatialIndex';
 export { PostProcessing } from './PostProcessing';
 export { CameraController } from './CameraController';
 export type { CameraConfig } from './CameraController';
+export { EntityManager } from './EntityManager';
 export * from './sprites/index';
 export * from './entities/index';
 export * from './hud/index';

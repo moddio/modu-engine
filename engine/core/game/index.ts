@@ -17,3 +17,4 @@ export type { AbilityDef } from './Ability';
 export { AttributeManager } from './Attribute';
 export type { AttributeDef } from './Attribute';
 export { AIComponent } from './AI';
+export { EntityTypeRegistry } from './EntityTypeRegistry';
