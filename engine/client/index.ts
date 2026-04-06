@@ -1,5 +1,16 @@
 export { Client } from './Client';
-export { Renderer, Camera, ObjectPool, SpatialIndex } from './renderer/index';
-export type { RendererOptions } from './renderer/index';
+export { Renderer } from './renderer/Renderer';
+export type { RendererOptions } from './renderer/Renderer';
+export { CameraController } from './renderer/CameraController';
+export type { CameraConfig } from './renderer/CameraController';
+export { AssetManager } from './renderer/AssetManager';
+export type { AssetSource } from './renderer/AssetManager';
+export { Camera, ObjectPool, SpatialIndex } from './renderer/index';
 export { InputManager, Key, MobileControls } from './input/index';
 export { AudioManager } from './audio/index';
+export { GameLoader } from '../core/GameLoader';
+export type { GameData, ScriptDef } from '../core/GameLoader';
+export { GameMigrator } from '../core/GameMigrator';
+export type { MigratedGameData } from '../core/GameMigrator';
+export { CoordinateUtils } from '../core/CoordinateUtils';
+export * as THREE from 'three';
