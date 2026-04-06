@@ -304,29 +304,23 @@ export class GameServer {
         inputY /= len;
       }
 
-      // Taro: vector = direction * speed (raw attr value)
-      // Then applyImpulse(vector.x, vector.y) into Box2D (scaleRatio=30)
-      // Box2D: impulse = mass * deltaV. With density=3, mass ≈ 3 * area.
-      // Our Rapier world: 1 tile = 1 unit. Rapier uses SI-like units.
+      // Taro exact behavior from Unit.js _behaviour() + Box2dComponent:
+      // vector = { x: direction.x * speed, y: direction.y * speed }
+      // Then: body.applyLinearImpulse(new b2Vec2(vector.x, vector.y), body.getWorldCenter())
       //
-      // Match taro feel: set linear velocity directly each tick when input is held.
-      // Damping=5 provides deceleration when input stops.
-      // Target velocity = speed / 30 (taro scaleRatio) = 40/30 ≈ 1.33 units/sec
-      // Adjusted for our tile scale: * (30/16) ≈ 2.5 tiles/sec
-      const targetVel = physicsSpeed * (30 / 16);
-
+      // In Box2D with scaleRatio=30: positions are pixels/30, impulse is in same space.
+      // In our Rapier world: 1 tile = 1 unit. We need to scale the impulse accordingly.
+      // Box2D tile size = 16px / 30 = 0.533. Our tile size = 1.0.
+      // Scale factor = 1.0 / 0.533 = 1.875. But impulse also depends on mass.
+      //
+      // Simplest correct approach: apply impulse = direction * speed / scaleRatio each tick.
+      // This is EXACTLY what taro does. The scaleRatio converts pixels to physics units.
+      // Our scaleRatio equivalent = 30 (matching taro).
       if (len > 0) {
-        // Blend toward target velocity (not instant set — damping provides smoothing)
-        const currentVel = body.linearVelocity;
-        const targetX = inputX * targetVel;
-        const targetY = inputY * targetVel;
-        const blendRate = 0.3; // How quickly to reach target velocity
-        body.linearVelocity = new Vec2(
-          currentVel.x + (targetX - currentVel.x) * blendRate,
-          currentVel.y + (targetY - currentVel.y) * blendRate,
-        );
+        const ix = inputX * speedAttr / 30;
+        const iy = inputY * speedAttr / 30;
+        body.applyImpulse(new Vec2(ix, iy));
       }
-      // When no input, damping handles deceleration naturally
     }
   }
 
