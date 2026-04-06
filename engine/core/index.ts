@@ -28,3 +28,6 @@ export { Serializer, DeltaCompressor, InputBuffer, WorldSnapshot, InterestManage
 export { CoordinateUtils } from './CoordinateUtils';
 export { LocalGameSession } from './LocalGameSession';
 export type { LocalGameConfig } from './LocalGameSession';
+export { MessageType as TaroMessageType, encodeTransform, decodeTransform } from './protocol/Messages';
+export type { GameMessage, TransformData, EncodedTransform, EntityCreatePayload, EntityDestroyPayload, EntityTransformPayload, SnapshotPayload, JoinGamePayload, PlayerInputPayload, MouseMovedPayload, EntityStatsUpdatePayload } from './protocol/Messages';
+export { buildEntityCreatePayload, mergeStatsUpdate, MERGE_KEYS } from './protocol/EntityStream';
