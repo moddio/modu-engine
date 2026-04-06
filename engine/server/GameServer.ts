@@ -279,16 +279,9 @@ export class GameServer {
 
       const typeDef = this.types.get('unitTypes', unit.stats?.type) as any;
       const speedAttr = typeDef?.attributes?.speed?.value ?? 10;
-      const movementMethod = typeDef?.controls?.movementMethod ?? 'velocity';
-
-      // Taro speed attribute is in pixels/tick. Convert to world units.
-      // In taro: speed is applied as velocity in pixels, then scaleRatio=30 converts to physics.
-      // Our world: 1 tile = 1 unit = 16px. Speed 40 px/tick → 40/16 = 2.5 tiles/tick.
-      // At 20 ticks/sec, that's 2.5 * 20 = 50 tiles/sec. Too fast.
-      // Taro applies speed/scaleRatio = 40/30 = 1.33 physics units per tick.
-      // In our world: 1.33 * (16/30) tiles = 0.71 tiles/tick, at 20Hz = 14.2 tiles/sec.
-      // Simplified: speed / 30 gives the physics impulse magnitude.
-      const physicsSpeed = speedAttr / 30;
+      const bodyDef = typeDef?.body || {};
+      const fixtureDef = bodyDef.fixtures?.[0] || {};
+      const density = fixtureDef.density ?? 3;
 
       // Calculate input direction
       let inputX = 0, inputY = 0;
@@ -297,29 +290,33 @@ export class GameServer {
       if (unit._inputKeys.has('a') || unit._inputKeys.has('arrowleft')) inputX -= 1;
       if (unit._inputKeys.has('d') || unit._inputKeys.has('arrowright')) inputX += 1;
 
-      // Normalize
+      // Normalize diagonal
       const len = Math.sqrt(inputX * inputX + inputY * inputY);
       if (len > 0) {
         inputX /= len;
         inputY /= len;
       }
 
-      // Taro exact behavior from Unit.js _behaviour() + Box2dComponent:
-      // vector = { x: direction.x * speed, y: direction.y * speed }
-      // Then: body.applyLinearImpulse(new b2Vec2(vector.x, vector.y), body.getWorldCenter())
+      // Taro exact: applyLinearImpulse(direction * speed) into Box2D
+      // Box2D scaleRatio = 30. Body dims in Box2D = pixels/30.
+      // Body mass in Box2D = density * (w/30)^2 = 3 * (40/30)^2 = 5.33
       //
-      // In Box2D with scaleRatio=30: positions are pixels/30, impulse is in same space.
-      // In our Rapier world: 1 tile = 1 unit. We need to scale the impulse accordingly.
-      // Box2D tile size = 16px / 30 = 0.533. Our tile size = 1.0.
-      // Scale factor = 1.0 / 0.533 = 1.875. But impulse also depends on mass.
+      // Our Rapier body dims = pixels/16 (1 tile = 1 unit = 16px).
+      // Body mass in Rapier = density * (w/16)^2 = 3 * (40/16)^2 = 18.75
       //
-      // Simplest correct approach: apply impulse = direction * speed / scaleRatio each tick.
-      // This is EXACTLY what taro does. The scaleRatio converts pixels to physics units.
-      // Our scaleRatio equivalent = 30 (matching taro).
+      // Same acceleration = same impulse/mass ratio.
+      // Taro impulse = speed = 40. Taro acceleration = 40 / 5.33 = 7.5.
+      // Our impulse = acceleration * our_mass = 7.5 * 18.75 = 140.6
+      const TARO_SCALE = 30;
+      const TILE_PX = 16;
+      const bw = bodyDef.width || 40;
+      const taroMass = density * Math.pow(bw / TARO_SCALE, 2);
+      const rapierMass = density * Math.pow(bw / TILE_PX, 2);
+      const acceleration = speedAttr / taroMass;
+      const impulse = acceleration * rapierMass;
+
       if (len > 0) {
-        const ix = inputX * speedAttr / 30;
-        const iy = inputY * speedAttr / 30;
-        body.applyImpulse(new Vec2(ix, iy));
+        body.applyImpulse(new Vec2(inputX * impulse, inputY * impulse));
       }
     }
   }
