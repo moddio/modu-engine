@@ -1,4 +1,6 @@
 export { Server } from './Server';
+export { GameServer } from './GameServer';
+export { GameLoop } from './GameLoop';
 export { ServerSocket } from './network/ServerSocket';
 export { ServerNetworkHandler } from './network/ServerNetworkHandler';
 export { RateLimiter } from './network/RateLimiter';
