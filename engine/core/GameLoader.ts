@@ -1,5 +1,4 @@
 import { Engine } from './Engine';
-import { ScriptEngine } from './scripting/ScriptEngine';
 
 export interface GameData {
   version: string;
@@ -10,8 +9,9 @@ export interface GameData {
     itemTypes?: Record<string, unknown>;
     projectileTypes?: Record<string, unknown>;
     playerTypes?: Record<string, unknown>;
+    propTypes?: Record<string, unknown>;
   };
-  scripts: Record<string, { name: string; triggers?: string[]; code: string; interval?: number }>;
+  scripts: Record<string, ScriptDef>;
   variables: Record<string, { value: unknown; type: string }>;
   abilities?: Record<string, unknown>;
   attributes?: Record<string, unknown>;
@@ -22,18 +22,29 @@ export interface GameData {
   };
 }
 
+export interface ScriptDef {
+  name: string;
+  triggers: string[];
+  actions: Array<Record<string, unknown>>;
+}
+
 export class GameLoader {
   private _engine: Engine;
-  private _scripts: ScriptEngine;
   private _gameData: GameData | null = null;
+  private _variables = new Map<string, { value: unknown; type: string }>();
+  private _scripts: Record<string, ScriptDef> = {};
+  private _cameraSettings: Record<string, unknown> | null = null;
+  private _mapBackgroundColor: string | null = null;
 
   constructor(engine?: Engine) {
     this._engine = engine ?? Engine.instance();
-    this._scripts = new ScriptEngine(this._engine.events);
   }
 
   get gameData(): GameData | null { return this._gameData; }
-  get scripts(): ScriptEngine { return this._scripts; }
+  get cameraSettings(): Record<string, unknown> | null { return this._cameraSettings; }
+  get mapBackgroundColor(): string | null { return this._mapBackgroundColor; }
+  get mapData(): Record<string, unknown> | null { return (this._gameData?.map as Record<string, unknown>) ?? null; }
+  get assets(): GameData['assets'] | null { return this._gameData?.assets ?? null; }
 
   load(data: GameData): void {
     this._gameData = data;
@@ -50,24 +61,8 @@ export class GameLoader {
     this.load(data);
   }
 
-  private _loadSettings(settings: Record<string, unknown>): void {
-    if (typeof settings.frameRate === 'number') {
-      this._engine.clock.tickRate = settings.frameRate;
-    }
-  }
-
-  private _loadScripts(scripts: Record<string, { name: string; code: string; triggers?: string[]; interval?: number }>): void {
-    for (const [key, script] of Object.entries(scripts)) {
-      if (script.code) {
-        this._scripts.load(key, script.code);
-      }
-    }
-  }
-
-  private _loadVariables(variables: Record<string, { value: unknown; type: string }>): void {
-    for (const [key, variable] of Object.entries(variables)) {
-      this._engine.events.emit('variableSet', [key, variable.value]);
-    }
+  getScripts(): Record<string, ScriptDef> {
+    return this._scripts;
   }
 
   getEntityTypes(category: string): Record<string, unknown> {
@@ -75,11 +70,54 @@ export class GameLoader {
   }
 
   getVariable(name: string): unknown {
-    return this._gameData?.variables[name]?.value;
+    return this._variables.get(name)?.value;
+  }
+
+  setVariable(name: string, value: unknown): void {
+    const entry = this._variables.get(name);
+    if (entry) {
+      entry.value = value;
+    } else {
+      this._variables.set(name, { value, type: typeof value });
+    }
+    this._engine.events.emit('variableSet', [name, value]);
+  }
+
+  private _loadSettings(settings: Record<string, unknown>): void {
+    if (typeof settings.frameRate === 'number') {
+      this._engine.clock.tickRate = settings.frameRate;
+    }
+    if (settings.camera && typeof settings.camera === 'object') {
+      this._cameraSettings = settings.camera as Record<string, unknown>;
+    }
+    if (typeof settings.mapBackgroundColor === 'string') {
+      this._mapBackgroundColor = settings.mapBackgroundColor;
+    }
+  }
+
+  private _loadScripts(scripts: Record<string, ScriptDef>): void {
+    this._scripts = {};
+    for (const [key, script] of Object.entries(scripts)) {
+      this._scripts[key] = {
+        name: script.name ?? key,
+        triggers: Array.isArray(script.triggers) ? script.triggers : [],
+        actions: Array.isArray(script.actions) ? script.actions : [],
+      };
+    }
+  }
+
+  private _loadVariables(variables: Record<string, { value: unknown; type: string }>): void {
+    for (const [key, variable] of Object.entries(variables)) {
+      this._variables.set(key, { ...variable });
+      this._engine.events.emit('variableSet', [key, variable.value]);
+    }
   }
 
   reset(): void {
     this._gameData = null;
-    this._scripts.reset();
+    this._scripts = {};
+    this._variables.clear();
+    this._cameraSettings = null;
+    this._mapBackgroundColor = null;
   }
 }

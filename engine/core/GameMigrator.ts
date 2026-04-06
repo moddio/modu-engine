@@ -1,5 +1,3 @@
-import { JsonCompat } from './scripting/JsonCompat';
-
 interface OldGameData {
   data: {
     scripts?: Record<string, OldScript>;
@@ -43,7 +41,7 @@ export interface MigratedGameData {
     projectileTypes: Record<string, unknown>;
     playerTypes: Record<string, unknown>;
   };
-  scripts: Record<string, { name: string; triggers: string[]; code: string }>;
+  scripts: Record<string, { name: string; triggers: string[]; actions: Array<Record<string, unknown>> }>;
   variables: Record<string, { value: unknown; type: string }>;
   abilities: Record<string, unknown>;
   attributes: Record<string, unknown>;
@@ -90,20 +88,10 @@ export class GameMigrator {
     };
   }
 
-  private static _migrateScripts(scripts: Record<string, OldScript>): Record<string, { name: string; triggers: string[]; code: string }> {
-    const result: Record<string, { name: string; triggers: string[]; code: string }> = {};
+  private static _migrateScripts(scripts: Record<string, OldScript>): Record<string, { name: string; triggers: string[]; actions: Array<Record<string, unknown>> }> {
+    const result: Record<string, { name: string; triggers: string[]; actions: Array<Record<string, unknown>> }> = {};
 
     for (const [key, script] of Object.entries(scripts)) {
-      let code = '';
-
-      if (script.actions && Array.isArray(script.actions)) {
-        try {
-          code = JsonCompat.transpile(script.actions as any);
-        } catch {
-          code = `// Failed to transpile script: ${key}\n// Original had ${script.actions.length} actions`;
-        }
-      }
-
       const triggers: string[] = [];
       if (Array.isArray(script.triggers)) {
         triggers.push(...script.triggers.map((t: any) => typeof t === 'string' ? t : t.type ?? 'unknown'));
@@ -112,7 +100,7 @@ export class GameMigrator {
       result[key] = {
         name: script.name ?? key,
         triggers,
-        code,
+        actions: Array.isArray(script.actions) ? script.actions : [],
       };
     }
 

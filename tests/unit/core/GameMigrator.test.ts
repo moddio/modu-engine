@@ -76,10 +76,12 @@ describe('GameMigrator', () => {
     expect(result.entities.playerTypes).toHaveProperty('human');
   });
 
-  it('transpiles scripts to JS', () => {
+  it('preserves raw script actions', () => {
     const result = GameMigrator.migrate(makeOldGameData());
-    expect(result.scripts.initialize.code).toContain('world.chat');
-    expect(result.scripts.onDeath.code).toContain('self.destroy()');
+    expect(result.scripts.initialize.actions).toHaveLength(1);
+    expect(result.scripts.initialize.actions[0].type).toBe('sendChatMessage');
+    expect(result.scripts.onDeath.actions).toHaveLength(1);
+    expect(result.scripts.onDeath.actions[0].type).toBe('destroyEntity');
   });
 
   it('migrates variables with types', () => {

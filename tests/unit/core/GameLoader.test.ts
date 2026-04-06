@@ -17,13 +17,12 @@ function makeGameData(): GameData {
       initialize: {
         name: 'initialize',
         triggers: ['gameStart'],
-        code: 'on("gameStart", function() {});',
+        actions: [{ type: 'log', message: 'game started' }],
       },
       everySecond: {
         name: 'everySecond',
         triggers: ['interval'],
-        interval: 1000,
-        code: '// runs every second',
+        actions: [{ type: 'log', message: 'tick' }],
       },
     },
     variables: {
@@ -56,9 +55,11 @@ describe('GameLoader', () => {
     expect(engine.clock.tickRate).toBe(30);
   });
 
-  it('loads scripts into ScriptEngine', () => {
+  it('loads scripts as raw JSON', () => {
     loader.load(makeGameData());
-    expect(loader.scripts.scriptCount).toBe(2);
+    const scripts = loader.getScripts();
+    expect(Object.keys(scripts)).toHaveLength(2);
+    expect(scripts['initialize'].triggers).toEqual(['gameStart']);
   });
 
   it('rejects non-v2 data', () => {
@@ -80,6 +81,6 @@ describe('GameLoader', () => {
     loader.load(makeGameData());
     loader.reset();
     expect(loader.gameData).toBeNull();
-    expect(loader.scripts.scriptCount).toBe(0);
+    expect(Object.keys(loader.getScripts())).toHaveLength(0);
   });
 });
