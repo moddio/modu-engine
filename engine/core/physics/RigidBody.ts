@@ -57,6 +57,13 @@ export class RigidBody {
     if (def.density !== undefined) shape.setDensity(def.density);
     shape.setActiveEvents(RAPIER.ActiveEvents.COLLISION_EVENTS);
 
+    // Set collision groups: Rapier packs mask in upper 16 bits, category in lower 16 bits
+    if (def.category !== undefined || def.mask !== undefined) {
+      const category = (def.category ?? 0xFFFF) & 0xFFFF;
+      const mask = (def.mask ?? 0xFFFF) & 0xFFFF;
+      shape.setCollisionGroups((mask << 16) | category);
+    }
+
     return this._world.world.createCollider(shape, this.raw);
   }
 }
