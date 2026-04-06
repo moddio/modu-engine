@@ -116,8 +116,10 @@ export class CameraController {
     const onMouseMove = (e: MouseEvent) => {
       if (!this._pointerLocked) return;
       this.azimuth -= e.movementX * rotateSpeed;
+      // Mouse up (negative movementY) → decrease elevation (look down toward ground)
+      // This matches taro engine behavior where mouse controls camera orbit, not FPS look
       this.elevation = Math.max(this._pitchMin, Math.min(this._pitchMax,
-        this.elevation - e.movementY * rotateSpeed));
+        this.elevation + e.movementY * rotateSpeed));
     };
 
     const onWheel = (e: WheelEvent) => {
