@@ -17,4 +17,6 @@ export type { AbilityDef } from './Ability';
 export { AttributeManager } from './Attribute';
 export type { AttributeDef } from './Attribute';
 export { AIComponent } from './AI';
+export type { AIState, AIConfig } from './AI';
+export { CombatSystem } from './CombatSystem';
 export { EntityTypeRegistry } from './EntityTypeRegistry';
