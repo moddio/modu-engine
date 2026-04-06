@@ -9,6 +9,15 @@ export { Camera, ObjectPool, SpatialIndex, EntityManager } from './renderer/inde
 export { EntityTypeRegistry } from '../core/game/EntityTypeRegistry';
 export { InputManager, Key, MobileControls } from './input/index';
 export { AudioManager } from './audio/index';
+export {
+  UIManager, MenuUI, ScoreboardUI, ChatUI, GameTextUI,
+  ShopUI, TradeUI, DevConsole,
+} from './ui/index';
+export type {
+  UIComponent, MenuState, ServerInfo, ScoreEntry,
+  ChatMessage, GameNotification, NotificationType,
+  ShopItem, ConsoleMessage,
+} from './ui/index';
 export { GameLoader } from '../core/GameLoader';
 export type { GameData, ScriptDef } from '../core/GameLoader';
 export { GameMigrator } from '../core/GameMigrator';
