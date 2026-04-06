@@ -371,8 +371,12 @@ export class GameServer {
         moveSpeed = speed / 1.41421356237;
       }
 
-      const vectorX = dirX * moveSpeed;
-      const vectorY = dirY * moveSpeed;
+      // Impulse in physics coordinates = speed / scaleRatio
+      // Verified by simulation: gives ~1.4 tiles/sec for speed=40, damping=5
+      // which is reasonable walking speed (cross 36-tile map in ~25s)
+      const physicsImpulse = moveSpeed / GameServer.SCALE_RATIO;
+      const vectorX = dirX * physicsImpulse;
+      const vectorY = dirY * physicsImpulse;
 
       if (vectorX !== 0 || vectorY !== 0) {
         switch (movementMethod) {
