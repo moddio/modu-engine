@@ -118,6 +118,37 @@ export class ActionRunner {
         return undefined;
       }
 
+      // --- Entity attribute operations ---
+      case 'setEntityAttributeMax': {
+        const entityId = this._resolveValue(action.entity, vars) as string;
+        const attrId = action.attribute as string;
+        const value = Number(this._resolveValue(action.value, vars));
+        if (entityId && attrId) {
+          this._engine.events.emit('setEntityAttributeMax', [entityId, attrId, value]);
+        }
+        return undefined;
+      }
+
+      case 'setEntityAttributeMin': {
+        const entityId = this._resolveValue(action.entity, vars) as string;
+        const attrId = action.attribute as string;
+        const value = Number(this._resolveValue(action.value, vars));
+        if (entityId && attrId) {
+          this._engine.events.emit('setEntityAttributeMin', [entityId, attrId, value]);
+        }
+        return undefined;
+      }
+
+      case 'setEntityAttributeRegenerationRate': {
+        const entityId = this._resolveValue(action.entity, vars) as string;
+        const attrId = action.attribute as string;
+        const value = Number(this._resolveValue(action.value, vars));
+        if (entityId && attrId) {
+          this._engine.events.emit('setEntityAttributeRegenRate', [entityId, attrId, value]);
+        }
+        return undefined;
+      }
+
       // --- Entity actions (emit events for game systems to handle) ---
       case 'createUnitAtPosition':
       case 'createItemAtPositionWithQuantity':
@@ -128,9 +159,6 @@ export class ActionRunner {
       case 'showEntity':
       case 'moveEntity':
       case 'rotateEntityToRadians':
-      case 'setEntityAttributeMax':
-      case 'setEntityAttributeMin':
-      case 'playEntityAnimation':
       case 'makeUnitPickupItem':
       case 'dropItem':
       case 'giveNewItemToUnit':
@@ -140,13 +168,204 @@ export class ActionRunner {
         return undefined;
       }
 
+      // --- Animation actions ---
+      case 'playEntityAnimation': {
+        this._engine.events.emit('entity:playAnimation', [
+          this._resolveValue(action.entity, vars),
+          this._resolveValue(action.animation, vars),
+        ]);
+        return undefined;
+      }
+
+      case 'stopPlayEntityAnimation':
+      case 'stopAllEntityAnimations': {
+        this._engine.events.emit('entity:stopAnimation', [
+          this._resolveValue(action.entity, vars),
+        ]);
+        return undefined;
+      }
+
+      // --- UI actions ---
+      case 'openShopForPlayer': {
+        this._engine.events.emit('ui:openShop', [
+          this._resolveValue(action.player, vars),
+          this._resolveValue(action.shop, vars),
+        ]);
+        return undefined;
+      }
+
+      case 'closeShopForPlayer': {
+        this._engine.events.emit('ui:closeShop', [this._resolveValue(action.player, vars)]);
+        return undefined;
+      }
+
+      case 'openDialogueForPlayer': {
+        this._engine.events.emit('ui:openDialogue', [
+          this._resolveValue(action.player, vars),
+          this._resolveValue(action.dialogue, vars),
+        ]);
+        return undefined;
+      }
+
+      case 'closeDialogueForPlayer': {
+        this._engine.events.emit('ui:closeDialogue', [this._resolveValue(action.player, vars)]);
+        return undefined;
+      }
+
+      case 'showUiTextForPlayer': {
+        this._engine.events.emit('ui:showText', [
+          this._resolveValue(action.player, vars),
+          this._resolveValue(action.target, vars),
+          this._resolveValue(action.value, vars),
+        ]);
+        return undefined;
+      }
+
+      case 'createFloatingText': {
+        this._engine.events.emit('ui:floatingText', [
+          this._resolveValue(action.entity, vars),
+          this._resolveValue(action.text, vars),
+          action.color ?? '#ffffff',
+        ]);
+        return undefined;
+      }
+
+      case 'showMenu':
+      case 'showMenuAndSelectBestServer': {
+        this._engine.events.emit('ui:showMenu');
+        return undefined;
+      }
+
+      // --- Audio actions ---
+      case 'playSoundAtPosition': {
+        this._engine.events.emit('audio:playSound', [
+          this._resolveValue(action.sound, vars),
+          this._resolveValue(action.position, vars),
+        ]);
+        return undefined;
+      }
+
+      case 'playMusic': {
+        this._engine.events.emit('audio:playMusic', [this._resolveValue(action.music, vars)]);
+        return undefined;
+      }
+
+      case 'stopMusic': {
+        this._engine.events.emit('audio:stopMusic');
+        return undefined;
+      }
+
+      case 'playSoundForPlayer': {
+        this._engine.events.emit('audio:playSound', [
+          this._resolveValue(action.sound, vars),
+          null,
+        ]);
+        return undefined;
+      }
+
+      // --- Player actions ---
+      case 'setPlayerName': {
+        const playerId = this._resolveValue(action.player, vars) as string;
+        const name = this._resolveValue(action.name, vars) as string;
+        if (playerId) {
+          this._engine.events.emit('player:setName', [playerId, name]);
+        }
+        return undefined;
+      }
+
+      case 'playerCameraTrackUnit': {
+        this._engine.events.emit('camera:trackUnit', [
+          this._resolveValue(action.player, vars),
+          this._resolveValue(action.unit, vars),
+        ]);
+        return undefined;
+      }
+
+      case 'positionCamera': {
+        this._engine.events.emit('camera:setPosition', [
+          this._resolveValue(action.position, vars),
+        ]);
+        return undefined;
+      }
+
+      // --- Math/Logic ---
+      case 'calculate': {
+        // Already handled in _resolveFunction
+        return undefined;
+      }
+
       // --- Iteration ---
-      case 'forAllUnits':
-      case 'forAllItems':
-      case 'forAllProjectiles':
-      case 'forAllProps':
+      case 'forAllUnits': {
+        const entityList = this._engine.root.children.filter(e => e.category === 'unit');
+        for (const entity of entityList) {
+          const result = this.run((action.actions as any[]) ?? [], { ...vars, selectedUnit: entity.id });
+          if (result === 'break') break;
+          if (result === 'return') return 'return';
+        }
+        return undefined;
+      }
+
       case 'forAllPlayers': {
-        this._engine.events.emit('scriptAction', [type, action, vars]);
+        const playerList = this._engine.root.children.filter(e => e.category === 'player');
+        for (const entity of playerList) {
+          const result = this.run((action.actions as any[]) ?? [], { ...vars, selectedPlayer: entity.id });
+          if (result === 'break') break;
+          if (result === 'return') return 'return';
+        }
+        return undefined;
+      }
+
+      case 'forAllItems': {
+        const itemList = this._engine.root.children.filter(e => e.category === 'item');
+        for (const entity of itemList) {
+          const result = this.run((action.actions as any[]) ?? [], { ...vars, selectedItem: entity.id });
+          if (result === 'break') break;
+          if (result === 'return') return 'return';
+        }
+        return undefined;
+      }
+
+      case 'forAllProjectiles': {
+        const projList = this._engine.root.children.filter(e => e.category === 'projectile');
+        for (const entity of projList) {
+          const result = this.run((action.actions as any[]) ?? [], { ...vars, selectedProjectile: entity.id });
+          if (result === 'break') break;
+          if (result === 'return') return 'return';
+        }
+        return undefined;
+      }
+
+      case 'forAllProps': {
+        const propList = this._engine.root.children.filter(e => e.category === 'prop');
+        for (const entity of propList) {
+          const result = this.run((action.actions as any[]) ?? [], { ...vars, selectedProp: entity.id });
+          if (result === 'break') break;
+          if (result === 'return') return 'return';
+        }
+        return undefined;
+      }
+
+      // --- Timer actions ---
+      case 'setTimeOut': {
+        const duration = Number(this._resolveValue(action.duration, vars)) || 0;
+        const actions = (action.actions as any[]) ?? [];
+        const capturedVars = { ...vars };
+        setTimeout(() => {
+          this.run(actions, capturedVars);
+        }, duration);
+        return undefined;
+      }
+
+      case 'repeatWithDelay': {
+        const count = Number(this._resolveValue(action.count, vars)) || 0;
+        const delay = Number(this._resolveValue(action.delay, vars)) || 0;
+        const actions = (action.actions as any[]) ?? [];
+        const capturedVars = { ...vars };
+        for (let i = 0; i < count; i++) {
+          setTimeout(() => {
+            this.run(actions, { ...capturedVars, i });
+          }, delay * (i + 1));
+        }
         return undefined;
       }
 
@@ -214,6 +433,29 @@ export class ActionRunner {
         return vars.triggeredBy && (vars.triggeredBy as any).itemId;
       case 'getTriggeringProjectile':
         return vars.triggeredBy && (vars.triggeredBy as any).projectileId;
+      case 'selectedUnit':
+        return vars.selectedUnit;
+      case 'selectedPlayer':
+        return vars.selectedPlayer;
+      case 'selectedItem':
+        return vars.selectedItem;
+      case 'thisEntity':
+        return vars.thisEntity ?? (vars.triggeredBy && (vars.triggeredBy as any).unitId);
+      case 'getOwner':
+        // Get the owner player of an entity
+        return undefined; // Will be wired later
+      case 'stringToNumber':
+        return Number(this._resolveValue(obj.value, vars));
+      case 'numberToString':
+        return String(this._resolveValue(obj.value, vars));
+      case 'concat':
+        return String(this._resolveValue(obj.textA, vars)) + String(this._resolveValue(obj.textB, vars));
+      case 'getEntityAttribute': {
+        const entId = this._resolveValue(obj.entity, vars) as string;
+        const attrName = obj.attribute as string;
+        // Emit event to get attribute value
+        return undefined; // Will be wired to LocalGameSession
+      }
       case 'undefinedValue':
         return undefined;
       case 'calculate': {
