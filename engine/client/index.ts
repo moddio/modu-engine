@@ -13,4 +13,5 @@ export type { GameData, ScriptDef } from '../core/GameLoader';
 export { GameMigrator } from '../core/GameMigrator';
 export type { MigratedGameData } from '../core/GameMigrator';
 export { CoordinateUtils } from '../core/CoordinateUtils';
+export { VoxelTileMap } from './renderer/tilemap/index';
 export * as THREE from 'three';
