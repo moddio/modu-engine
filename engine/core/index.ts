@@ -26,3 +26,5 @@ export { GameMigrator } from './GameMigrator';
 export type { MigratedGameData } from './GameMigrator';
 export { Serializer, DeltaCompressor, InputBuffer, WorldSnapshot, InterestManagement, MessageType } from './network/index';
 export { CoordinateUtils } from './CoordinateUtils';
+export { LocalGameSession } from './LocalGameSession';
+export type { LocalGameConfig } from './LocalGameSession';
