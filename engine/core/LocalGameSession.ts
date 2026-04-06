@@ -69,6 +69,24 @@ export class LocalGameSession {
       this._handleScriptAction(type, action, vars);
     });
 
+    // Handle setEntityAttribute events from ActionRunner
+    this.engine.events.on('setEntityAttribute', (args: unknown) => {
+      const [entityId, attrId, value] = args as [string, string, number];
+      const entity = this._entities.get(entityId);
+      if (entity?.stats) {
+        const attr = entity.stats[`attr_${attrId}`];
+        if (attr) {
+          attr.value = Math.max(attr.min, Math.min(attr.max, value));
+          if (attr.value <= attr.min) {
+            this.scripts.trigger('entityAttributeBecomesZero', { entityId, attributeId: attrId });
+          }
+          if (attr.value >= attr.max) {
+            this.scripts.trigger('entityAttributeBecomesFulll', { entityId, attributeId: attrId });
+          }
+        }
+      }
+    });
+
     this.events.emit('initialized');
   }
 
@@ -87,6 +105,19 @@ export class LocalGameSession {
       const now = Date.now();
       const dt = now - lastTime;
       lastTime = now;
+
+      // Regenerate attributes
+      for (const [id, entity] of this._entities) {
+        const stats = entity.stats;
+        if (!stats) continue;
+        for (const key of Object.keys(stats)) {
+          if (!key.startsWith('attr_')) continue;
+          const attr = stats[key];
+          if (attr.regenerateSpeed && attr.value < attr.max) {
+            attr.value = Math.min(attr.max, attr.value + attr.regenerateSpeed * (dt / 1000));
+          }
+        }
+      }
 
       this.engine.step(dt);
       this.scripts.actions.run([], {}); // Process any pending actions
@@ -142,16 +173,31 @@ export class LocalGameSession {
       scale: (typeDef.scale as number) || 1,
     });
 
+    // Load attributes from type definition
+    const attrDefs = typeDef.attributes as Record<string, any> | undefined;
+    if (attrDefs) {
+      for (const [attrId, attrDef] of Object.entries(attrDefs)) {
+        (unit.stats as any)[`attr_${attrId}`] = {
+          value: attrDef.value ?? 0,
+          min: attrDef.min ?? 0,
+          max: attrDef.max ?? 100,
+          regenerateSpeed: attrDef.regenerateSpeed ?? 0,
+          name: attrDef.name ?? attrId,
+          color: attrDef.color ?? '#ffffff',
+        };
+      }
+    }
+
     unit.mount(this.engine.root);
     this._entities.set(unit.id, unit);
 
-    // Notify renderer
+    // Notify renderer — include the FULL type definition so renderer has cellSheet, animations, etc.
     this._config.onEntityCreate?.({
       id: unit.id,
       category: 'unit',
       x: unit.position.x,
       y: unit.position.z,
-      stats: unit.stats as unknown as Record<string, unknown>,
+      stats: { ...unit.stats, ...typeDef } as unknown as Record<string, unknown>,
     });
 
     // If owned by player, track it
