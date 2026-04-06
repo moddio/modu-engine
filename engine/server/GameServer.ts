@@ -158,28 +158,47 @@ export class GameServer {
     return this._entities.get(id);
   }
 
+  // Taro Rapier uses _scaleRatio=30 for ALL physics coordinates.
+  // Positions, velocities, impulses, collider sizes — all in pixels/30.
+  // Our world: 1 tile = 1 unit = 16 pixels.
+  // To convert: tile position → physics position = tile * 16 / 30
+  // To convert back: physics position → tile = physics * 30 / 16
+  private static readonly SCALE_RATIO = 30;
+  private static readonly TILE_PX = 16;
+
+  private _tileToPhysics(tile: number): number {
+    return tile * GameServer.TILE_PX / GameServer.SCALE_RATIO;
+  }
+
+  private _physicsToTile(phys: number): number {
+    return phys * GameServer.SCALE_RATIO / GameServer.TILE_PX;
+  }
+
   /** Create static wall bodies from the tilemap wall layer */
   private _createWallBodies(): void {
     if (!this._physics || !this._rawGameData?.map) return;
     const map = this._rawGameData.map;
     const layers = map.layers || [];
+    const tileHW = (map.tilewidth || 16) / 2 / GameServer.SCALE_RATIO; // half-extent in physics
 
     for (const layer of layers) {
       if (layer.name !== 'walls' || !layer.data) continue;
       for (let y = 0; y < map.height; y++) {
         for (let x = 0; x < map.width; x++) {
           if (layer.data[y * map.width + x] === 0) continue;
-          // Each tile = 1 world unit, centered at (x+0.5, y+0.5)
+          // Tile center in pixels, then / scaleRatio for physics coords
+          const px = (x + 0.5) * (map.tilewidth || 16) / GameServer.SCALE_RATIO;
+          const py = (y + 0.5) * (map.tileheight || 16) / GameServer.SCALE_RATIO;
           const body = this._physics!.createBody({
             type: 'static',
-            position: new Vec2(x + 0.5, y + 0.5),
+            position: new Vec2(px, py),
           });
           body.addCollider({
             shape: 'box',
-            width: 0.5,  // half-extent (1 tile = 1 unit)
-            height: 0.5,
-            friction: 0.01,     // Low friction so units slide along walls
-            restitution: 0.01,  // Slight bounce to prevent sticking
+            width: tileHW,
+            height: tileHW,
+            friction: 0,
+            restitution: 0,
             category: CollisionCategory.WALL,
             mask: DefaultCollisionMask[CollisionCategory.WALL],
           });
@@ -188,48 +207,39 @@ export class GameServer {
     }
   }
 
-  /** Create a physics body for a dynamic entity */
+  /** Create a physics body for a dynamic entity — EXACTLY matching taro Rapier2dComponent.createBody() */
   private _createEntityBody(entityId: string, x: number, z: number, typeDef: Record<string, any>): void {
     if (!this._physics) return;
     const bodyDef = typeDef.body || typeDef.bodies?.default;
     if (!bodyDef || bodyDef.type === 'none' || bodyDef.type === 'spriteOnly') return;
 
+    // Position in physics coords = tile * 16 / 30
     const body = this._physics.createBody({
       type: (bodyDef.type === 'static' ? 'static' : bodyDef.type === 'kinematic' ? 'kinematic' : 'dynamic') as any,
-      position: new Vec2(x, z),
+      position: new Vec2(this._tileToPhysics(x), this._tileToPhysics(z)),
     });
 
-    // Set damping
-    if (bodyDef.linearDamping) {
-      body.raw.setLinearDamping(bodyDef.linearDamping);
-    }
+    // Damping — exactly as taro sets it
+    body.raw.setLinearDamping(bodyDef.linearDamping ?? 0);
+    body.raw.setAngularDamping(bodyDef.angularDamping ?? 0);
 
-    // Taro uses scaleRatio=30 to convert pixel dimensions to physics units.
-    // Our world: 1 tile = 1 unit. Taro: 1 tile = 16px. Physics: 16px / 30 = 0.533 units per tile.
-    // To match: body pixels / 30 gives physics size, then / (16/30) = * 30/16 gives world units.
-    // Simplified: bodyPixels / 16 = world units for the body dimension.
-    // Half-extent = bodyPixels / 16 / 2
-    const TILE_PX = 16;
-    const hw = ((bodyDef.width || 40) / TILE_PX) / 2;
-    const hh = ((bodyDef.height || 40) / TILE_PX) / 2;
-
-    // Use fixture settings from game data
+    // Collider — exactly as taro: halfWidth / scaleRatio
+    // Taro: entity._bounds2d.x / 2 / this._scaleRatio
+    // entity._bounds2d.x = body.width (pixels)
     const fixture = bodyDef.fixtures?.[0] || {};
+    const hw = (fixture.shape?.data?.halfWidth ?? (bodyDef.width || 40) / 2) / GameServer.SCALE_RATIO;
+    const hh = (fixture.shape?.data?.halfHeight ?? (bodyDef.height || 40) / 2) / GameServer.SCALE_RATIO;
+
     body.addCollider({
       shape: 'box',
       width: hw,
       height: hh,
-      density: fixture.density ?? 3,
-      friction: fixture.friction ?? 0.01,
-      restitution: fixture.restitution ?? 0.01,
+      density: fixture.density ?? 0,
+      friction: fixture.friction ?? 0,
+      restitution: fixture.restitution ?? 0,
       category: CollisionCategory.UNIT,
       mask: DefaultCollisionMask[CollisionCategory.UNIT],
     });
-
-    // Fixed rotation prevents spinning on wall contact
-    if (bodyDef.fixedRotation !== false) {
-      body.raw.setEnabledRotations(false, true);
-    }
 
     this._entityBodies.set(entityId, body);
   }
@@ -277,58 +287,66 @@ export class GameServer {
       const body = this._entityBodies.get(playerData.unitId);
       if (!body) continue;
 
+      // EXACTLY matching taro Rapier2dComponent + Unit._behaviour():
+      //
+      // 1. Unit._behaviour() computes:
+      //    direction = { x: -1/0/1, y: -1/0/1 } from WASD
+      //    if diagonal: speed /= 1.414
+      //    vector = { x: direction.x * speed, y: direction.y * speed }
+      //
+      // 2. Rapier2dComponent.update() applies:
+      //    body.applyImpulse({ x: vector.x, y: vector.y }, true)
+      //
+      // 3. Body was created with: position = pixels / 30, halfExtents = pixels / 30
+      //    linearDamping set from body def
+      //
+      // Since our bodies use the SAME scaleRatio=30 coordinate system,
+      // we apply the SAME impulse values. No conversion needed.
       const typeDef = this.types.get('unitTypes', unit.stats?.type) as any;
-      const speedAttr = typeDef?.attributes?.speed?.value ?? 10;
-      const bodyDef = typeDef?.body || {};
-      const fixtureDef = bodyDef.fixtures?.[0] || {};
-      const density = fixtureDef.density ?? 3;
+      const speed = typeDef?.attributes?.speed?.value ?? 10;
+      const movementMethod = typeDef?.controls?.movementMethod ?? 'velocity';
 
-      // Calculate input direction
-      let inputX = 0, inputY = 0;
-      if (unit._inputKeys.has('w') || unit._inputKeys.has('arrowup')) inputY -= 1;
-      if (unit._inputKeys.has('s') || unit._inputKeys.has('arrowdown')) inputY += 1;
-      if (unit._inputKeys.has('a') || unit._inputKeys.has('arrowleft')) inputX -= 1;
-      if (unit._inputKeys.has('d') || unit._inputKeys.has('arrowright')) inputX += 1;
+      let dirX = 0, dirY = 0;
+      if (unit._inputKeys.has('w') || unit._inputKeys.has('arrowup')) dirY -= 1;
+      if (unit._inputKeys.has('s') || unit._inputKeys.has('arrowdown')) dirY += 1;
+      if (unit._inputKeys.has('a') || unit._inputKeys.has('arrowleft')) dirX -= 1;
+      if (unit._inputKeys.has('d') || unit._inputKeys.has('arrowright')) dirX += 1;
 
-      // Normalize diagonal
-      const len = Math.sqrt(inputX * inputX + inputY * inputY);
-      if (len > 0) {
-        inputX /= len;
-        inputY /= len;
+      // Diagonal speed reduction (taro Unit.js line 2418)
+      let moveSpeed = speed;
+      if (dirX !== 0 && dirY !== 0) {
+        moveSpeed = speed / 1.41421356237;
       }
 
-      // Taro exact: applyLinearImpulse(direction * speed) into Box2D
-      // Box2D scaleRatio = 30. Body dims in Box2D = pixels/30.
-      // Body mass in Box2D = density * (w/30)^2 = 3 * (40/30)^2 = 5.33
-      //
-      // Our Rapier body dims = pixels/16 (1 tile = 1 unit = 16px).
-      // Body mass in Rapier = density * (w/16)^2 = 3 * (40/16)^2 = 18.75
-      //
-      // Same acceleration = same impulse/mass ratio.
-      // Taro impulse = speed = 40. Taro acceleration = 40 / 5.33 = 7.5.
-      // Our impulse = acceleration * our_mass = 7.5 * 18.75 = 140.6
-      const TARO_SCALE = 30;
-      const TILE_PX = 16;
-      const bw = bodyDef.width || 40;
-      const taroMass = density * Math.pow(bw / TARO_SCALE, 2);
-      const rapierMass = density * Math.pow(bw / TILE_PX, 2);
-      const acceleration = speedAttr / taroMass;
-      const impulse = acceleration * rapierMass;
+      const vectorX = dirX * moveSpeed;
+      const vectorY = dirY * moveSpeed;
 
-      if (len > 0) {
-        body.applyImpulse(new Vec2(inputX * impulse, inputY * impulse));
+      if (vectorX !== 0 || vectorY !== 0) {
+        switch (movementMethod) {
+          case 'impulse':
+            // taro: body.applyImpulse({ x: vectorX, y: vectorY }, true)
+            body.applyImpulse(new Vec2(vectorX, vectorY));
+            break;
+          case 'force':
+            body.applyForce(new Vec2(vectorX, vectorY));
+            break;
+          case 'velocity':
+          default:
+            body.linearVelocity = new Vec2(vectorX, vectorY);
+            break;
+        }
       }
     }
   }
 
-  /** Sync physics body positions back to entity positions */
+  /** Sync physics body positions back to entity positions (physics → tile coords) */
   private _syncPhysicsToEntities(): void {
     for (const [entityId, body] of this._entityBodies) {
       const entity = this._entities.get(entityId);
       if (!entity) continue;
       const pos = body.position;
-      entity.position.x = pos.x;
-      entity.position.z = pos.y; // Physics Y → Three.js Z
+      entity.position.x = this._physicsToTile(pos.x);
+      entity.position.z = this._physicsToTile(pos.y); // Physics Y → Three.js Z
       entity.rotation = body.angle;
     }
   }
@@ -427,10 +445,10 @@ export class GameServer {
         unit.position.x = mapW / 2;
         unit.position.z = mapH / 2;
 
-        // Update physics body position to match
+        // Update physics body position to match (tile coords → physics coords)
         const body = this._entityBodies.get(unitId);
         if (body) {
-          body.position = new Vec2(mapW / 2, mapH / 2);
+          body.position = new Vec2(this._tileToPhysics(mapW / 2), this._tileToPhysics(mapH / 2));
         }
       }
     }
