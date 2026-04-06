@@ -185,11 +185,98 @@ export class ActionRunner {
       case 'moveEntity':
       case 'rotateEntityToRadians':
       case 'makeUnitPickupItem':
-      case 'dropItem':
-      case 'giveNewItemToUnit':
-      case 'startUsingItem':
-      case 'stopUsingItem': {
+      case 'dropItem': {
         this._engine.events.emit('scriptAction', [type, action, vars]);
+        return undefined;
+      }
+
+      // --- Inventory actions ---
+      case 'giveNewItemToUnit':
+      case 'giveNewItemWithQuantityToUnit': {
+        this._engine.events.emit('inventory:giveItem', [
+          this._resolveValue(action.unit, vars),
+          this._resolveValue(action.itemType, vars),
+          Number(this._resolveValue(action.quantity, vars)) || 1,
+        ]);
+        return undefined;
+      }
+
+      case 'dropItemAtPosition': {
+        this._engine.events.emit('inventory:dropAt', [
+          this._resolveValue(action.item, vars),
+          this._resolveValue(action.position, vars),
+        ]);
+        return undefined;
+      }
+
+      case 'dropItemInInventorySlot': {
+        this._engine.events.emit('inventory:dropSlot', [
+          this._resolveValue(action.unit, vars),
+          Number(this._resolveValue(action.slotIndex, vars)),
+        ]);
+        return undefined;
+      }
+
+      case 'dropAllItems': {
+        this._engine.events.emit('inventory:dropAll', [this._resolveValue(action.unit, vars)]);
+        return undefined;
+      }
+
+      case 'makeUnitSelectItemAtSlot': {
+        this._engine.events.emit('inventory:selectSlot', [
+          this._resolveValue(action.unit, vars),
+          Number(this._resolveValue(action.slotIndex, vars)),
+        ]);
+        return undefined;
+      }
+
+      case 'startUsingItem':
+      case 'useItemOnce': {
+        this._engine.events.emit('item:use', [
+          this._resolveValue(action.entity, vars),
+        ]);
+        return undefined;
+      }
+
+      case 'stopUsingItem': {
+        this._engine.events.emit('item:stopUse', [this._resolveValue(action.entity, vars)]);
+        return undefined;
+      }
+
+      case 'setItemAmmo': {
+        this._engine.events.emit('item:setAmmo', [
+          this._resolveValue(action.entity, vars),
+          Number(this._resolveValue(action.ammo, vars)),
+        ]);
+        return undefined;
+      }
+
+      case 'updateItemQuantity': {
+        this._engine.events.emit('item:setQuantity', [
+          this._resolveValue(action.entity, vars),
+          Number(this._resolveValue(action.quantity, vars)),
+        ]);
+        return undefined;
+      }
+
+      case 'changeItemInventoryImage': {
+        this._engine.events.emit('item:changeImage', [
+          this._resolveValue(action.entity, vars),
+          this._resolveValue(action.image, vars),
+        ]);
+        return undefined;
+      }
+
+      // --- Visibility targeting ---
+      case 'makeUnitInvisibleToFriendlyPlayers':
+      case 'makeUnitVisibleToFriendlyPlayers':
+      case 'makeUnitInvisibleToNeutralPlayers':
+      case 'makeUnitVisibleToNeutralPlayers':
+      case 'hideUnitFromPlayer':
+      case 'showUnitToPlayer':
+      case 'hideUnitUI':
+      case 'showUnitUI': {
+        this._engine.events.emit('entity:visibility', [type, this._resolveValue(action.entity, vars), this._resolveValue(action.player, vars)]);
         return undefined;
       }
 
@@ -242,6 +329,65 @@ export class ActionRunner {
           this._resolveValue(action.player, vars),
           this._resolveValue(action.target, vars),
           this._resolveValue(action.value, vars),
+        ]);
+        return undefined;
+      }
+
+      case 'hideUiTextForPlayer': {
+        this._engine.events.emit('ui:hideText', [
+          this._resolveValue(action.player, vars),
+          this._resolveValue(action.target, vars),
+        ]);
+        return undefined;
+      }
+
+      case 'updateUiTextForPlayer': {
+        this._engine.events.emit('ui:updateText', [
+          this._resolveValue(action.player, vars),
+          this._resolveValue(action.target, vars),
+          this._resolveValue(action.value, vars),
+        ]);
+        return undefined;
+      }
+
+      case 'showUiElementForPlayer':
+      case 'hideUiElementForPlayer':
+      case 'removeElement': {
+        this._engine.events.emit('ui:element', [type, this._resolveValue(action.target, vars), this._resolveValue(action.player, vars)]);
+        return undefined;
+      }
+
+      case 'setUIElementProperty': {
+        this._engine.events.emit('ui:setProperty', [
+          this._resolveValue(action.target, vars),
+          this._resolveValue(action.property, vars),
+          this._resolveValue(action.value, vars),
+        ]);
+        return undefined;
+      }
+
+      case 'setUIElementHtml': {
+        this._engine.events.emit('ui:setHtml', [
+          this._resolveValue(action.target, vars),
+          this._resolveValue(action.value, vars),
+        ]);
+        return undefined;
+      }
+
+      case 'showInputModalToPlayer': {
+        this._engine.events.emit('ui:inputModal', [
+          this._resolveValue(action.player, vars),
+          this._resolveValue(action.title, vars),
+          this._resolveValue(action.fieldLabel, vars),
+        ]);
+        return undefined;
+      }
+
+      case 'showCustomModalToPlayer': {
+        this._engine.events.emit('ui:customModal', [
+          this._resolveValue(action.player, vars),
+          this._resolveValue(action.title, vars),
+          this._resolveValue(action.htmlContent, vars),
         ]);
         return undefined;
       }
@@ -613,6 +759,105 @@ export class ActionRunner {
         return undefined;
       }
 
+      // --- Movement actions ---
+      case 'setUnitTargetPosition': {
+        this._engine.events.emit('entity:moveTo', [
+          this._resolveValue(action.entity, vars),
+          this._resolveValue(action.position, vars),
+        ]);
+        return undefined;
+      }
+
+      case 'setUnitTargetUnit': {
+        this._engine.events.emit('entity:moveToUnit', [
+          this._resolveValue(action.entity, vars),
+          this._resolveValue(action.unit, vars),
+        ]);
+        return undefined;
+      }
+
+      case 'rotateEntityToFacePosition': {
+        this._engine.events.emit('entity:facePosition', [
+          this._resolveValue(action.entity, vars),
+          this._resolveValue(action.position, vars),
+        ]);
+        return undefined;
+      }
+
+      case 'makeUnitToAlwaysFaceMouseCursor': {
+        this._engine.events.emit('entity:faceMouse', [this._resolveValue(action.entity, vars), true]);
+        return undefined;
+      }
+
+      case 'makeUnitToAlwaysFacePosition': {
+        this._engine.events.emit('entity:facePosition', [
+          this._resolveValue(action.entity, vars),
+          this._resolveValue(action.position, vars),
+        ]);
+        return undefined;
+      }
+
+      // --- Region actions ---
+      case 'transformRegionDimensions': {
+        this._engine.events.emit('region:transform', [
+          this._resolveValue(action.region, vars),
+          this._resolveValue(action.x, vars),
+          this._resolveValue(action.y, vars),
+          this._resolveValue(action.width, vars),
+          this._resolveValue(action.height, vars),
+        ]);
+        return undefined;
+      }
+
+      case 'changeRegionColor': {
+        this._engine.events.emit('region:setColor', [
+          this._resolveValue(action.region, vars),
+          this._resolveValue(action.color, vars),
+        ]);
+        return undefined;
+      }
+
+      // --- Ability actions ---
+      case 'castAbility':
+      case 'startCastingAbility': {
+        this._engine.events.emit('ability:cast', [
+          this._resolveValue(action.entity, vars),
+          this._resolveValue(action.ability, vars),
+        ]);
+        return undefined;
+      }
+
+      case 'stopCastingAbility': {
+        this._engine.events.emit('ability:stop', [this._resolveValue(action.entity, vars)]);
+        return undefined;
+      }
+
+      case 'setLastAttackingUnit': {
+        this._engine.events.emit('combat:setLastAttacker', [
+          this._resolveValue(action.unit, vars),
+          this._resolveValue(action.attacker, vars),
+        ]);
+        return undefined;
+      }
+
+      case 'setLastAttackedUnit': {
+        this._engine.events.emit('combat:setLastAttacked', [
+          this._resolveValue(action.unit, vars),
+          this._resolveValue(action.target, vars),
+        ]);
+        return undefined;
+      }
+
+      // --- Layer and map actions ---
+      case 'setLayerOpacity':
+      case 'changeLayerOpacity': {
+        this._engine.events.emit('map:layerOpacity', [
+          this._resolveValue(action.layer, vars),
+          Number(this._resolveValue(action.opacity, vars)),
+        ]);
+        return undefined;
+      }
+
       case 'editMapTile':
       case 'editMapTiles': {
         this._engine.events.emit('map:editTile', [action]);
@@ -624,6 +869,150 @@ export class ActionRunner {
         return undefined;
       }
 
+      // --- Entity outline ---
+      case 'toggleOutlineOnEntity': {
+        this._engine.events.emit('entity:outline', [
+          this._resolveValue(action.entity, vars),
+          this._resolveValue(action.enabled, vars),
+          this._resolveValue(action.color, vars),
+        ]);
+        return undefined;
+      }
+
+      // --- Data persistence ---
+      case 'savePlayerData':
+      case 'loadPlayerData': {
+        this._engine.events.emit('data:player', [type, this._resolveValue(action.player, vars)]);
+        return undefined;
+      }
+
+      case 'saveUnitData':
+      case 'loadUnitData': {
+        this._engine.events.emit('data:unit', [type, this._resolveValue(action.unit, vars)]);
+        return undefined;
+      }
+
+      case 'saveCurrentMapState': {
+        this._engine.events.emit('data:saveMap');
+        return undefined;
+      }
+
+      // --- Chat actions ---
+      case 'addChatFilter': {
+        this._engine.events.emit('chat:addFilter', [this._resolveValue(action.word, vars)]);
+        return undefined;
+      }
+
+      case 'banPlayerFromChat': {
+        this._engine.events.emit('chat:ban', [this._resolveValue(action.player, vars)]);
+        return undefined;
+      }
+
+      case 'unbanPlayerFromChat': {
+        this._engine.events.emit('chat:unban', [this._resolveValue(action.player, vars)]);
+        return undefined;
+      }
+
+      // --- Server control ---
+      case 'startAcceptingPlayers': {
+        this._engine.events.emit('server:acceptPlayers', [true]);
+        return undefined;
+      }
+
+      case 'stopAcceptingPlayers': {
+        this._engine.events.emit('server:acceptPlayers', [false]);
+        return undefined;
+      }
+
+      // --- Floating text / fading text ---
+      case 'setFadingTextOfUnit': {
+        this._engine.events.emit('ui:fadingText', [
+          this._resolveValue(action.unit, vars),
+          this._resolveValue(action.text, vars),
+          this._resolveValue(action.color, vars),
+        ]);
+        return undefined;
+      }
+
+      case 'createDynamicFloatingText': {
+        this._engine.events.emit('ui:dynamicFloatingText', [
+          this._resolveValue(action.text, vars),
+          this._resolveValue(action.position, vars),
+          this._resolveValue(action.color, vars),
+        ]);
+        return undefined;
+      }
+
+      // --- Backpack / skin shop ---
+      case 'openBackpackForPlayer': {
+        this._engine.events.emit('ui:openBackpack', [this._resolveValue(action.player, vars)]);
+        return undefined;
+      }
+
+      case 'closeBackpackForPlayer': {
+        this._engine.events.emit('ui:closeBackpack', [this._resolveValue(action.player, vars)]);
+        return undefined;
+      }
+
+      case 'openSkinShop': {
+        this._engine.events.emit('ui:openSkinShop');
+        return undefined;
+      }
+
+      // --- Ads ---
+      case 'playAdForPlayer':
+      case 'playAdForEveryone': {
+        this._engine.events.emit('ad:play', [this._resolveValue(action.player, vars)]);
+        return undefined;
+      }
+
+      // --- Web3 ---
+      case 'openWalletConnect': {
+        this._engine.events.emit('web3:walletConnect');
+        return undefined;
+      }
+
+      // --- Entity reset / creation ---
+      case 'resetEntity': {
+        this._engine.events.emit('entity:reset', [this._resolveValue(action.entity, vars)]);
+        return undefined;
+      }
+
+      case 'createEntityAtPositionWithDimensions':
+      case 'createEntityAtPositionWithDimensions2d': {
+        this._engine.events.emit('entity:createAtPosition', [action]);
+        return undefined;
+      }
+
+      // --- Script execution ---
+      case 'runScript': {
+        const scriptId = this._resolveValue(action.scriptName, vars) as string;
+        if (scriptId) {
+          this._engine.events.emit('script:run', [scriptId, { ...vars }]);
+        }
+        return undefined;
+      }
+
+      case 'runEntityScript': {
+        this._engine.events.emit('script:runOnEntity', [
+          this._resolveValue(action.entity, vars),
+          this._resolveValue(action.scriptName, vars),
+          { ...vars },
+        ]);
+        return undefined;
+      }
+
+      case 'runScriptOnClient':
+      case 'runEntityScriptOnClient': {
+        // In single player, same as running on server
+        this._engine.events.emit('script:run', [
+          this._resolveValue(action.scriptName, vars),
+          { ...vars },
+        ]);
+        return undefined;
+      }
+
+      // --- Network actions ---
       case 'sendPostRequest':
       case 'requestPost': {
         this._engine.events.emit('network:postRequest', [
@@ -859,6 +1248,72 @@ export class ActionRunner {
 
       case 'getMapHeight':
         return this._engine.root.children.length; // placeholder
+
+      // --- Player/unit relationship ---
+      case 'getSelectedUnit': {
+        const pid = this._resolveValue(obj.player, vars) as string;
+        const player = this._engine.findById(pid);
+        return (player as any)?.stats?.selectedUnitId;
+      }
+
+      case 'getUnitsOwnedByPlayer': {
+        const pid = this._resolveValue(obj.player, vars) as string;
+        const player = this._engine.findById(pid);
+        return (player as any)?.stats?.unitIds ?? [];
+      }
+
+      case 'getPlayerFromUnit': {
+        const uid = this._resolveValue(obj.unit, vars) as string;
+        const unit = this._engine.findById(uid);
+        return (unit as any)?.stats?.ownerId;
+      }
+
+      case 'getQuantityOfUnitDroppedItem': {
+        return 1; // placeholder
+      }
+
+      case 'getQuantityOfItemType': {
+        return 1; // placeholder
+      }
+
+      // --- Entity state/dimensions ---
+      case 'getEntityState': {
+        const eid = this._resolveValue(obj.entity, vars) as string;
+        const ent = this._engine.findById(eid);
+        return (ent as any)?.stats?.stateId ?? 'default';
+      }
+
+      case 'getEntityWidth':
+      case 'getEntityHeight': {
+        const eid = this._resolveValue(obj.entity, vars) as string;
+        const ent = this._engine.findById(eid);
+        return (ent as any)?.stats?.width ?? 32;
+      }
+
+      case 'getEntityRotation': {
+        const eid = this._resolveValue(obj.entity, vars) as string;
+        const ent = this._engine.findById(eid);
+        return (ent as any)?.rotation ?? 0;
+      }
+
+      // --- Math helpers ---
+      case 'min':
+        return Math.min(Number(this._resolveValue(obj.a, vars)), Number(this._resolveValue(obj.b, vars)));
+
+      case 'max':
+        return Math.max(Number(this._resolveValue(obj.a, vars)), Number(this._resolveValue(obj.b, vars)));
+
+      // --- Array/string helpers ---
+      case 'length': {
+        const arr = this._resolveValue(obj.value, vars);
+        return Array.isArray(arr) ? arr.length : typeof arr === 'string' ? arr.length : 0;
+      }
+
+      case 'indexOf': {
+        const arr = this._resolveValue(obj.array, vars) as any[];
+        const val = this._resolveValue(obj.value, vars);
+        return Array.isArray(arr) ? arr.indexOf(val) : -1;
+      }
 
       case 'true':
         return true;
