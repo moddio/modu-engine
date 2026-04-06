@@ -20,3 +20,4 @@ export type { GameData } from './GameLoader';
 export { GameMigrator } from './GameMigrator';
 export type { MigratedGameData } from './GameMigrator';
 export { Serializer, DeltaCompressor, InputBuffer, WorldSnapshot, InterestManagement, MessageType } from './network/index';
+export { CoordinateUtils } from './CoordinateUtils';
