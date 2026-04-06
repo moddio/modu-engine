@@ -9,6 +9,9 @@ export { Camera, ObjectPool, SpatialIndex, EntityManager } from './renderer/inde
 export { EntityTypeRegistry } from '../core/game/EntityTypeRegistry';
 export { InputManager, Key, MobileControls } from './input/index';
 export { AudioManager } from './audio/index';
+export type { SoundDef } from './audio/index';
+export { PostProcessing, ParticleEmitter } from './renderer/index';
+export type { PostProcessingConfig, ParticleConfig } from './renderer/index';
 export {
   UIManager, MenuUI, ScoreboardUI, ChatUI, GameTextUI,
   ShopUI, TradeUI, DevConsole,
