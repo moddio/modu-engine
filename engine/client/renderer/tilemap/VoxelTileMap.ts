@@ -3,9 +3,9 @@ import { TilesetLookup, TilesetDef } from './TilesetLoader';
 import { buildChunkGeometry } from './TileChunk';
 
 const CHUNK_SIZE = 16;
-const SCALE_RATIO = 64;
 
-function pixelToWorld(px: number): number { return px / SCALE_RATIO; }
+// In the taro 3D engine, each tile = 1 world unit (not tilewidth/64)
+// This matches how props and entities are positioned (1 unit = 1 tile)
 
 export interface TiledMap {
   width: number;
@@ -46,9 +46,10 @@ export class VoxelTileMap {
   private _tilesetTextures = new Map<string, THREE.Texture>();
 
   async load(map: TiledMap): Promise<void> {
-    const { width: mapW, height: mapH, tilewidth: tw, tileheight: th } = map;
-    const worldTileW = pixelToWorld(tw);
-    const worldTileH = pixelToWorld(th);
+    const { width: mapW, height: mapH } = map;
+    // Each tile = 1 world unit (matching taro Voxels.ts where tile at x,z occupies x+0.5, z+0.5)
+    const worldTileW = 1;
+    const worldTileH = 1;
 
     // Load tileset textures
     const loader = new THREE.TextureLoader();
@@ -95,6 +96,7 @@ export class VoxelTileMap {
     if (!primaryTexture) return;
 
     // Render each tile layer
+    let tileLayerIndex = 0;
     for (let li = 0; li < map.layers.length; li++) {
       const layer = map.layers[li];
       if (layer.type !== 'tilelayer' || !layer.data) continue;
@@ -137,7 +139,11 @@ export class VoxelTileMap {
           const mesh = new THREE.Mesh(bufGeo, material);
           const offsetX = cx * CHUNK_SIZE * worldTileW;
           const offsetZ = cy * CHUNK_SIZE * worldTileH;
-          mesh.position.set(offsetX, li * 0.01, offsetZ);
+          // Taro Voxels.ts: y = yOffset(-0.501) + layerIndex
+          // First layer at -0.501, second at 0.499, etc.
+          const layerY = -0.501 + tileLayerIndex;
+          mesh.position.set(offsetX, layerY, offsetZ);
+          tileLayerIndex++;
           mesh.name = `chunk_${layer.name}_${cx}_${cy}`;
 
           this.group.add(mesh);
@@ -148,9 +154,10 @@ export class VoxelTileMap {
   }
 
   getWorldSize(map: TiledMap): { width: number; height: number } {
+    // 1 tile = 1 world unit
     return {
-      width: pixelToWorld(map.width * map.tilewidth),
-      height: pixelToWorld(map.height * map.tileheight),
+      width: map.width,
+      height: map.height,
     };
   }
 
