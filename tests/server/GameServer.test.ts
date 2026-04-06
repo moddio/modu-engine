@@ -45,21 +45,21 @@ describe('GameServer', () => {
     Engine.reset();
   });
 
-  it('initializes from game data', () => {
-    server.init(TEST_GAME_DATA as any);
+  it('initializes from game data', async () => {
+    await server.init(TEST_GAME_DATA as any);
     expect(server.isRunning).toBe(false);
     expect(server.entityCount).toBe(0);
   });
 
-  it('starts the tick loop and fires gameStart', () => {
-    server.init(TEST_GAME_DATA as any);
+  it('starts the tick loop and fires gameStart', async () => {
+    await server.init(TEST_GAME_DATA as any);
     server.start();
     expect(server.isRunning).toBe(true);
     expect(server.scripts.variables.getGlobal('gameRunning')).toBe(true);
   });
 
   it('creates a player on joinGame', async () => {
-    server.init(TEST_GAME_DATA as any);
+    await server.init(TEST_GAME_DATA as any);
     server.start();
 
     transport.client.onMessage(() => {});
@@ -70,7 +70,7 @@ describe('GameServer', () => {
   });
 
   it('streams entity create to client on join', async () => {
-    server.init(TEST_GAME_DATA as any);
+    await server.init(TEST_GAME_DATA as any);
     server.start();
 
     const messages: any[] = [];
@@ -84,7 +84,7 @@ describe('GameServer', () => {
   });
 
   it('responds to ping with pong', async () => {
-    server.init(TEST_GAME_DATA as any);
+    await server.init(TEST_GAME_DATA as any);
     server.start();
 
     const messages: any[] = [];
@@ -97,8 +97,8 @@ describe('GameServer', () => {
     expect(pongs.length).toBe(1);
   });
 
-  it('stops cleanly', () => {
-    server.init(TEST_GAME_DATA as any);
+  it('stops cleanly', async () => {
+    await server.init(TEST_GAME_DATA as any);
     server.start();
     server.stop();
     expect(server.isRunning).toBe(false);
