@@ -72,8 +72,8 @@ describe('ScoreboardUI', () => {
   it('sorts entries by score descending', () => {
     const sb = new ScoreboardUI();
     sb.update([
-      { playerId: 'p1', name: 'Alice', score: 50 },
-      { playerId: 'p2', name: 'Bob', score: 100 },
+      { playerId: 'p1', name: 'Alice', score: 50, isCurrentPlayer: false },
+      { playerId: 'p2', name: 'Bob', score: 100, isCurrentPlayer: true },
     ]);
     expect(sb.entries[0].name).toBe('Bob');
     expect(sb.entries[1].name).toBe('Alice');
