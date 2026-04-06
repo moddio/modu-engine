@@ -252,9 +252,10 @@ export class GameServer {
     // Process input → apply forces to physics bodies
     this._processMovement(dt);
 
-    // Step physics
+    // Step physics with FIXED timestep (prevents jitter from variable dt)
     if (this._physics) {
-      this._physics.step(dt);
+      const fixedDt = 1000 / this._loop.tickRate; // e.g., 50ms for 20Hz
+      this._physics.step(fixedDt);
     }
 
     // Sync physics positions back to entities
@@ -306,15 +307,52 @@ export class GameServer {
       const speed = typeDef?.attributes?.speed?.value ?? 10;
       const movementMethod = typeDef?.controls?.movementMethod ?? 'velocity';
 
+      // Raw WASD input (taro ControlComponent.keyDown → ability.move)
+      const left = unit._inputKeys.has('a') || unit._inputKeys.has('arrowleft');
+      const right = unit._inputKeys.has('d') || unit._inputKeys.has('arrowright');
+      const up = unit._inputKeys.has('w') || unit._inputKeys.has('arrowup');
+      const down = unit._inputKeys.has('s') || unit._inputKeys.has('arrowdown');
+
+      // input.x = (right?1:0) - (left?1:0), input.y = (up?1:0) - (down?1:0)
+      const inputX = (right ? 1 : 0) - (left ? 1 : 0);
+      const inputY = (up ? 1 : 0) - (down ? 1 : 0);
+
+      // Rotate input by camera yaw for wasdRelativeToUnit
+      // Taro: moveRelativeToAngle(-yaw) → this.angle = -PI/2 + (-yaw)
+      // Then getCurrentDirection() rotates input by this.angle
+      const controlScheme = typeDef?.controls?.movementControlScheme ?? 'wasd';
       let dirX = 0, dirY = 0;
-      if (unit._inputKeys.has('w') || unit._inputKeys.has('arrowup')) dirY -= 1;
-      if (unit._inputKeys.has('s') || unit._inputKeys.has('arrowdown')) dirY += 1;
-      if (unit._inputKeys.has('a') || unit._inputKeys.has('arrowleft')) dirX -= 1;
-      if (unit._inputKeys.has('d') || unit._inputKeys.has('arrowright')) dirX += 1;
+
+      if (controlScheme === 'wasdRelativeToUnit' && unit._cameraYaw !== undefined) {
+        // Exact taro AbilityComponent.getCurrentDirection() logic:
+        const angle = -Math.PI * 0.5 + (-unit._cameraYaw);
+        const deg90 = Math.PI * 0.5;
+
+        if (inputX < 0) { // left
+          dirX += Math.cos(angle - deg90);
+          dirY += Math.sin(angle - deg90);
+        }
+        if (inputX > 0) { // right
+          dirX += Math.cos(angle + deg90);
+          dirY += Math.sin(angle + deg90);
+        }
+        if (inputY > 0) { // up (forward)
+          dirX += Math.cos(angle);
+          dirY += Math.sin(angle);
+        }
+        if (inputY < 0) { // down (backward)
+          dirX += Math.cos(angle + deg90 * 2);
+          dirY += Math.sin(angle + deg90 * 2);
+        }
+      } else {
+        // Plain WASD (no rotation)
+        dirX = inputX;
+        dirY = -inputY; // taro: direction.y = -input.y when angle=0
+      }
 
       // Diagonal speed reduction (taro Unit.js line 2418)
       let moveSpeed = speed;
-      if (dirX !== 0 && dirY !== 0) {
+      if (inputX !== 0 && inputY !== 0) {
         moveSpeed = speed / 1.41421356237;
       }
 
@@ -494,11 +532,15 @@ export class GameServer {
     }
   }
 
-  private _onPlayerMouseMoved(clientId: string, data: { x: number; y: number }): void {
+  private _onPlayerMouseMoved(clientId: string, data: { x: number; y: number; yaw?: number; pitch?: number }): void {
     const playerData = this._players.get(clientId);
     if (!playerData) return;
     const unit = this._entities.get(playerData.unitId);
-    if (unit) unit._mousePosition = data;
+    if (unit) {
+      unit._mousePosition = data;
+      if (data.yaw !== undefined) unit._cameraYaw = data.yaw;
+      if (data.pitch !== undefined) unit._cameraPitch = data.pitch;
+    }
   }
 
   // --- Entity management (public so scripts/physics can use) ---
