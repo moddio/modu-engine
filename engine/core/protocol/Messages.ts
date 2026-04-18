@@ -37,8 +37,8 @@ export interface EncodedTransform {
 
 export function encodeTransform(data: TransformData): EncodedTransform {
   const result: EncodedTransform = {
-    x: Math.round(data.x).toString(16),
-    y: Math.round(data.y).toString(16),
+    x: Math.round(data.x * 1000).toString(16),
+    y: Math.round(data.y * 1000).toString(16),
     rotation: Math.round((data.rotation % (2 * Math.PI)) * 1000).toString(16),
   };
   if (data.isTeleporting) result.isTeleporting = '1';
@@ -48,8 +48,8 @@ export function encodeTransform(data: TransformData): EncodedTransform {
 
 export function decodeTransform(encoded: EncodedTransform): TransformData {
   return {
-    x: parseInt(encoded.x, 16),
-    y: parseInt(encoded.y, 16),
+    x: parseInt(encoded.x, 16) / 1000,
+    y: parseInt(encoded.y, 16) / 1000,
     rotation: parseInt(encoded.rotation, 16) / 1000,
     isTeleporting: encoded.isTeleporting === '1',
     teleportCamera: encoded.teleportCamera === '1',

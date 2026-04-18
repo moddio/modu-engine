@@ -103,10 +103,9 @@ export class CameraController {
     const rotateSpeed = 0.0035; // radians per pixel of mouse movement
     const zoomSpeed = 0.5;
 
-    const onClick = () => {
-      if (!this._pointerLocked) {
-        canvas.requestPointerLock();
-      }
+    const onPointerDown = () => {
+      if (this._pointerLocked) return;
+      canvas.requestPointerLock();
     };
 
     const onPointerLockChange = () => {
@@ -136,7 +135,10 @@ export class CameraController {
 
     const onCtx = (e: Event) => e.preventDefault();
 
-    canvas.addEventListener('click', onClick);
+    // Listen on the canvas itself so only direct clicks on it trigger pointer lock.
+    // Overlays (editor, menus, HUD) sit above the canvas in the DOM and will
+    // naturally intercept clicks without triggering lock.
+    canvas.addEventListener('pointerdown', onPointerDown);
     document.addEventListener('pointerlockchange', onPointerLockChange);
     document.addEventListener('mousemove', onMouseMove);
     canvas.addEventListener('wheel', onWheel, { passive: false });
@@ -144,7 +146,7 @@ export class CameraController {
     canvas.addEventListener('contextmenu', onCtx);
 
     return () => {
-      canvas.removeEventListener('click', onClick);
+      canvas.removeEventListener('pointerdown', onPointerDown);
       document.removeEventListener('pointerlockchange', onPointerLockChange);
       document.removeEventListener('mousemove', onMouseMove);
       canvas.removeEventListener('wheel', onWheel);

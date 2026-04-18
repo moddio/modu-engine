@@ -89,6 +89,15 @@ export class ActionRunner {
       case 'return':
         return 'return';
 
+      case 'forAllEntities': {
+        // Minimal stub: run nested actions once. Full semantics would iterate
+        // over `entityGroup` (e.g. entitiesBetweenTwoPositions for a ground check)
+        // and expose `selectedEntity` on each iteration — not implemented yet.
+        const result = this.run((action.actions as any[]) ?? [], vars);
+        if (result === 'return') return 'return';
+        return undefined;
+      }
+
       case 'comment':
         return undefined; // No-op
 
@@ -292,6 +301,13 @@ export class ActionRunner {
       case 'stopPlayEntityAnimation':
       case 'stopAllEntityAnimations': {
         this._engine.events.emit('entity:stopAnimation', [
+          this._resolveValue(action.entity, vars),
+        ]);
+        return undefined;
+      }
+
+      case 'jumpUnit': {
+        this._engine.events.emit('entity:jump', [
           this._resolveValue(action.entity, vars),
         ]);
         return undefined;

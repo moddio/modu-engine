@@ -49,9 +49,17 @@ export class GameServer {
     this._gameData = gameData;
     this._rawGameData = rawGameData || null;
 
+    // Set tile pixel size from map data (must happen before physics body creation)
+    const mapData = gameData.map as Record<string, any> | undefined;
+    if (mapData?.tilewidth) {
+      this._tilePx = mapData.tilewidth;
+    }
+
     // Initialize Rapier physics (WASM — requires async init)
     try {
-      const RAPIER = await import('@dimforge/rapier2d-compat');
+      // eslint-disable-next-line @typescript-eslint/ban-ts-comment
+      // @ts-ignore — runtime dynamic import, not bundled (WASM)
+      const RAPIER = await import(/* @vite-ignore */ '@dimforge/rapier2d-compat');
       await RAPIER.init();
       const gravity = new Vec2(0, 0); // Top-down game: no gravity
       this._physics = new PhysicsWorld(gravity);
@@ -83,6 +91,38 @@ export class GameServer {
     this.engine.events.on('script:run', (args: unknown) => {
       const [scriptId, vars] = args as [string, Record<string, unknown>];
       this.scripts.runScript(scriptId, vars);
+    });
+
+    // Script-driven animation: resolve the animation key from the unit's type and broadcast
+    this.engine.events.on('entity:playAnimation', (args: unknown) => {
+      const [entityId, animation] = args as [string, string];
+      const entity = this._entities.get(entityId);
+      if (!entity) return;
+      const typeDef = this.types.get('unitTypes', entity.stats?.type);
+      const animations = (typeDef as any)?.animations as Record<string, any> | undefined;
+      const animDef = animations?.[animation] ??
+        Object.values(animations ?? {}).find((a: any) => a.name === animation || a.threeAnimationKey === animation);
+      const key = (animDef as any)?.threeAnimationKey || (animDef as any)?.name || animation;
+      this._broadcastStatsUpdate(entityId, { playAnimation: key });
+    });
+
+    // Script-driven jump: visual Y-axis bounce on the client
+    this.engine.events.on('entity:jump', (args: unknown) => {
+      const [entityId] = args as [string];
+      if (!this._entities.has(entityId)) return;
+      this._broadcastStatsUpdate(entityId, { jump: true });
+    });
+
+    // Script-driven impulse. Physics is 2D (Rapier X/Z plane), so impulse.z from
+    // game data represents the 3D vertical axis (up) and has no 2D physics equivalent —
+    // translate it to a visual Y-axis bounce on the client. impulse.x / impulse.y
+    // would map to the 2D ground-plane axes; left unapplied here until needed.
+    this.engine.events.on('physics:applyImpulse', (args: unknown) => {
+      const [entityId, impulse] = args as [string, { x?: number; y?: number; z?: number }];
+      if (!this._entities.has(entityId)) return;
+      if (impulse && typeof impulse.z === 'number' && impulse.z > 0) {
+        this._broadcastStatsUpdate(entityId, { jump: true });
+      }
     });
   }
 
@@ -160,18 +200,18 @@ export class GameServer {
 
   // Taro Rapier uses _scaleRatio=30 for ALL physics coordinates.
   // Positions, velocities, impulses, collider sizes — all in pixels/30.
-  // Our world: 1 tile = 1 unit = 16 pixels.
-  // To convert: tile position → physics position = tile * 16 / 30
-  // To convert back: physics position → tile = physics * 30 / 16
+  // Our world: 1 tile = 1 unit = map.tilewidth pixels.
+  // To convert: tile position → physics position = tile * tilewidth / 30
+  // To convert back: physics position → tile = physics * 30 / tilewidth
   private static readonly SCALE_RATIO = 30;
-  private static readonly TILE_PX = 16;
+  private _tilePx = 64; // Set from map.tilewidth during init (default 64 = standard taro tile size)
 
   private _tileToPhysics(tile: number): number {
-    return tile * GameServer.TILE_PX / GameServer.SCALE_RATIO;
+    return tile * this._tilePx / GameServer.SCALE_RATIO;
   }
 
   private _physicsToTile(phys: number): number {
-    return phys * GameServer.SCALE_RATIO / GameServer.TILE_PX;
+    return phys * GameServer.SCALE_RATIO / this._tilePx;
   }
 
   /** Create static wall bodies from the tilemap wall layer */
@@ -179,7 +219,7 @@ export class GameServer {
     if (!this._physics || !this._rawGameData?.map) return;
     const map = this._rawGameData.map;
     const layers = map.layers || [];
-    const tileHW = (map.tilewidth || 16) / 2 / GameServer.SCALE_RATIO; // half-extent in physics
+    const tileHW = this._tilePx / 2 / GameServer.SCALE_RATIO; // half-extent in physics
 
     for (const layer of layers) {
       if (layer.name !== 'walls' || !layer.data) continue;
@@ -187,8 +227,8 @@ export class GameServer {
         for (let x = 0; x < map.width; x++) {
           if (layer.data[y * map.width + x] === 0) continue;
           // Tile center in pixels, then / scaleRatio for physics coords
-          const px = (x + 0.5) * (map.tilewidth || 16) / GameServer.SCALE_RATIO;
-          const py = (y + 0.5) * (map.tileheight || 16) / GameServer.SCALE_RATIO;
+          const px = (x + 0.5) * this._tilePx / GameServer.SCALE_RATIO;
+          const py = (y + 0.5) * this._tilePx / GameServer.SCALE_RATIO;
           const body = this._physics!.createBody({
             type: 'static',
             position: new Vec2(px, py),
@@ -213,7 +253,7 @@ export class GameServer {
     const bodyDef = typeDef.body || typeDef.bodies?.default;
     if (!bodyDef || bodyDef.type === 'none' || bodyDef.type === 'spriteOnly') return;
 
-    // Position in physics coords = tile * 16 / 30
+    // Position in physics coords = tile * tilePx / 30
     const body = this._physics.createBody({
       type: (bodyDef.type === 'static' ? 'static' : bodyDef.type === 'kinematic' ? 'kinematic' : 'dynamic') as any,
       position: new Vec2(this._tileToPhysics(x), this._tileToPhysics(z)),
@@ -378,7 +418,9 @@ export class GameServer {
       const vectorX = dirX * physicsImpulse;
       const vectorY = dirY * physicsImpulse;
 
-      if (vectorX !== 0 || vectorY !== 0) {
+      const isMoving = vectorX !== 0 || vectorY !== 0;
+
+      if (isMoving) {
         switch (movementMethod) {
           case 'impulse':
             // taro: body.applyImpulse({ x: vectorX, y: vectorY }, true)
@@ -393,7 +435,72 @@ export class GameServer {
             break;
         }
       }
+
+      // Detect movement start/stop → switch animation (like taro startMoving/stopMoving + playEffect)
+      const wasMoving = !!unit._isMoving;
+      unit._isMoving = isMoving;
+      if (isMoving && !wasMoving) {
+        this._playMovementAnimation(playerData.unitId, typeDef as any, true);
+      } else if (!isMoving && wasMoving) {
+        this._playMovementAnimation(playerData.unitId, typeDef as any, false);
+      }
     }
+  }
+
+  /** Look up animation from unit type and broadcast it to clients.
+   *  Follows taro's playEffect('move')/playEffect('idle') → applyAnimationById → threeAnimationKey chain.
+   *  1. Check effects.move/idle.animation (animation ID reference)
+   *  2. Fall back to finding animation by name ('move'/'walk'/'default'/'idle')
+   *  3. Resolve animation ID → threeAnimationKey for GLB clip matching */
+  private _playMovementAnimation(entityId: string, typeDef: Record<string, any>, startMoving: boolean): void {
+    const animations = typeDef?.animations as Record<string, any> | undefined;
+    if (!animations) return;
+
+    const effectKey = startMoving ? 'move' : 'idle';
+    const effects = typeDef?.effects as Record<string, any> | undefined;
+    let animId = effects?.[effectKey]?.animation;
+
+    // If effect animation is 'none' or empty, search by animation name
+    if (!animId || animId === 'none' || animId === '') {
+      const namePatterns = startMoving ? ['move', 'walk'] : ['idle', 'default'];
+      for (const [id, anim] of Object.entries(animations)) {
+        const name = (anim as any)?.name?.toLowerCase() || '';
+        const key = (anim as any)?.threeAnimationKey?.toLowerCase() || '';
+        if (namePatterns.some(p => name === p || key === p)) {
+          animId = id;
+          break;
+        }
+      }
+    }
+
+    if (!animId || !animations[animId]) return;
+
+    // Resolve to threeAnimationKey (the actual GLB clip name)
+    const animDef = animations[animId];
+    const threeKey = animDef?.threeAnimationKey || animDef?.name || animId;
+
+    // Also handle animationStop from effect
+    let stopAnimKey: string | undefined;
+    if (effects?.[effectKey]?.animationStop && effects[effectKey].animationStop !== 'none') {
+      const stopId = effects[effectKey].animationStop;
+      const stopDef = animations[stopId];
+      if (stopDef) {
+        stopAnimKey = stopDef.threeAnimationKey || stopDef.name || stopId;
+      }
+    }
+
+    this._broadcastStatsUpdate(entityId, {
+      playAnimation: threeKey,
+      stopAnimation: stopAnimKey,
+    });
+  }
+
+  /** Broadcast a stats update for an entity */
+  private _broadcastStatsUpdate(entityId: string, stats: Record<string, unknown>): void {
+    this._transport.broadcast({
+      type: MessageType.EntityStatsUpdate,
+      data: { [entityId]: stats },
+    });
   }
 
   /** Sync physics body positions back to entity positions (physics → tile coords) */
@@ -545,6 +652,17 @@ export class GameServer {
     const binding = abilities?.[data.key];
     const scriptName = isDown ? binding?.keyDown?.scriptName : binding?.keyUp?.scriptName;
     if (scriptName) {
+      // Entity scripts live on the unit type, not in global scripts
+      const entityScripts = (typeDef as any)?.scripts as Record<string, any> | undefined;
+      const entityScript = entityScripts?.[scriptName];
+      if (entityScript?.actions?.length > 0) {
+        // Has action-based logic — try running through ActionRunner
+        this.scripts.actions.run(entityScript.actions, {
+          triggeredBy: { playerId: playerData.player.id, unitId: playerData.unitId },
+          thisEntity: playerData.unitId,
+        });
+      }
+      // Also try global scripts
       this.scripts.runScript(scriptName, {
         triggeredBy: { playerId: playerData.player.id, unitId: playerData.unitId },
       });
