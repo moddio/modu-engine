@@ -8,6 +8,7 @@ export class DevMode {
   readonly bridge = new EditorBridgeImpl();
   activeTool: EditorTool = 'cursor';
   active = false;
+  activeTab: string | null = null;
 
   enter(): void {
     this.active = true;
@@ -23,5 +24,12 @@ export class DevMode {
   setTool(tool: EditorTool): void {
     this.activeTool = tool;
     this.events.emit('toolChange', tool);
+  }
+
+  changeTab(tab: string): void {
+    if (tab === this.activeTab) return;
+    const from = this.activeTab;
+    this.activeTab = tab;
+    this.events.emit('tabChange', { from, to: tab });
   }
 }
