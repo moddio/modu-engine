@@ -162,12 +162,40 @@ export class CameraController {
 
     const onCtx = (e: Event) => e.preventDefault();
 
+    let isPanning = false;
+    let panLastX = 0;
+    let panLastY = 0;
+
+    const onMouseDownPan = (e: MouseEvent) => {
+      if (e.button !== 2 || !this._pannable) return;
+      e.preventDefault();
+      isPanning = true;
+      panLastX = e.clientX;
+      panLastY = e.clientY;
+    };
+
+    const onMouseUpPan = (e: MouseEvent) => {
+      if (e.button === 2) isPanning = false;
+    };
+
+    const onMouseMovePan = (e: MouseEvent) => {
+      if (!isPanning) return;
+      const dx = e.clientX - panLastX;
+      const dy = e.clientY - panLastY;
+      panLastX = e.clientX;
+      panLastY = e.clientY;
+      this.applyPan(dx, dy);
+    };
+
     canvas.addEventListener('click', onClick);
     document.addEventListener('pointerlockchange', onPointerLockChange);
     document.addEventListener('mousemove', onMouseMove);
     canvas.addEventListener('wheel', onWheel, { passive: false });
     document.addEventListener('keydown', onKeyDown);
     canvas.addEventListener('contextmenu', onCtx);
+    canvas.addEventListener('mousedown', onMouseDownPan);
+    window.addEventListener('mouseup', onMouseUpPan);
+    document.addEventListener('mousemove', onMouseMovePan);
 
     return () => {
       canvas.removeEventListener('click', onClick);
@@ -176,6 +204,9 @@ export class CameraController {
       canvas.removeEventListener('wheel', onWheel);
       document.removeEventListener('keydown', onKeyDown);
       canvas.removeEventListener('contextmenu', onCtx);
+      canvas.removeEventListener('mousedown', onMouseDownPan);
+      window.removeEventListener('mouseup', onMouseUpPan);
+      document.removeEventListener('mousemove', onMouseMovePan);
       if (this._pointerLocked) document.exitPointerLock();
     };
   }
