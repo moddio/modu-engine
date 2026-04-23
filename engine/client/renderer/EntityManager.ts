@@ -62,5 +62,7 @@ export class EntityManager {
   clear(): void {
     for (const r of this._entities.values()) r.destroy();
     this._entities.clear();
+    this.runtimeGroup.visible = true;
+    this.regionGroup.visible = true;
   }
 }

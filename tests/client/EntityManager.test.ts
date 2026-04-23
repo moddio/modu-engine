@@ -126,5 +126,13 @@ describe('EntityManager', () => {
       manager.setRuntimeEntitiesVisible(true);
       expect(manager.runtimeGroup.visible).toBe(true);
     });
+
+    it('clear() resets runtime/region group visibility to true', () => {
+      manager.setRuntimeEntitiesVisible(false);
+      manager.regionGroup.visible = false;
+      manager.clear();
+      expect(manager.runtimeGroup.visible).toBe(true);
+      expect(manager.regionGroup.visible).toBe(true);
+    });
   });
 });
