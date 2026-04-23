@@ -335,15 +335,18 @@ export class GameServer {
     // Sync physics positions back to entities
     this._syncPhysicsToEntities();
 
-    // Rotate units to face camera direction (taro: rotateToFaceMouseCursor)
+    // Rotate units to face the mouse cursor in world space (taro: rotateToFaceMouseCursor).
+    // _mousePosition holds the cursor's world XZ (engine 2D coords — .x=world X, .y=world Z).
+    // At rotation 0 both sprites and GLB units face world −Z, so the angle that points the
+    // unit toward the cursor is atan2(−dx, −dy).
     for (const [, playerData] of this._players) {
       const unit = this._entities.get(playerData.unitId);
-      if (unit && unit._cameraYaw !== undefined) {
-        const typeDef = this.types.get('unitTypes', unit.stats?.type) as any;
-        if (typeDef?.controls?.mouseBehaviour?.rotateToFaceMouseCursor) {
-          unit.rotation = unit._cameraYaw;
-        }
-      }
+      if (!unit || !unit._mousePosition) continue;
+      const typeDef = this.types.get('unitTypes', unit.stats?.type) as any;
+      if (!typeDef?.controls?.mouseBehaviour?.rotateToFaceMouseCursor) continue;
+      const dx = unit._mousePosition.x - unit.position.x;
+      const dy = unit._mousePosition.y - unit.position.z;
+      unit.rotation = Math.atan2(-dx, -dy);
     }
 
     this.engine.step(dt);
