@@ -17,6 +17,8 @@ export interface CameraConfig {
   zoomable?: boolean;
   /** Capture pointer when canvas clicked. Defaults to true iff rotatable. */
   pointerLock?: boolean;
+  /** Allow right-mouse-drag camera target panning. Defaults to true. */
+  pannable?: boolean;
 }
 
 export class CameraController {
@@ -44,6 +46,7 @@ export class CameraController {
   private _rotatable: boolean;
   private _zoomable: boolean;
   private _pointerLockEnabled: boolean;
+  private _pannable: boolean;
 
   constructor(config: CameraConfig = {}) {
     this._projectionMode = config.projectionMode ?? 'orthographic';
@@ -62,6 +65,7 @@ export class CameraController {
     this._rotatable = config.rotatable ?? true;
     this._zoomable = config.zoomable ?? true;
     this._pointerLockEnabled = config.pointerLock ?? this._rotatable;
+    this._pannable = config.pannable ?? true;
 
     this.elevation = Math.max(this._pitchMin, Math.min(this._pitchMax, this.elevation));
 
@@ -105,6 +109,11 @@ export class CameraController {
 
   unfollow(): void {
     this._followTarget = null;
+  }
+
+  /** Read-only snapshot of the current follow target, or null if not following. */
+  get followTarget(): import('three').Vector3 | null {
+    return this._followTarget ? this._followTarget.clone() : null;
   }
 
   /** Whether pointer lock is active */
@@ -172,7 +181,7 @@ export class CameraController {
   }
 
   /** Enable / disable interactive controls at runtime (e.g. for an editor "Map" tab). */
-  setControls(opts: { rotatable?: boolean; zoomable?: boolean; pointerLock?: boolean }): void {
+  setControls(opts: { rotatable?: boolean; zoomable?: boolean; pointerLock?: boolean; pannable?: boolean }): void {
     if (typeof opts.rotatable === 'boolean') this._rotatable = opts.rotatable;
     if (typeof opts.zoomable === 'boolean') this._zoomable = opts.zoomable;
     if (typeof opts.pointerLock === 'boolean') {
@@ -181,6 +190,25 @@ export class CameraController {
         document.exitPointerLock();
       }
     }
+    if (typeof opts.pannable === 'boolean') this._pannable = opts.pannable;
+  }
+
+  /**
+   * Translate the camera target by a screen-space drag delta in pixels.
+   * Pan is azimuth-rotated so the world tracks the cursor, and scaled by
+   * the current zoom (`distance`) so feel is consistent at any zoom level.
+   * No-op when `pannable` is false.
+   */
+  applyPan(dx: number, dy: number): void {
+    if (!this._pannable) return;
+    const PAN_SPEED = 0.01; // world units per pixel at zoom=1
+    const scale = PAN_SPEED * this.distance * 3; // matches actualDistance factor in _updatePosition
+    const cosAz = Math.cos(this.azimuth);
+    const sinAz = Math.sin(this.azimuth);
+    // Camera-right in XZ at azimuth=0 is +X; rotating by azimuth gives the screen-right basis.
+    // Drag-world-with-cursor convention: cursor right → target moves -right.
+    this.target.x -= dx * cosAz * scale + dy * sinAz * scale;
+    this.target.z -= -dx * sinAz * scale + dy * cosAz * scale;
   }
 
   resize(width: number, height: number): void {
