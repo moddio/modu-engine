@@ -119,6 +119,7 @@ export class CameraController {
   /** Whether pointer lock is active */
   get isPointerLocked(): boolean { return this._pointerLocked; }
   private _pointerLocked = false;
+  private _isPanning = false;
 
   /**
    * Attach pointer lock + scroll zoom controls. Listeners are always attached but
@@ -162,24 +163,23 @@ export class CameraController {
 
     const onCtx = (e: Event) => e.preventDefault();
 
-    let isPanning = false;
     let panLastX = 0;
     let panLastY = 0;
 
     const onMouseDownPan = (e: MouseEvent) => {
       if (e.button !== 2 || !this._pannable) return;
       e.preventDefault();
-      isPanning = true;
+      this._isPanning = true;
       panLastX = e.clientX;
       panLastY = e.clientY;
     };
 
     const onMouseUpPan = (e: MouseEvent) => {
-      if (e.button === 2) isPanning = false;
+      if (e.button === 2) this._isPanning = false;
     };
 
     const onMouseMovePan = (e: MouseEvent) => {
-      if (!isPanning) return;
+      if (!this._isPanning) return;
       const dx = e.clientX - panLastX;
       const dy = e.clientY - panLastY;
       panLastX = e.clientX;
@@ -221,7 +221,10 @@ export class CameraController {
         document.exitPointerLock();
       }
     }
-    if (typeof opts.pannable === 'boolean') this._pannable = opts.pannable;
+    if (typeof opts.pannable === 'boolean') {
+      this._pannable = opts.pannable;
+      if (!this._pannable) this._isPanning = false;
+    }
   }
 
   /**

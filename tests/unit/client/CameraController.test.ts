@@ -178,5 +178,12 @@ describe('CameraController', () => {
 
       expect(farDelta).toBeCloseTo(closeDelta * 5, 5);
     });
+
+    it('setControls({ pannable: false }) cancels an in-progress pan', () => {
+      // simulate the start of a pan
+      (camera as any)._isPanning = true;
+      camera.setControls({ pannable: false });
+      expect((camera as any)._isPanning).toBe(false);
+    });
   });
 });
