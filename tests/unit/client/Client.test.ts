@@ -1,23 +1,9 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import * as THREE from 'three';
+import { createMockRenderer } from '../../_helpers/mockRenderer';
 
-// Mock WebGLRenderer before importing Client, so that new Renderer() does not
-// throw "document is not defined" in the node vitest environment.
-vi.mock('../../../engine/client/renderer/Renderer', () => {
-  return {
-    Renderer: class MockRenderer {
-      readonly scene = new THREE.Scene();
-      readonly events = { emit: vi.fn() };
-      readonly threeRenderer = { dispose: vi.fn(), setSize: vi.fn(), render: vi.fn() };
-      width = 800;
-      height = 600;
-      get canvas() { return null; }
-      resize = vi.fn();
-      render = vi.fn();
-      destroy = vi.fn();
-    },
-  };
-});
+vi.mock('../../../engine/client/renderer/Renderer', () => ({
+  Renderer: createMockRenderer(),
+}));
 
 import { Client } from '../../../engine/client/Client';
 import { EntityManager } from '../../../engine/client/renderer/EntityManager';
