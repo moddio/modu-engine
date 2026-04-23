@@ -18,7 +18,8 @@ describe('EntityManager', () => {
     manager.add('unit1', unit);
     expect(manager.count).toBe(1);
     expect(manager.get('unit1')).toBe(unit);
-    expect(manager.group.children).toContain(unit.group);
+    expect(manager.runtimeGroup.children).toContain(unit.group);
+    expect(manager.group.children).toContain(manager.runtimeGroup);
   });
 
   it('get() returns undefined for missing entity', () => {
@@ -91,5 +92,39 @@ describe('EntityManager', () => {
     expect(manager.count).toBe(0);
     expect(spy1).toHaveBeenCalled();
     expect(spy2).toHaveBeenCalled();
+  });
+
+  describe('group split (runtime vs region)', () => {
+    it('routes RegionRenderer to regionGroup, not runtimeGroup', async () => {
+      const { RegionRenderer } = await import('../../engine/client/renderer/entities/RegionRenderer');
+      const region = new RegionRenderer();
+      manager.add('r1', region);
+      expect(manager.regionGroup.children).toContain(region.group);
+      expect(manager.runtimeGroup.children).not.toContain(region.group);
+    });
+
+    it('routes UnitRenderer to runtimeGroup, not regionGroup', () => {
+      const unit = new UnitRenderer();
+      manager.add('u1', unit);
+      expect(manager.runtimeGroup.children).toContain(unit.group);
+      expect(manager.regionGroup.children).not.toContain(unit.group);
+    });
+
+    it('exposes runtimeGroup and regionGroup as children of group', () => {
+      expect(manager.group.children).toContain(manager.runtimeGroup);
+      expect(manager.group.children).toContain(manager.regionGroup);
+    });
+
+    it('setRuntimeEntitiesVisible(false) hides only runtimeGroup', () => {
+      manager.setRuntimeEntitiesVisible(false);
+      expect(manager.runtimeGroup.visible).toBe(false);
+      expect(manager.regionGroup.visible).toBe(true);
+    });
+
+    it('setRuntimeEntitiesVisible(true) restores runtimeGroup visibility', () => {
+      manager.setRuntimeEntitiesVisible(false);
+      manager.setRuntimeEntitiesVisible(true);
+      expect(manager.runtimeGroup.visible).toBe(true);
+    });
   });
 });
