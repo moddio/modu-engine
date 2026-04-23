@@ -27,6 +27,7 @@ export class GameServer {
   private _tickCount = 0;
   private _physics: PhysicsWorld | null = null;
   private _entityBodies = new Map<string, RigidBody>(); // entityId → physics body
+  private _secondTickAccumMs = 0;
 
   constructor(transport: ServerTransport) {
     this._transport = transport;
@@ -48,6 +49,13 @@ export class GameServer {
   async init(gameData: GameData, rawGameData?: Record<string, any>): Promise<void> {
     this._gameData = gameData;
     this._rawGameData = rawGameData || null;
+
+    // Latch the tile pixel size from map data BEFORE creating any physics bodies —
+    // _tileToPhysics and _createWallBodies must share the same scale or they end up
+    // in disjoint coordinate spaces (wall bodies 4x further than units, no collisions).
+    if (typeof (gameData.map as any)?.tilewidth === 'number') {
+      this._tilePx = (gameData.map as any).tilewidth;
+    }
 
     // Initialize Rapier physics (WASM — requires async init)
     try {
@@ -73,17 +81,71 @@ export class GameServer {
       this.scripts.load(gameData.scripts as Record<string, ScriptDef>);
     }
 
-    // Handle script-emitted actions
-    this.engine.events.on('scriptAction', (args: unknown) => {
-      const [type, action, vars] = args as [string, Record<string, unknown>, Record<string, unknown>];
-      this._handleScriptAction(type, action, vars);
+    // Handle script-emitted actions. EventEmitter spreads arrays into callback args,
+    // so ActionRunner's `emit('scriptAction', [type, action, vars])` calls us with 3 args.
+    this.engine.events.on('scriptAction', (type: unknown, action: unknown, vars: unknown) => {
+      this._handleScriptAction(
+        type as string,
+        (action ?? {}) as Record<string, unknown>,
+        (vars ?? {}) as Record<string, unknown>,
+      );
     });
 
     // Handle script:run events from ActionRunner
-    this.engine.events.on('script:run', (args: unknown) => {
-      const [scriptId, vars] = args as [string, Record<string, unknown>];
-      this.scripts.runScript(scriptId, vars);
+    this.engine.events.on('script:run', (scriptId: unknown, vars: unknown) => {
+      this.scripts.runScript(scriptId as string, (vars ?? {}) as Record<string, unknown>);
     });
+
+    // Forward script-emitted UI requests to clients as UICommand messages.
+    const forwardUI = (command: string) => (...callArgs: unknown[]) => {
+      this._transport.broadcast({
+        type: MessageType.UICommand,
+        data: { command, args: callArgs },
+      });
+    };
+    this.engine.events.on('ui:openDialogue', forwardUI('openDialogue'));
+    this.engine.events.on('ui:closeDialogue', forwardUI('closeDialogue'));
+    this.engine.events.on('ui:openShop', forwardUI('openShop'));
+    this.engine.events.on('ui:closeShop', forwardUI('closeShop'));
+    this.engine.events.on('ui:showText', forwardUI('showText'));
+    this.engine.events.on('ui:hideText', forwardUI('hideText'));
+    this.engine.events.on('ui:updateText', forwardUI('updateText'));
+
+    // Script asks to re-target the camera (and switch which unit receives player input).
+    // Karmaslayers uses this in playerJoinsGame: a temp unit is created in _onJoinGame,
+    // then the script spawns the real unit and calls playerCameraTrackUnit to switch.
+    this.engine.events.on('camera:trackUnit', (playerId: unknown, unitId: unknown) => {
+      if (typeof playerId !== 'string' || typeof unitId !== 'string') return;
+      // Find the client that owns this player
+      for (const pd of this._players.values()) {
+        if (pd.player.id === playerId) {
+          pd.unitId = unitId;
+          this._transport.send(pd.clientId, {
+            type: MessageType.InitConnection,
+            data: { playerId, unitId },
+          });
+          break;
+        }
+      }
+    });
+
+    // Update entity name and broadcast so clients can re-render the name sprite.
+    this.engine.events.on('entity:setNameLabel', (rawEid: unknown, name: unknown) => {
+      // ActionRunner reads action.entity, but taro data uses action.unit —
+      // if entity was unresolved, fall back to the last-created unit.
+      const eid = (typeof rawEid === 'string' && rawEid) ? rawEid : this.scripts.actions.lastCreatedUnitId;
+      if (!eid) return;
+      const entity = this._entities.get(eid);
+      if (!entity) return;
+      (entity.stats as Record<string, unknown>).name = name;
+      this._transport.broadcast({
+        type: MessageType.EntityStatsUpdate,
+        data: { [eid]: { name } },
+      });
+    });
+
+    // Propagate tile size to script runtime so pixel-coord positions (from taro) convert correctly.
+    this.scripts.actions.mapTilePx = this._tilePx;
   }
 
   /** Process initialize script to spawn props, NPCs, items */
@@ -158,20 +220,22 @@ export class GameServer {
     return this._entities.get(id);
   }
 
-  // Taro Rapier uses _scaleRatio=30 for ALL physics coordinates.
-  // Positions, velocities, impulses, collider sizes — all in pixels/30.
-  // Our world: 1 tile = 1 unit = 16 pixels.
-  // To convert: tile position → physics position = tile * 16 / 30
-  // To convert back: physics position → tile = physics * 30 / 16
+  // Taro Rapier uses _scaleRatio=30 for ALL physics coordinates (pixels/30).
+  // 1 tile = 1 world unit; the pixel size of that tile comes from `map.tilewidth` in
+  // the source game data (commonly 16, 32 or 64). Every tile↔physics conversion —
+  // wall bodies, unit bodies, velocity scaling — must use the same `_tilePx` or the
+  // placements end up in different coordinate spaces and nothing collides.
   private static readonly SCALE_RATIO = 30;
-  private static readonly TILE_PX = 16;
+  /** Default fallback if the source data omits tilewidth. */
+  private static readonly DEFAULT_TILE_PX = 64;
+  private _tilePx: number = GameServer.DEFAULT_TILE_PX;
 
   private _tileToPhysics(tile: number): number {
-    return tile * GameServer.TILE_PX / GameServer.SCALE_RATIO;
+    return tile * this._tilePx / GameServer.SCALE_RATIO;
   }
 
   private _physicsToTile(phys: number): number {
-    return phys * GameServer.SCALE_RATIO / GameServer.TILE_PX;
+    return phys * GameServer.SCALE_RATIO / this._tilePx;
   }
 
   /** Create static wall bodies from the tilemap wall layer */
@@ -179,16 +243,16 @@ export class GameServer {
     if (!this._physics || !this._rawGameData?.map) return;
     const map = this._rawGameData.map;
     const layers = map.layers || [];
-    const tileHW = (map.tilewidth || 16) / 2 / GameServer.SCALE_RATIO; // half-extent in physics
+    const tileHW = this._tilePx / 2 / GameServer.SCALE_RATIO; // half-extent in physics
 
     for (const layer of layers) {
       if (layer.name !== 'walls' || !layer.data) continue;
       for (let y = 0; y < map.height; y++) {
         for (let x = 0; x < map.width; x++) {
           if (layer.data[y * map.width + x] === 0) continue;
-          // Tile center in pixels, then / scaleRatio for physics coords
-          const px = (x + 0.5) * (map.tilewidth || 16) / GameServer.SCALE_RATIO;
-          const py = (y + 0.5) * (map.tileheight || 16) / GameServer.SCALE_RATIO;
+          // Tile center in tile units, then tile→physics via the same scale units use.
+          const px = this._tileToPhysics(x + 0.5);
+          const py = this._tileToPhysics(y + 0.5);
           const body = this._physics!.createBody({
             type: 'static',
             position: new Vec2(px, py),
@@ -219,8 +283,12 @@ export class GameServer {
       position: new Vec2(this._tileToPhysics(x), this._tileToPhysics(z)),
     });
 
-    // Damping — exactly as taro sets it
-    body.raw.setLinearDamping(bodyDef.linearDamping ?? 0);
+    // Damping — taro's damping values are calibrated for a different physics scale
+    // (larger world, different tick cadence). In modu they crush velocity to a crawl,
+    // so attenuate them heavily for dynamic bodies.
+    const damp = (bodyDef.linearDamping ?? 0) as number;
+    const attenuated = bodyDef.type === 'dynamic' ? Math.min(damp * 0.1, 2) : damp;
+    body.raw.setLinearDamping(attenuated);
     body.raw.setAngularDamping(bodyDef.angularDamping ?? 0);
 
     // Collider — exactly as taro: halfWidth / scaleRatio
@@ -255,6 +323,8 @@ export class GameServer {
 
     // Process input → apply forces to physics bodies
     this._processMovement(dt);
+    // Drive AI behaviors for NPC units (wandering, etc.)
+    this._processAI(dt);
 
     // Step physics with FIXED timestep (prevents jitter from variable dt)
     if (this._physics) {
@@ -291,6 +361,14 @@ export class GameServer {
     }
 
     this.scripts.trigger('frameTick');
+
+    // Fire `secondTick` every real-time second. Many taro games hook spawn/tick logic here.
+    this._secondTickAccumMs += dt;
+    while (this._secondTickAccumMs >= 1000) {
+      this._secondTickAccumMs -= 1000;
+      this.scripts.trigger('secondTick');
+    }
+
     this._streamTransforms();
   }
 
@@ -371,10 +449,9 @@ export class GameServer {
         moveSpeed = speed / 1.41421356237;
       }
 
-      // Impulse in physics coordinates = speed / scaleRatio
-      // Verified by simulation: gives ~1.4 tiles/sec for speed=40, damping=5
-      // which is reasonable walking speed (cross 36-tile map in ~25s)
-      const physicsImpulse = moveSpeed / GameServer.SCALE_RATIO;
+      // Velocity tuned for a playable walking feel at common taro speed values (~10–40).
+      const MOVE_SCALE = 0.5;
+      const physicsImpulse = moveSpeed * MOVE_SCALE;
       const vectorX = dirX * physicsImpulse;
       const vectorY = dirY * physicsImpulse;
 
@@ -392,6 +469,61 @@ export class GameServer {
             body.linearVelocity = new Vec2(vectorX, vectorY);
             break;
         }
+      }
+    }
+  }
+
+  /**
+   * Minimal AI loop: runs the `wander` idle behaviour for units whose type has
+   * `ai.enabled === true`. Units pick a random target inside `ai.maxTravelDistance`
+   * (pixels) and walk toward it, re-picking when they arrive or after a timeout.
+   * Sensor / attack responses are not wired yet.
+   */
+  private _processAI(dt: number): void {
+    // Collect the set of units currently controlled by a connected player so we skip them.
+    const playerUnitIds = new Set<string>();
+    for (const pd of this._players.values()) if (pd.unitId) playerUnitIds.add(pd.unitId);
+
+    for (const [id, unit] of this._entities) {
+      if (unit.category !== 'unit') continue;
+      if (playerUnitIds.has(id)) continue;
+      const typeDef = this.types.get('unitTypes', unit.stats?.type) as any;
+      const ai = typeDef?.ai;
+      if (!ai?.enabled || ai.idleBehaviour !== 'wander') continue;
+      const body = this._entityBodies.get(id);
+      if (!body) continue;
+
+      if (!unit._aiState) {
+        unit._aiState = { target: null as { x: number; y: number } | null, pickCooldownMs: 0 };
+      }
+      const state = unit._aiState;
+      state.pickCooldownMs -= dt;
+
+      // Convert pixel range → physics units (pixels / SCALE_RATIO).
+      const maxTravelPhys = (Number(ai.maxTravelDistance) || 200) / GameServer.SCALE_RATIO;
+      const reached =
+        state.target &&
+        Math.hypot(state.target.x - body.position.x, state.target.y - body.position.y) < 0.4;
+
+      if (!state.target || reached || state.pickCooldownMs <= 0) {
+        const angle = Math.random() * Math.PI * 2;
+        const dist = Math.random() * maxTravelPhys;
+        state.target = {
+          x: body.position.x + Math.cos(angle) * dist,
+          y: body.position.y + Math.sin(angle) * dist,
+        };
+        state.pickCooldownMs = 2000 + Math.random() * 3000; // 2–5s before next re-pick
+      }
+
+      const dx = state.target.x - body.position.x;
+      const dy = state.target.y - body.position.y;
+      const mag = Math.hypot(dx, dy);
+      const speed = (typeDef.attributes?.speed?.value as number) || 10;
+      const AI_MOVE_SCALE = 0.25;
+      if (mag > 0.1) {
+        const vx = (dx / mag) * speed * AI_MOVE_SCALE;
+        const vy = (dy / mag) * speed * AI_MOVE_SCALE;
+        body.linearVelocity = new Vec2(vx, vy);
       }
     }
   }
@@ -512,6 +644,13 @@ export class GameServer {
 
     this._players.set(clientId, { player, clientId, unitId });
 
+    // Tell this client which player + unit are theirs so it can lock the camera on it
+    // regardless of earlier NPC spawns or later scripted unit creations.
+    this._transport.send(clientId, {
+      type: MessageType.InitConnection,
+      data: { playerId: player.id, unitId },
+    });
+
     // Stream ALL existing entities to new client
     for (const [id, entity] of this._entities) {
       if (entity.category === 'player') continue;
@@ -564,7 +703,12 @@ export class GameServer {
 
   // --- Entity management (public so scripts/physics can use) ---
 
-  spawnUnit(typeId: string, typeDef: Record<string, unknown>, ownerId?: string): Unit {
+  spawnUnit(
+    typeId: string,
+    typeDef: Record<string, unknown>,
+    ownerId?: string,
+    spawn?: { x?: number; z?: number; rotation?: number },
+  ): Unit {
     const unit = new Unit(undefined, {
       name: (typeDef.name as string) || typeId,
       type: typeId,
@@ -588,6 +732,13 @@ export class GameServer {
       }
     }
 
+    // Apply spawn transform BEFORE broadcast so clients see it in its final position.
+    if (spawn) {
+      if (typeof spawn.x === 'number') unit.position.x = spawn.x;
+      if (typeof spawn.z === 'number') unit.position.z = spawn.z;
+      if (typeof spawn.rotation === 'number') (unit as any).rotation = spawn.rotation;
+    }
+
     unit.mount(this.engine.root);
     this._entities.set(unit.id, unit);
 
@@ -597,7 +748,7 @@ export class GameServer {
     this._transport.broadcast({
       type: MessageType.EntityCreate,
       data: buildEntityCreatePayload(
-        'unit', unit.id, unit.position.x, unit.position.z, 0,
+        'unit', unit.id, unit.position.x, unit.position.z, (unit as any).rotation || 0,
         { ...unit.stats, ...typeDef },
       ),
     });
@@ -606,8 +757,64 @@ export class GameServer {
     return unit;
   }
 
-  private _handleScriptAction(type: string, _action: Record<string, unknown>, _vars: Record<string, unknown>): void {
-    // Will be expanded as more actions are wired
-    // For now, log unhandled actions for debugging
+  private _handleScriptAction(type: string, action: Record<string, unknown>, vars: Record<string, unknown>): void {
+    const runner = this.scripts.actions;
+    const resolve = (v: unknown): unknown => runner.resolveValue(v, vars);
+
+    switch (type) {
+      case 'createUnitAtPosition':
+      case 'createEntityForPlayerAtPositionWithDimensions': {
+        // Determine which entity map to use and the type ID
+        const entityCategory = (action.entityType as string) || 'unitTypes';
+        const typeId =
+          (resolve(action.unitType) as string) ||
+          (resolve(action.entity) as string) ||
+          (action.entity as string);
+        if (!typeId) return;
+
+        const typeMaps: Record<string, string> = {
+          unitTypes: 'unitTypes',
+          itemTypes: 'itemTypes',
+          propTypes: 'propTypes',
+          projectileTypes: 'projectileTypes',
+        };
+        const typeKey = typeMaps[entityCategory] ?? 'unitTypes';
+        const typeDef = this.types.get(typeKey, typeId) as Record<string, unknown> | null;
+        if (!typeDef) return;
+
+        // Scripts work in taro pixel coords; convert to engine tile-units here.
+        const rawPos = resolve(action.position) as { x?: number; y?: number } | null;
+        if (!rawPos) return;
+        const tilePx = runner.mapTilePx;
+        const px = (rawPos.x ?? 0) / tilePx;
+        const pz = (rawPos.y ?? 0) / tilePx;
+
+        const angle = Number(resolve(action.angle)) || 0;
+        const playerId = (resolve(action.player) as string) || (resolve(action.entity) as string) || '';
+
+        // Spawn unit via existing path (handles stats, physics, broadcast, entityCreatedGlobal)
+        if (typeKey === 'unitTypes') {
+          this.spawnUnit(
+            typeId,
+            typeDef,
+            typeof playerId === 'string' ? playerId : '',
+            { x: px, z: pz, rotation: angle },
+          );
+        } else {
+          // Generic entity (prop/item/projectile) — broadcast without physics/AI for now
+          const entityId = `scr_${Math.random().toString(36).slice(2, 10)}`;
+          const classId = typeKey === 'itemTypes' ? 'item' : typeKey === 'propTypes' ? 'prop' : 'projectile';
+          this._transport.broadcast({
+            type: MessageType.EntityCreate,
+            data: buildEntityCreatePayload(classId, entityId, px, pz, angle, { ...(typeDef as Record<string, unknown>) }),
+          });
+          if (classId === 'item') runner.setLastCreatedUnitId(entityId); // best-effort for get-last
+        }
+        return;
+      }
+
+      default:
+        return;
+    }
   }
 }

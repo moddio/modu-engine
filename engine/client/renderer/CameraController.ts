@@ -11,6 +11,12 @@ export interface CameraConfig {
   far?: number;
   collisions?: boolean;
   pitchRange?: { min: number; max: number };  // degrees
+  /** Allow mouse-drag camera rotation (pitch/yaw). Defaults to true. */
+  rotatable?: boolean;
+  /** Allow scroll-wheel zoom. Defaults to true. */
+  zoomable?: boolean;
+  /** Capture pointer when canvas clicked. Defaults to true iff rotatable. */
+  pointerLock?: boolean;
 }
 
 export class CameraController {
@@ -35,6 +41,9 @@ export class CameraController {
   private _width = 800;
   private _height = 600;
   private _followTarget: THREE.Vector3 | null = null;
+  private _rotatable: boolean;
+  private _zoomable: boolean;
+  private _pointerLockEnabled: boolean;
 
   constructor(config: CameraConfig = {}) {
     this._projectionMode = config.projectionMode ?? 'orthographic';
@@ -49,6 +58,10 @@ export class CameraController {
     this.azimuth = (config.defaultYaw ?? 0) * Math.PI / 180;
     this.distance = config.zoom ?? 1;
     this.trackingDelay = config.trackingDelay ?? 0;
+
+    this._rotatable = config.rotatable ?? true;
+    this._zoomable = config.zoomable ?? true;
+    this._pointerLockEnabled = config.pointerLock ?? this._rotatable;
 
     this.elevation = Math.max(this._pitchMin, Math.min(this._pitchMax, this.elevation));
 
@@ -98,13 +111,18 @@ export class CameraController {
   get isPointerLocked(): boolean { return this._pointerLocked; }
   private _pointerLocked = false;
 
-  /** Attach pointer lock + scroll zoom controls. Returns cleanup function. */
+  /**
+   * Attach pointer lock + scroll zoom controls. Listeners are always attached but
+   * their bodies check the live `_rotatable` / `_zoomable` / `_pointerLockEnabled`
+   * flags, so callers can toggle at runtime via `setControls(...)` (e.g. editor
+   * switching into a Map tab that wants free camera).
+   */
   attachControls(canvas: HTMLCanvasElement): () => void {
     const rotateSpeed = 0.0035; // radians per pixel of mouse movement
     const zoomSpeed = 0.5;
 
     const onClick = () => {
-      if (!this._pointerLocked) {
+      if (this._pointerLockEnabled && !this._pointerLocked) {
         canvas.requestPointerLock();
       }
     };
@@ -114,15 +132,14 @@ export class CameraController {
     };
 
     const onMouseMove = (e: MouseEvent) => {
-      if (!this._pointerLocked) return;
+      if (!this._pointerLocked || !this._rotatable) return;
       this.azimuth -= e.movementX * rotateSpeed;
-      // Mouse up (negative movementY) → decrease elevation (look down toward ground)
-      // This matches taro engine behavior where mouse controls camera orbit, not FPS look
       this.elevation = Math.max(this._pitchMin, Math.min(this._pitchMax,
         this.elevation + e.movementY * rotateSpeed));
     };
 
     const onWheel = (e: WheelEvent) => {
+      if (!this._zoomable) return;
       e.preventDefault();
       this.distance = Math.max(0.5, Math.min(30,
         this.distance + (e.deltaY > 0 ? zoomSpeed : -zoomSpeed)));
@@ -152,6 +169,18 @@ export class CameraController {
       canvas.removeEventListener('contextmenu', onCtx);
       if (this._pointerLocked) document.exitPointerLock();
     };
+  }
+
+  /** Enable / disable interactive controls at runtime (e.g. for an editor "Map" tab). */
+  setControls(opts: { rotatable?: boolean; zoomable?: boolean; pointerLock?: boolean }): void {
+    if (typeof opts.rotatable === 'boolean') this._rotatable = opts.rotatable;
+    if (typeof opts.zoomable === 'boolean') this._zoomable = opts.zoomable;
+    if (typeof opts.pointerLock === 'boolean') {
+      this._pointerLockEnabled = opts.pointerLock;
+      if (!this._pointerLockEnabled && this._pointerLocked) {
+        document.exitPointerLock();
+      }
+    }
   }
 
   resize(width: number, height: number): void {

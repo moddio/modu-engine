@@ -8,12 +8,30 @@ export class ActionRunner {
   private _engine: Engine;
   private _conditions: ConditionEvaluator;
   private _variables: VariableStore;
+  private _lastCreatedUnitId: string | null = null;
+  private _lastCreatedItemId: string | null = null;
+
+  /** Pixels per tile in source game data. Used to convert taro pixel coords → engine tile-units. */
+  mapTilePx = 64;
 
   constructor(engine: Engine, variables: VariableStore) {
     this._engine = engine;
     this._conditions = new ConditionEvaluator();
     this._variables = variables;
+
+    // Track the most recently spawned unit/item so `getLastCreatedUnit`/`getLastCreatedItem` resolve.
+    // GameServer emits `entityCreatedGlobal` with a single payload object.
+    this._engine.events.on('entityCreatedGlobal', (payload: unknown) => {
+      const p = (payload ?? {}) as { entityId?: string; unitId?: string; itemId?: string; category?: string };
+      if (p.unitId) this._lastCreatedUnitId = p.unitId;
+      if (p.itemId) this._lastCreatedItemId = p.itemId;
+      if (p.entityId && p.category === 'unit') this._lastCreatedUnitId = p.entityId;
+      if (p.entityId && p.category === 'item') this._lastCreatedItemId = p.entityId;
+    });
   }
+
+  get lastCreatedUnitId(): string | null { return this._lastCreatedUnitId; }
+  setLastCreatedUnitId(id: string | null): void { this._lastCreatedUnitId = id; }
 
   /** Execute a list of actions. Returns 'break', 'return', 'continue', or undefined. */
   run(actions: Array<Record<string, unknown>>, vars: ActionVars = {}): string | undefined {
@@ -654,7 +672,7 @@ export class ActionRunner {
 
       case 'setUnitNameLabel': {
         this._engine.events.emit('entity:setNameLabel', [
-          this._resolveValue(action.entity, vars),
+          this._resolveValue(action.unit ?? action.entity, vars),
           this._resolveValue(action.name, vars),
         ]);
         return undefined;
@@ -1076,6 +1094,41 @@ export class ActionRunner {
     switch (fn) {
       case 'getVariable':
         return this._variables.getGlobal(obj.variableName as string);
+      case 'getLastCreatedUnit':
+        return this._lastCreatedUnitId;
+      case 'getLastCreatedItem':
+        return this._lastCreatedItemId;
+      case 'vector3': {
+        return {
+          x: Number(this._resolveValue(obj.x, vars)) || 0,
+          y: Number(this._resolveValue(obj.y, vars)) || 0,
+          z: Number(this._resolveValue(obj.z, vars)) || 0,
+        };
+      }
+      case 'vector2': {
+        return {
+          x: Number(this._resolveValue(obj.x, vars)) || 0,
+          y: Number(this._resolveValue(obj.y, vars)) || 0,
+        };
+      }
+      case 'centerOfRegion': {
+        // Scripts work in taro pixel coords throughout (matches getEntityPosition which returns pixels).
+        // GameServer converts to tile-units at the final spawn step.
+        const region = this._resolveValue(obj.region, vars) as { x?: number; y?: number; width?: number; height?: number } | null;
+        if (!region) return { x: 0, y: 0 };
+        return {
+          x: (region.x ?? 0) + (region.width ?? 0) / 2,
+          y: (region.y ?? 0) + (region.height ?? 0) / 2,
+        };
+      }
+      case 'getRandomPositionInRegion': {
+        const region = this._resolveValue(obj.region, vars) as { x?: number; y?: number; width?: number; height?: number } | null;
+        if (!region) return { x: 0, y: 0 };
+        return {
+          x: (region.x ?? 0) + Math.random() * (region.width ?? 0),
+          y: (region.y ?? 0) + Math.random() * (region.height ?? 0),
+        };
+      }
       case 'getEntityVariable':
         return this._variables.getEntityVar(
           this._resolveValue(obj.entity, vars) as string,
@@ -1127,6 +1180,223 @@ export class ActionRunner {
       }
       case 'undefinedValue':
         return undefined;
+
+      // --- Missing resolvers referenced by taro game data ---
+      case 'getLastPlayerSelectingDialogueOption':
+        // Populated by the UI dialogue-option response handler in vars.
+        return vars.lastDialogueOptionPlayerId ?? (vars.triggeredBy as any)?.playerId;
+      case 'getItemCurrentlyHeldByUnit': {
+        const uid = this._resolveValue(obj.entity ?? obj.unit, vars) as string;
+        const ent = this._engine.findById(uid);
+        return (ent as any)?.stats?.currentItemId;
+      }
+      case 'getPlayerAttribute': {
+        const pid = this._resolveValue(obj.entity ?? obj.player, vars) as string;
+        const attr = (obj.attribute ?? obj.attributeType) as string;
+        const player = this._engine.findById(pid);
+        return (player as any)?.stats?.[`attr_${attr}`]?.value;
+      }
+      case 'entityAttributeMax': {
+        const eid = this._resolveValue(obj.entity, vars) as string;
+        const attr = (obj.attribute ?? obj.attributeType) as string;
+        const ent = this._engine.findById(eid);
+        return (ent as any)?.stats?.[`attr_${attr}`]?.max;
+      }
+      case 'entityAttributeMin': {
+        const eid = this._resolveValue(obj.entity, vars) as string;
+        const attr = (obj.attribute ?? obj.attributeType) as string;
+        const ent = this._engine.findById(eid);
+        return (ent as any)?.stats?.[`attr_${attr}`]?.min;
+      }
+      case 'getSourceItemOfProjectile':
+      case 'getSourceUnitOfProjectile': {
+        const pid = this._resolveValue(obj.projectile, vars) as string;
+        const proj = this._engine.findById(pid);
+        return (proj as any)?.stats?.sourceId;
+      }
+      case 'getProjectileTypeOfProjectile': {
+        const pid = this._resolveValue(obj.projectile, vars) as string;
+        const p = this._engine.findById(pid);
+        return (p as any)?.stats?.type;
+      }
+      case 'getItemMaxQuantity':
+      case 'maxValueOfItemType': {
+        const tid = this._resolveValue(obj.itemType ?? obj.entity ?? obj.item, vars);
+        // No type registry access here — return Infinity for now; actual limits need engine wiring.
+        return typeof tid === 'string' ? Infinity : 0;
+      }
+      case 'getItemQuantity': {
+        const iid = this._resolveValue(obj.item ?? obj.entity, vars) as string;
+        const item = this._engine.findById(iid);
+        return (item as any)?.stats?.quantity ?? 1;
+      }
+      case 'getItemTypeName': {
+        const tid = this._resolveValue(obj.itemType, vars);
+        return typeof tid === 'string' ? tid : '';
+      }
+      case 'unitIsCarryingItemType': {
+        const uid = this._resolveValue(obj.entity ?? obj.unit, vars) as string;
+        const tid = this._resolveValue(obj.itemType, vars) as string;
+        const unit = this._engine.findById(uid);
+        const inv = ((unit as any)?.stats?.inventory ?? []) as Array<{ type?: string }>;
+        return Array.isArray(inv) && inv.some(it => it?.type === tid);
+      }
+      case 'getNumberOfUnitsOfUnitType': {
+        const tid = this._resolveValue(obj.unitType, vars);
+        return this._engine.root.children.filter(e => e.category === 'unit' && (e as any).stats?.type === tid).length;
+      }
+      case 'allUnitsInRegion': {
+        const region = this._resolveValue(obj.region, vars) as { x?: number; y?: number; width?: number; height?: number } | null;
+        if (!region) return [];
+        const px = this.mapTilePx;
+        const x0 = (region.x ?? 0) / px, z0 = (region.y ?? 0) / px;
+        const x1 = x0 + (region.width ?? 0) / px, z1 = z0 + (region.height ?? 0) / px;
+        return this._engine.root.children
+          .filter(e => e.category === 'unit')
+          .filter(e => {
+            const p = (e as any).position;
+            return p && p.x >= x0 && p.x <= x1 && p.z >= z0 && p.z <= z1;
+          })
+          .map(e => e.id);
+      }
+      case 'allUnitsOfUnitType': {
+        const tid = this._resolveValue(obj.unitType, vars);
+        return this._engine.root.children.filter(e => e.category === 'unit' && (e as any).stats?.type === tid).map(e => e.id);
+      }
+      case 'allUnitsOwnedByPlayer': {
+        const pid = this._resolveValue(obj.player, vars) as string;
+        return this._engine.root.children.filter(e => e.category === 'unit' && (e as any).stats?.ownerId === pid).map(e => e.id);
+      }
+      case 'allItemsOwnedByUnit': {
+        const uid = this._resolveValue(obj.unit, vars) as string;
+        const unit = this._engine.findById(uid);
+        const inv = ((unit as any)?.stats?.inventory ?? []) as Array<{ id?: string }>;
+        return Array.isArray(inv) ? inv.map(it => it?.id).filter(Boolean) : [];
+      }
+      case 'getPlayerUsername':
+      case 'getPlayerName': {
+        const pid = this._resolveValue(obj.player, vars) as string;
+        const p = this._engine.findById(pid);
+        return (p as any)?.stats?.name ?? '';
+      }
+      case 'getOwnerOfItem': {
+        const iid = this._resolveValue(obj.entity ?? obj.item, vars) as string;
+        const it = this._engine.findById(iid);
+        return (it as any)?.stats?.ownerId;
+      }
+      case 'getPlayerSelectedUnit': {
+        const pid = this._resolveValue(obj.player, vars) as string;
+        const p = this._engine.findById(pid);
+        return (p as any)?.stats?.selectedUnitId;
+      }
+      case 'isPlayerLoggedIn':
+        return false; // no auth in single-player; scripts typically use this to skip save/load
+      case 'playerIsControlledByHuman': {
+        const pid = this._resolveValue(obj.player, vars) as string;
+        const p = this._engine.findById(pid);
+        return (p as any)?.stats?.controlledBy === 'human';
+      }
+      case 'playerTypeOfPlayer': {
+        const pid = this._resolveValue(obj.player, vars) as string;
+        const p = this._engine.findById(pid);
+        return (p as any)?.stats?.playerTypeId ?? (p as any)?.stats?.playerType;
+      }
+      case 'playersOfPlayerType': {
+        const tid = this._resolveValue(obj.playerType, vars);
+        return this._engine.root.children
+          .filter(e => e.category === 'player' && ((e as any).stats?.playerTypeId === tid || (e as any).stats?.playerType === tid))
+          .map(e => e.id);
+      }
+      case 'humanPlayers':
+        return this._engine.root.children.filter(e => e.category === 'player' && (e as any).stats?.controlledBy === 'human').map(e => e.id);
+      case 'entityExists': {
+        const eid = this._resolveValue(obj.entity, vars) as string;
+        return !!this._engine.findById(eid);
+      }
+      case 'getSelectedEntity':
+        return vars.selectedEntity ?? vars.selectedUnit ?? vars.selectedItem;
+      case 'entityFacingAngle':
+      case 'unitsFacingAngle': {
+        const eid = this._resolveValue(obj.entity ?? obj.unit, vars) as string;
+        const ent = this._engine.findById(eid);
+        return (ent as any)?.rotation ?? 0;
+      }
+      case 'entityBounds': {
+        const eid = this._resolveValue(obj.entity, vars) as string;
+        const ent = this._engine.findById(eid);
+        if (!ent) return { x: 0, y: 0, width: 0, height: 0 };
+        const w = (ent as any).stats?.bodies?.default?.width ?? this.mapTilePx;
+        const h = (ent as any).stats?.bodies?.default?.height ?? this.mapTilePx;
+        return { x: (ent as any).position.x * this.mapTilePx, y: (ent as any).position.z * this.mapTilePx, width: w, height: h };
+      }
+      case 'dynamicRegion': {
+        return {
+          x: Number(this._resolveValue(obj.x, vars)) || 0,
+          y: Number(this._resolveValue(obj.y, vars)) || 0,
+          width: Number(this._resolveValue(obj.width, vars)) || 0,
+          height: Number(this._resolveValue(obj.height, vars)) || 0,
+        };
+      }
+      case 'regionOverlapsWithRegion': {
+        const a = this._resolveValue(obj.regionA ?? obj.a, vars) as { x?: number; y?: number; width?: number; height?: number } | null;
+        const b = this._resolveValue(obj.regionB ?? obj.b, vars) as { x?: number; y?: number; width?: number; height?: number } | null;
+        if (!a || !b) return false;
+        const ax1 = (a.x ?? 0), ay1 = (a.y ?? 0), ax2 = ax1 + (a.width ?? 0), ay2 = ay1 + (a.height ?? 0);
+        const bx1 = (b.x ?? 0), by1 = (b.y ?? 0), bx2 = bx1 + (b.width ?? 0), by2 = by1 + (b.height ?? 0);
+        return ax1 < bx2 && ax2 > bx1 && ay1 < by2 && ay2 > by1;
+      }
+      case 'getPositionX':
+        return (this._resolveValue(obj.position, vars) as any)?.x ?? 0;
+      case 'getPositionY':
+        return (this._resolveValue(obj.position, vars) as any)?.y ?? 0;
+      case 'getPositionInFrontOfPosition': {
+        const pos = this._resolveValue(obj.position, vars) as { x?: number; y?: number } | null;
+        const angle = Number(this._resolveValue(obj.angle ?? obj.rotation, vars)) || 0;
+        const dist = Number(this._resolveValue(obj.distance, vars)) || 0;
+        if (!pos) return { x: 0, y: 0 };
+        return { x: (pos.x ?? 0) + Math.cos(angle) * dist, y: (pos.y ?? 0) + Math.sin(angle) * dist };
+      }
+      case 'getMouseCursorPosition':
+        // No per-player mouse tracking wired yet — fall back to origin.
+        return { x: 0, y: 0 };
+      case 'subString':
+      case 'substringOf': {
+        const src = String(this._resolveValue(obj.sourceString ?? obj.string, vars) ?? '');
+        const pat = String(this._resolveValue(obj.patternString ?? obj.substring, vars) ?? '');
+        return src.includes(pat);
+      }
+      case 'toLowerCase':
+        return String(this._resolveValue(obj.value ?? obj.string, vars) ?? '').toLowerCase();
+      case 'getLengthOfString':
+        return String(this._resolveValue(obj.value ?? obj.string, vars) ?? '').length;
+      case 'toFixed':
+        return Number(this._resolveValue(obj.value, vars) ?? 0).toFixed(Number(this._resolveValue(obj.digits, vars)) || 0);
+      case 'getExponent':
+        return Math.pow(Number(this._resolveValue(obj.base, vars)) || 0, Number(this._resolveValue(obj.exponent, vars)) || 0);
+      case 'mathFloor':
+        return Math.floor(Number(this._resolveValue(obj.value, vars)) || 0);
+      case 'getMin':
+        return Math.min(Number(this._resolveValue(obj.a ?? obj.value1, vars)) || 0, Number(this._resolveValue(obj.b ?? obj.value2, vars)) || 0);
+      case 'getMax':
+        return Math.max(Number(this._resolveValue(obj.a ?? obj.value1, vars)) || 0, Number(this._resolveValue(obj.b ?? obj.value2, vars)) || 0);
+      case 'getAttributeTypeOfAttribute':
+        return this._resolveValue(obj.attribute, vars);
+      case 'getTriggeringAttribute':
+        return (vars.triggeredBy as any)?.attributeId;
+      case 'getItemAtSlot': {
+        const uid = this._resolveValue(obj.unit ?? obj.entity, vars) as string;
+        const slot = Number(this._resolveValue(obj.slotIndex ?? obj.slot, vars)) || 0;
+        const unit = this._engine.findById(uid);
+        const inv = ((unit as any)?.stats?.inventory ?? []) as Array<{ id?: string }>;
+        return inv[slot]?.id;
+      }
+      case 'playersAreHostile': {
+        // No relationship data wired yet — default to neutral.
+        return false;
+      }
+      case 'playerCustomInput':
+        // Value from a client-submitted form; not wired in single-player yet.
+        return vars.customInput ?? '';
 
       // --- Count functions ---
       case 'getPlayerCount':
