@@ -164,19 +164,21 @@ describe('CameraController', () => {
       expect(Math.abs(camera.target.x)).toBeLessThan(1e-9);
     });
 
-    it('applyPan scales with distance (farther zoom → larger pan per pixel)', () => {
+    it('applyPan scales inversely with distance in ortho (zoomed out → larger pan per pixel)', () => {
+      // Ortho frustum half-width = canvas / (2 * distance). Bigger distance = narrower
+      // frustum = zoomed in, so each pixel of drag covers fewer world units.
       camera.setAzimuth(0);
       camera.setTarget(0, 0, 0);
       camera.setZoom(1);
       camera.applyPan(100, 0);
-      const closeDelta = Math.abs(camera.target.x);
+      const wideDelta = Math.abs(camera.target.x);
 
       camera.setTarget(0, 0, 0);
       camera.setZoom(5);
       camera.applyPan(100, 0);
-      const farDelta = Math.abs(camera.target.x);
+      const zoomedInDelta = Math.abs(camera.target.x);
 
-      expect(farDelta).toBeCloseTo(closeDelta * 5, 5);
+      expect(wideDelta).toBeCloseTo(zoomedInDelta * 5, 5);
     });
 
     it('setControls({ pannable: false }) cancels an in-progress pan', () => {

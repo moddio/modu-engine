@@ -151,8 +151,14 @@ export class CameraController {
     const onWheel = (e: WheelEvent) => {
       if (!this._zoomable) return;
       e.preventDefault();
-      this.distance = Math.max(0.5, Math.min(30,
-        this.distance + (e.deltaY > 0 ? zoomSpeed : -zoomSpeed)));
+      // Multiplicative zoom — feels uniform at any base distance.
+      // Ortho: bigger distance = zoomed in (frustum = canvas/distance).
+      // Perspective: bigger distance = zoomed out (camera farther from target).
+      const ZOOM_FACTOR = 1.1;
+      const zoomingOut = e.deltaY > 0;
+      let factor = zoomingOut ? 1 / ZOOM_FACTOR : ZOOM_FACTOR;
+      if (this._projectionMode === 'perspective') factor = 1 / factor;
+      this.distance = Math.max(0.1, Math.min(1000, this.distance * factor));
     };
 
     const onKeyDown = (e: KeyboardEvent) => {
@@ -229,20 +235,27 @@ export class CameraController {
 
   /**
    * Translate the camera target by a screen-space drag delta in pixels.
-   * Pan is azimuth-rotated so the world tracks the cursor, and scaled by
-   * the current zoom (`distance`) so feel is consistent at any zoom level.
-   * No-op when `pannable` is false.
+   * Pan is azimuth-rotated so the world tracks the cursor 1:1, computed from
+   * the actual world-per-pixel ratio of the current projection so feel is
+   * consistent at any zoom. No-op when `pannable` is false.
    */
   applyPan(dx: number, dy: number): void {
     if (!this._pannable) return;
-    const PAN_SPEED = 0.01; // world units per pixel at zoom=1
-    const scale = PAN_SPEED * this.distance * 3; // matches actualDistance factor in _updatePosition
+    let worldPerPx: number;
+    if (this._projectionMode === 'orthographic') {
+      // Ortho frustum half-width = canvas_width / (2 * distance), so 1 px = 1/distance world units.
+      worldPerPx = 1 / this.distance;
+    } else {
+      // Perspective: at the look-at distance, vertical world span = 2 * actualDistance * tan(fov/2).
+      const halfFov = (this._fov * Math.PI / 180) / 2;
+      worldPerPx = (2 * this.distance * 3 * Math.tan(halfFov)) / this._height;
+    }
     const cosAz = Math.cos(this.azimuth);
     const sinAz = Math.sin(this.azimuth);
     // Camera-right in XZ at azimuth=0 is +X; rotating by azimuth gives the screen-right basis.
     // Drag-world-with-cursor convention: cursor right → target moves -right.
-    this.target.x -= dx * cosAz * scale + dy * sinAz * scale;
-    this.target.z -= -dx * sinAz * scale + dy * cosAz * scale;
+    this.target.x -= dx * cosAz * worldPerPx + dy * sinAz * worldPerPx;
+    this.target.z -= -dx * sinAz * worldPerPx + dy * cosAz * worldPerPx;
   }
 
   resize(width: number, height: number): void {
@@ -270,6 +283,18 @@ export class CameraController {
     }
 
     this._updatePosition();
+
+    // Ortho frustum derives from `distance`; refresh each frame so scroll-zoom
+    // (which mutates `distance`) actually changes the projection.
+    if (this._projectionMode === 'orthographic') {
+      const hw = this._width / (2 * this.distance);
+      const hh = this._height / (2 * this.distance);
+      this._orthoCamera.left = -hw;
+      this._orthoCamera.right = hw;
+      this._orthoCamera.top = hh;
+      this._orthoCamera.bottom = -hh;
+      this._orthoCamera.updateProjectionMatrix();
+    }
 
     const cam = this.threeCamera;
     cam.position.copy(this.position);
