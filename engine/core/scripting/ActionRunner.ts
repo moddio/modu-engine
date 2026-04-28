@@ -551,10 +551,15 @@ export class ActionRunner {
       }
 
       // --- Iteration ---
+      // Each forAll<X> takes a group expression (e.g. allUnitsOwnedByPlayer, humanPlayers,
+      // allItemsOfItemType) that resolves to an array of entity ids. When present, iterate
+      // only those ids; otherwise fall back to every entity of that category. Without the
+      // filter pass, scripts like celleater's `forAllUnits(allUnitsOwnedByPlayer(viruses))`
+      // ran their body on every unit on the map, overwriting unrelated entities' state.
       case 'forAllUnits': {
-        const entityList = this._engine.root.children.filter(e => e.category === 'unit');
-        for (const entity of entityList) {
-          const result = this.run((action.actions as any[]) ?? [], { ...vars, selectedUnit: entity.id });
+        const ids = this._resolveEntityGroup(action.unitGroup, vars, 'unit');
+        for (const id of ids) {
+          const result = this.run((action.actions as any[]) ?? [], { ...vars, selectedUnit: id });
           if (result === 'break') break;
           if (result === 'return') return 'return';
         }
@@ -562,9 +567,9 @@ export class ActionRunner {
       }
 
       case 'forAllPlayers': {
-        const playerList = this._engine.root.children.filter(e => e.category === 'player');
-        for (const entity of playerList) {
-          const result = this.run((action.actions as any[]) ?? [], { ...vars, selectedPlayer: entity.id });
+        const ids = this._resolveEntityGroup(action.playerGroup, vars, 'player');
+        for (const id of ids) {
+          const result = this.run((action.actions as any[]) ?? [], { ...vars, selectedPlayer: id });
           if (result === 'break') break;
           if (result === 'return') return 'return';
         }
@@ -572,9 +577,9 @@ export class ActionRunner {
       }
 
       case 'forAllItems': {
-        const itemList = this._engine.root.children.filter(e => e.category === 'item');
-        for (const entity of itemList) {
-          const result = this.run((action.actions as any[]) ?? [], { ...vars, selectedItem: entity.id });
+        const ids = this._resolveEntityGroup(action.itemGroup, vars, 'item');
+        for (const id of ids) {
+          const result = this.run((action.actions as any[]) ?? [], { ...vars, selectedItem: id });
           if (result === 'break') break;
           if (result === 'return') return 'return';
         }
@@ -582,9 +587,9 @@ export class ActionRunner {
       }
 
       case 'forAllProjectiles': {
-        const projList = this._engine.root.children.filter(e => e.category === 'projectile');
-        for (const entity of projList) {
-          const result = this.run((action.actions as any[]) ?? [], { ...vars, selectedProjectile: entity.id });
+        const ids = this._resolveEntityGroup(action.projectileGroup, vars, 'projectile');
+        for (const id of ids) {
+          const result = this.run((action.actions as any[]) ?? [], { ...vars, selectedProjectile: id });
           if (result === 'break') break;
           if (result === 'return') return 'return';
         }
@@ -592,9 +597,9 @@ export class ActionRunner {
       }
 
       case 'forAllProps': {
-        const propList = this._engine.root.children.filter(e => e.category === 'prop');
-        for (const entity of propList) {
-          const result = this.run((action.actions as any[]) ?? [], { ...vars, selectedProp: entity.id });
+        const ids = this._resolveEntityGroup((action as any).propGroup, vars, 'prop');
+        for (const id of ids) {
+          const result = this.run((action.actions as any[]) ?? [], { ...vars, selectedProp: id });
           if (result === 'break') break;
           if (result === 'return') return 'return';
         }
@@ -1128,8 +1133,12 @@ export class ActionRunner {
       }
 
       case 'assignPlayerType': {
+        // Taro game data writes the player slot as `entity` (matching the rest of the
+        // entity-targeted actions); pre-existing engine code only read `action.player`,
+        // so the playerId resolved to undefined and the type never actually attached
+        // to the joining player.
         this._engine.events.emit('player:assignType', [
-          this._resolveValue(action.player, vars),
+          this._resolveValue(action.entity ?? action.player, vars),
           this._resolveValue(action.playerType, vars),
         ]);
         return undefined;
@@ -1653,6 +1662,21 @@ export class ActionRunner {
     return this._resolveValue(val, vars);
   }
 
+  // Resolve a forAll<X> group expression to a list of entity ids. Most group helpers
+  // (allUnitsOwnedByPlayer, humanPlayers, allItemsOfItemType, ...) already return id arrays.
+  // When the group is missing or doesn't resolve to an array, fall back to every entity of
+  // that category — preserves the prior unfiltered behavior for any callers that omit the
+  // group field rather than silently iterating nothing.
+  private _resolveEntityGroup(group: unknown, vars: ActionVars, category: string): string[] {
+    if (group !== undefined && group !== null) {
+      const resolved = this._resolveValue(group, vars);
+      if (Array.isArray(resolved)) return resolved as string[];
+    }
+    return this._engine.root.children
+      .filter(e => e.category === category)
+      .map(e => e.id);
+  }
+
   private _resolveValue(text: unknown, vars: ActionVars): unknown {
     if (text === null || text === undefined) return text;
     if (typeof text !== 'object') return text;
@@ -1849,6 +1873,9 @@ export class ActionRunner {
       case 'getNumberOfUnitsOfUnitType': {
         const tid = this._resolveValue(obj.unitType, vars);
         return this._engine.root.children.filter(e => e.category === 'unit' && (e as any).stats?.type === tid).length;
+      }
+      case 'getNumberOfItemsPresent': {
+        return this._engine.root.children.filter(e => e.category === 'item').length;
       }
       case 'allUnitsInRegion': {
         const region = this._resolveValue(obj.region, vars) as { x?: number; y?: number; width?: number; height?: number } | null;

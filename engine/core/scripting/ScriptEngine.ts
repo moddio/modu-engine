@@ -45,6 +45,14 @@ export class ScriptEngine {
    *  automatically from `context.unitId` / `itemId` / `projectileId`.
    */
   trigger(name: string, context: TriggerContext = {}): void {
+    // ActionRunner subscribes to a few trigger names on engine.events to maintain
+    // bookkeeping (e.g. tracking the last-created entity for getLastCreatedUnit/Item/
+    // Projectile). Mirror every trigger fire there so listeners run regardless of
+    // whether any user script is bound to the same name. Without this mirror, calls
+    // like spawnUnit (which only call this.trigger('entityCreatedGlobal', ...))
+    // never reached the bookkeeping listener and getLastCreatedUnit stayed null.
+    this._engine.events.emit(name, context);
+
     const scriptIds = this.triggers.getScriptsForTrigger(name);
     if (scriptIds.length === 0) return;
 
@@ -82,7 +90,17 @@ export class ScriptEngine {
       if (typeId) {
         if (script.parent !== typeId) continue;
         if (script.parentCategory && typeCategory && script.parentCategory !== typeCategory) continue;
-        this.runScript(id, { triggeredBy: { ...context, entityTypeId: typeId, entityTypeCategory: typeCategory } });
+        // Sensor-style triggers (`unitEntersSensor`, `itemEntersSensor`) need to disambiguate
+        // "this entity" (the sensor owner — script.parent matches its type) from the entering
+        // unit/item (which goes into `getTriggeringUnit`/`getTriggeringItem`). The emitter
+        // passes `thisEntity` in the context; surface it on vars so the ActionRunner's
+        // `thisEntity` resolver returns the sensor owner directly instead of falling back
+        // to `tb.unitId` (which holds the entering unit's id).
+        const vars: ActionVars = {
+          triggeredBy: { ...context, entityTypeId: typeId, entityTypeCategory: typeCategory },
+        };
+        if (typeof context.thisEntity === 'string') vars.thisEntity = context.thisEntity;
+        this.runScript(id, vars);
         continue;
       }
 

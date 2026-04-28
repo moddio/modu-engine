@@ -388,6 +388,11 @@ export class GameServer {
       item.position.x = px; item.position.z = pz;
       (item as any).stats = { ...(typeDef as Record<string, unknown>), type: typeId, quantity: 1 };
       this._entities.set(entityId, item);
+      // Build a physics body so unit sensors can detect the item entering them and the
+      // engine can fire `itemEntersSensor` for cell-eats-food scripts (celleater).
+      // Items live in `bodies.dropped` (units use `bodies.default`); _createEntityBody's
+      // body resolution falls through to dropped automatically.
+      this._createEntityBody(entityId, px, pz, typeDef as Record<string, any>);
       // entityCreatedGlobal carries itemId so ActionRunner's listener captures it.
       this.scripts.trigger('entityCreatedGlobal', { entityId, itemId: entityId });
       this.scripts.trigger('entityCreated', { itemId: entityId });
@@ -818,7 +823,34 @@ export class GameServer {
     });
     this.engine.events.on('player:assignType', (rawPid: unknown, rawTypeId: unknown) => {
       const pid = rawPid as string;
-      writeStat(pid, { playerTypeId: rawTypeId as string, playerType: rawTypeId as string });
+      const typeId = rawTypeId as string;
+      // Seed the player's attr_<id> slots from the playerType's `attributes` block so
+      // getPlayerAttribute returns the configured starting value (and bounds) instead of
+      // undefined. setPlayerAttribute writes filtered through Number.isFinite, so an
+      // uninitialized slot poisons the first calc-based update with NaN and the value
+      // never gets recorded — leaving every dependent stat (cell scale, sensor radius,
+      // camera zoom, speed in celleater) frozen at its base.
+      const ent = this._entities.get(pid);
+      const ptDef = this.types.get('playerTypes', typeId) as Record<string, any> | null;
+      const attrDefs = ptDef?.attributes as Record<string, any> | undefined;
+      const patch: Record<string, unknown> = { playerTypeId: typeId, playerType: typeId };
+      if (ent && attrDefs) {
+        ent.stats = ent.stats || {};
+        for (const [attrId, attrDef] of Object.entries(attrDefs)) {
+          const slot = `attr_${attrId}`;
+          const initialized = {
+            value: attrDef.value ?? 0,
+            min: attrDef.min ?? 0,
+            max: attrDef.max ?? 100,
+            regenerateSpeed: attrDef.regenerateSpeed ?? 0,
+            name: attrDef.name ?? attrId,
+            color: attrDef.color ?? '#ffffff',
+          };
+          (ent.stats as any)[slot] = initialized;
+          patch[slot] = initialized;
+        }
+      }
+      writeStat(pid, patch);
     });
     this.engine.events.on('player:sendTo', forwardCmd('sendPlayerTo'));
     this.engine.events.on('player:kick', (rawPid: unknown) => {
@@ -1078,12 +1110,13 @@ export class GameServer {
     // collisionStart events with rapier collider handles; resolve to body handles
     // and dispatch the matching script trigger.
     if (this._physics) {
-      const resolveCollider = (colliderHandle: number): { entityId: string | null; isWall: boolean } => {
+      const resolveCollider = (colliderHandle: number): { entityId: string | null; isWall: boolean; isSensor: boolean } => {
         const collider = (this._physics as any).world.getCollider(colliderHandle);
         const bodyHandle = collider?.parent()?.handle;
-        if (bodyHandle == null) return { entityId: null, isWall: false };
-        if (this._wallBodyHandles.has(bodyHandle)) return { entityId: null, isWall: true };
-        return { entityId: this._bodyToEntity.get(bodyHandle) ?? null, isWall: false };
+        const isSensor = !!collider?.isSensor?.();
+        if (bodyHandle == null) return { entityId: null, isWall: false, isSensor };
+        if (this._wallBodyHandles.has(bodyHandle)) return { entityId: null, isWall: true, isSensor };
+        return { entityId: this._bodyToEntity.get(bodyHandle) ?? null, isWall: false, isSensor };
       };
       this._physics.events.on('collisionStart', (h1: unknown, h2: unknown) => {
         const a = resolveCollider(h1 as number);
@@ -1103,10 +1136,28 @@ export class GameServer {
           const ea = this._entities.get(a.entityId);
           const eb = this._entities.get(b.entityId);
           const ca = ea?.category, cb = eb?.category;
-          // unit ↔ unit
+          // unit ↔ unit. When at least one side's body fixture is a sensor (e.g. celleater
+          // cells), fire `unitEntersSensor` for each sensor-owning side instead of the
+          // rigid `entityTouchesUnit` — taro's per-unit `unitEntersSensor` script reads
+          // `getTriggeringUnit` (the entering unit) and `thisEntity` (the sensor owner).
+          // Provide both via separate context keys so the resolver returns the right ones.
           if (ca === 'unit' && cb === 'unit') {
-            this.scripts.trigger('entityTouchesUnit', { unitId: a.entityId, otherUnitId: b.entityId });
-            this.scripts.trigger('entityTouchesUnit', { unitId: b.entityId, otherUnitId: a.entityId });
+            if (a.isSensor || b.isSensor) {
+              const fireSensor = (sensorOwnerId: string, enteringId: string) => {
+                const owner = this._entities.get(sensorOwnerId);
+                this.scripts.trigger('unitEntersSensor', {
+                  unitId: enteringId,
+                  thisEntity: sensorOwnerId,
+                  entityTypeId: owner?.stats?.type,
+                  entityTypeCategory: 'unitTypes',
+                });
+              };
+              if (a.isSensor) fireSensor(a.entityId, b.entityId);
+              if (b.isSensor) fireSensor(b.entityId, a.entityId);
+            } else {
+              this.scripts.trigger('entityTouchesUnit', { unitId: a.entityId, otherUnitId: b.entityId });
+              this.scripts.trigger('entityTouchesUnit', { unitId: b.entityId, otherUnitId: a.entityId });
+            }
           }
           // unit ↔ projectile. Three perspectives + three trigger names:
           //   - unit's per-type scripts listening for `unitTouchesProjectile` /
@@ -1137,6 +1188,32 @@ export class GameServer {
           };
           if (ca === 'unit' && cb === 'projectile') fireUnitProjectilePair(a.entityId, b.entityId);
           else if (ca === 'projectile' && cb === 'unit') fireUnitProjectilePair(b.entityId, a.entityId);
+
+          // unit ↔ item. Items are sensor-only colliders (taro `bodies.dropped.fixtures[0]`
+          // sets `isSensor: true`), so the unit script reads it as `itemEntersSensor`.
+          // The cell's pickup handler in celleater listens for this trigger to call
+          // `makeUnitPickupItem` and convert food into score.
+          const fireItemSensor = (unitId: string, itemId: string) => {
+            const unit = this._entities.get(unitId);
+            const item = this._entities.get(itemId);
+            this.scripts.trigger('itemEntersSensor', {
+              unitId,
+              itemId,
+              thisEntity: unitId,
+              entityTypeId: unit?.stats?.type,
+              entityTypeCategory: 'unitTypes',
+            });
+            // Mirror so any item-side per-type scripts can react too.
+            this.scripts.trigger('entityEntersSensor', {
+              unitId,
+              itemId,
+              thisEntity: itemId,
+              entityTypeId: item?.stats?.type,
+              entityTypeCategory: 'itemTypes',
+            });
+          };
+          if (ca === 'unit' && cb === 'item') fireItemSensor(a.entityId, b.entityId);
+          else if (ca === 'item' && cb === 'unit') fireItemSensor(b.entityId, a.entityId);
         }
       });
     }
@@ -1343,7 +1420,12 @@ export class GameServer {
   /** Create a physics body for a dynamic entity — EXACTLY matching taro Rapier2dComponent.createBody() */
   private _createEntityBody(entityId: string, x: number, z: number, typeDef: Record<string, any>): void {
     if (!this._physics) return;
-    const bodyDef = typeDef.body || typeDef.bodies?.default;
+    // taro stores itemTypes' colliders under `bodies.dropped` (since items spawn in the
+    // "dropped on the ground" state) while units use `bodies.default`; the legacy 2D
+    // `body` mirror is sometimes absent. Try each in order so items get a body too —
+    // without one, item-vs-unit sensor events never fire and celleater cells can't
+    // pick up food to grow.
+    const bodyDef = typeDef.body || typeDef.bodies?.default || typeDef.bodies?.dropped;
     if (!bodyDef || bodyDef.type === 'none' || bodyDef.type === 'spriteOnly') return;
 
     // Position in physics coords = tile * 16 / 30
@@ -1367,6 +1449,15 @@ export class GameServer {
     const hw = (fixture.shape?.data?.halfWidth ?? (bodyDef.width || 40) / 2) / GameServer.SCALE_RATIO;
     const hh = (fixture.shape?.data?.halfHeight ?? (bodyDef.height || 40) / 2) / GameServer.SCALE_RATIO;
 
+    // Agar-style games (celleater) mark units as sensors via the 3D body schema
+    // (`bodies.default.fixtures[0].isSensor`) — the legacy 2D `body.fixtures[0]`
+    // copy doesn't carry the flag, so check both. Items put the same flag under
+    // `bodies.dropped.fixtures[0].isSensor`. A sensor fixture skips physical
+    // resolution (units pass through one another) and triggers the
+    // `unitEntersSensor` / `itemEntersSensor` script via the collision-event handler.
+    const sensorFix = typeDef.bodies?.default?.fixtures?.[0] ?? typeDef.bodies?.dropped?.fixtures?.[0];
+    const isSensor = !!(fixture.isSensor ?? sensorFix?.isSensor);
+
     body.addCollider({
       shape: 'box',
       width: hw,
@@ -1374,6 +1465,7 @@ export class GameServer {
       density: fixture.density ?? 0,
       friction: fixture.friction ?? 0,
       restitution: fixture.restitution ?? 0,
+      isSensor,
       category: CollisionCategory.UNIT,
       mask: DefaultCollisionMask[CollisionCategory.UNIT],
     });
@@ -1533,7 +1625,12 @@ export class GameServer {
   private _processMovement(dt: number): void {
     for (const [clientId, playerData] of this._players) {
       const unit = this._entities.get(playerData.unitId);
-      if (!unit || !unit._inputKeys) continue;
+      if (!unit) continue;
+      // followCursor units drive themselves from the mouse position alone, so
+      // _inputKeys may legitimately be empty before the player presses anything.
+      // Initialize lazily here instead of bailing out, so the cursor-drive code
+      // below still gets a chance to compute a velocity each tick.
+      if (!unit._inputKeys) unit._inputKeys = new Set();
 
       const body = this._entityBodies.get(playerData.unitId);
       if (!body) continue;
@@ -1573,7 +1670,23 @@ export class GameServer {
       const controlScheme = typeDef?.controls?.movementControlScheme ?? 'wasd';
       let dirX = 0, dirY = 0;
 
-      if (controlScheme === 'wasdRelativeToUnit' && unit._cameraYaw !== undefined) {
+      if (controlScheme === 'followCursor') {
+        // Agar.io-style: drift continuously toward the player's mouse cursor.
+        // GameClient raycasts the cursor onto the ground plane and sends world
+        // XZ in tile units (PlayerMouseMoved.{x,y} = world.x, world.z). Entity
+        // position is in the same tile-unit space, so subtract directly. A small
+        // dead-zone keeps the cell from jittering when the cursor is on top.
+        const mouse = unit._mousePosition as { x?: number; y?: number } | undefined;
+        if (mouse && Number.isFinite(mouse.x) && Number.isFinite(mouse.y)) {
+          const dx = (mouse.x as number) - unit.position.x;
+          const dy = (mouse.y as number) - unit.position.z;
+          const dist = Math.hypot(dx, dy);
+          if (dist > 0.5) {
+            dirX = dx / dist;
+            dirY = dy / dist;
+          }
+        }
+      } else if (controlScheme === 'wasdRelativeToUnit' && unit._cameraYaw !== undefined) {
         // Exact taro AbilityComponent.getCurrentDirection() logic:
         const angle = -Math.PI * 0.5 + (-unit._cameraYaw);
         const deg90 = Math.PI * 0.5;
@@ -1738,6 +1851,13 @@ export class GameServer {
     for (const [id, entity] of this._entities) {
       if (!entity.alive) continue;
       if (entity.category === 'player') continue; // Players don't have transforms
+      // Items are stationary world drops (the spawn EntityCreate carries their position).
+      // Their dynamic Rapier bodies, with very small colliders + zero gravity, can drift
+      // to NaN over many integration steps; that NaN then poisons client interpolation
+      // (`obj.position += (target - pos) * lerp` → NaN forever) and the food meshes
+      // disappear. Skip them in the snapshot — moveEntity / teleportEntity broadcasts
+      // explicit transforms when scripts do move an item.
+      if (entity.category === 'item') continue;
       transforms.push({
         entityId: id,
         transform: encodeTransform({
@@ -2165,26 +2285,68 @@ export class GameServer {
         const unit = this._entities.get(unitId);
         const item = this._entities.get(itemId);
         if (!unit?.stats || !item) return;
-        const inv = (unit.stats.inventory ?? (unit.stats.inventory = [])) as Array<{ id: string; type: string; quantity: number }>;
-        // Append (or stack with existing slot of same type).
-        const stack = inv.find(it => it.type === item.stats?.type);
-        if (stack) {
-          stack.quantity = (stack.quantity || 1) + (Number(item.stats?.quantity) || 1);
+        const itemStats = item.stats as Record<string, any> | undefined;
+
+        // Items with `isUsedOnPickup: true` (e.g. celleater food) are consumed on contact:
+        // their `bonus.consume` block writes into the picking unit's owner's player attrs
+        // (cell score) and/or the unit's own attrs, instead of going into the inventory.
+        // Without this, food disappears but score never increases — the cell stays at the
+        // starting score and can never grow large enough to eat virus.
+        const usedOnPickup = !!itemStats?.isUsedOnPickup;
+        if (usedOnPickup && itemStats?.bonus?.consume) {
+          const consume = itemStats.bonus.consume as Record<string, any>;
+          const ownerId = unit.stats.ownerId as string | undefined;
+          const player = ownerId ? this._entities.get(ownerId) : null;
+          for (const [attrId, raw] of Object.entries(consume.playerAttribute ?? {})) {
+            if (!player?.stats) continue;
+            const slot = `attr_${attrId}`;
+            const cur = (player.stats as any)[slot] ?? { value: 0, min: 0, max: Number.MAX_SAFE_INTEGER };
+            const next = Math.max(cur.min ?? 0, Math.min(cur.max ?? Number.MAX_SAFE_INTEGER, (cur.value ?? 0) + Number(raw || 0)));
+            (player.stats as any)[slot] = { ...cur, value: next };
+            this._transport.broadcast({
+              type: MessageType.EntityStatsUpdate,
+              data: { [ownerId!]: { [slot]: { value: next, min: cur.min, max: cur.max } } },
+            });
+          }
+          for (const [attrId, raw] of Object.entries(consume.unitAttribute ?? {})) {
+            const slot = `attr_${attrId}`;
+            const cur = (unit.stats as any)[slot] ?? { value: 0, min: 0, max: Number.MAX_SAFE_INTEGER };
+            const next = Math.max(cur.min ?? 0, Math.min(cur.max ?? Number.MAX_SAFE_INTEGER, (cur.value ?? 0) + Number(raw || 0)));
+            (unit.stats as any)[slot] = { ...cur, value: next };
+            this._transport.broadcast({
+              type: MessageType.EntityStatsUpdate,
+              data: { [unitId]: { [slot]: { value: next, min: cur.min, max: cur.max } } },
+            });
+          }
         } else {
-          inv.push({
-            id: itemId,
-            type: (item.stats?.type as string) || '',
-            quantity: Number(item.stats?.quantity) || 1,
+          const inv = (unit.stats.inventory ?? (unit.stats.inventory = [])) as Array<{ id: string; type: string; quantity: number }>;
+          // Append (or stack with existing slot of same type).
+          const stack = inv.find(it => it.type === itemStats?.type);
+          if (stack) {
+            stack.quantity = (stack.quantity || 1) + (Number(itemStats?.quantity) || 1);
+          } else {
+            inv.push({
+              id: itemId,
+              type: (itemStats?.type as string) || '',
+              quantity: Number(itemStats?.quantity) || 1,
+            });
+          }
+          this._transport.broadcast({
+            type: MessageType.EntityStatsUpdate,
+            data: { [unitId]: { inventory: inv } },
           });
         }
-        // Drop the world entity now that it's owned.
+        // Drop the world entity now that it's owned. Tear down the physics body too —
+        // dropped items have a sensor collider; leaving it would re-fire itemEntersSensor.
+        const itemBody = this._entityBodies.get(itemId);
+        if (itemBody && this._physics) {
+          this._bodyToEntity.delete(itemBody.raw.handle);
+          this._physics.destroyBody(itemBody);
+          this._entityBodies.delete(itemId);
+        }
         item.destroy?.();
         this._entities.delete(itemId);
         this._transport.broadcast({ type: MessageType.EntityDestroy, data: { entityId: itemId, timestamp: Date.now() } });
-        this._transport.broadcast({
-          type: MessageType.EntityStatsUpdate,
-          data: { [unitId]: { inventory: inv } },
-        });
         this.scripts.trigger('unitPicksUpItem', { unitId, itemId });
         // Per-entity-type alias — taro game data uses both names.
         this.scripts.trigger('thisUnitPicksUpItem', { unitId, itemId });
