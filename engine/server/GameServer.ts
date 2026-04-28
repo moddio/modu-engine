@@ -23,7 +23,7 @@ export class GameServer {
   private _gameData: GameData | null = null;
   private _rawGameData: Record<string, any> | null = null;
   private _entities = new Map<string, any>();
-  private _players = new Map<string, { player: Player; clientId: string; unitId: string }>();
+  private _players = new Map<string, { player: Player; clientId: string; unitId: string; placeholderUnitId?: string }>();
   private _tickCount = 0;
   private _physics: PhysicsWorld | null = null;
   private _entityBodies = new Map<string, RigidBody>(); // entityId → physics body
@@ -159,20 +159,45 @@ export class GameServer {
     this.engine.events.on('ui:updateText', forwardUI('updateText'));
 
     // Script asks to re-target the camera (and switch which unit receives player input).
-    // Karmaslayers uses this in playerJoinsGame: a temp unit is created in _onJoinGame,
-    // then the script spawns the real unit and calls playerCameraTrackUnit to switch.
+    // Common pattern: _onJoinGame spawns a placeholder unit at map center so the camera has
+    // something to follow before scripts run. The playerJoinsGame script then creates the
+    // real unit at a team spawn region and calls playerCameraTrackUnit. When that switch
+    // happens, we destroy the placeholder so it doesn't leave a ghost unit standing in
+    // the middle of the map (F0mB1BW05's purpleFighter at map center while the player is
+    // really controlling a different unit at spawn region).
     this.engine.events.on('camera:trackUnit', (playerId: unknown, unitId: unknown) => {
       if (typeof playerId !== 'string' || typeof unitId !== 'string') return;
-      // Find the client that owns this player
       for (const pd of this._players.values()) {
-        if (pd.player.id === playerId) {
-          pd.unitId = unitId;
-          this._transport.send(pd.clientId, {
-            type: MessageType.InitConnection,
-            data: { playerId, unitId },
-          });
-          break;
+        if (pd.player.id !== playerId) continue;
+
+        const placeholder = pd.placeholderUnitId;
+        if (placeholder && placeholder !== unitId) {
+          const ghost = this._entities.get(placeholder);
+          if (ghost) {
+            const body = this._entityBodies.get(placeholder);
+            if (body && this._physics) {
+              this._bodyToEntity.delete(body.raw.handle);
+              this._physics.destroyBody(body);
+              this._entityBodies.delete(placeholder);
+            }
+            ghost.destroy?.();
+            this._entities.delete(placeholder);
+            this._regionMembership.delete(placeholder);
+            this._aiUnitFacingRotation.delete(placeholder);
+            this._transport.broadcast({
+              type: MessageType.EntityDestroy,
+              data: { entityId: placeholder, timestamp: Date.now() },
+            });
+          }
+          pd.placeholderUnitId = undefined;
         }
+
+        pd.unitId = unitId;
+        this._transport.send(pd.clientId, {
+          type: MessageType.InitConnection,
+          data: { playerId, unitId },
+        });
+        break;
       }
     });
 
@@ -244,6 +269,41 @@ export class GameServer {
       );
     });
 
+    // setEntityVariable / setPlayerVariable — ActionRunner mutates VariableStore (script
+    // reads), but taro also stores these on entity._stats.variables so clients can render
+    // them. Mirror to stats.variables and ship an EntityStatsUpdate diff. MERGE_KEYS in
+    // EntityStream.ts already includes 'variables', so partial merges work correctly.
+    this.engine.events.on('setEntityVariable', (eId: unknown, vName: unknown, value: unknown) => {
+      const entityId = eId as string;
+      const name = vName as string;
+      if (!entityId || !name) return;
+      const entity = this._entities.get(entityId);
+      if (!entity) return;
+      entity.stats = entity.stats || {};
+      const variables = (entity.stats.variables as Record<string, unknown>) || {};
+      variables[name] = value;
+      entity.stats.variables = variables;
+      this._transport.broadcast({
+        type: MessageType.EntityStatsUpdate,
+        data: { [entityId]: { variables: { [name]: value } } },
+      });
+    });
+    this.engine.events.on('setPlayerVariable', (pId: unknown, vName: unknown, value: unknown) => {
+      const playerId = pId as string;
+      const name = vName as string;
+      if (!playerId || !name) return;
+      const player = this._entities.get(playerId);
+      if (!player) return;
+      player.stats = player.stats || {};
+      const variables = (player.stats.variables as Record<string, unknown>) || {};
+      variables[name] = value;
+      player.stats.variables = variables;
+      this._transport.broadcast({
+        type: MessageType.EntityStatsUpdate,
+        data: { [playerId]: { variables: { [name]: value } } },
+      });
+    });
+
     // Chat — bridge ActionRunner's `chat:broadcast` / `chat:toPlayer` / `chat:systemMessage`
     // events to a real ChatMessage protocol packet so the client can render them.
     const chatBroadcast = (text: unknown, fromPlayerId?: string) => {
@@ -299,9 +359,8 @@ export class GameServer {
         vx = Math.cos(ang) * mag;
         vy = Math.sin(ang) * mag;
       }
-      // taro values are calibrated for an immediate per-tick application.
-      const SCALE = 0.5;
-      const v = new Vec2(vx * SCALE, vy * SCALE);
+      // Taro applies impulse/force values raw — same SCALE_RATIO=30, no extra scaling.
+      const v = new Vec2(vx, vy);
       if (kind === 'impulse') body.applyImpulse(v);
       else body.applyForce(v);
     };
@@ -426,6 +485,18 @@ export class GameServer {
       this._transport.broadcast({
         type: MessageType.UICommand,
         data: { command: 'updateTextForEveryone', args },
+      });
+    });
+    this.engine.events.on('ui:showTextForEveryone', (...args: unknown[]) => {
+      this._transport.broadcast({
+        type: MessageType.UICommand,
+        data: { command: 'showTextForEveryone', args },
+      });
+    });
+    this.engine.events.on('ui:hideTextForEveryone', (...args: unknown[]) => {
+      this._transport.broadcast({
+        type: MessageType.UICommand,
+        data: { command: 'hideTextForEveryone', args },
       });
     });
     this.engine.events.on('ui:dismissibleInputModal', (...args: unknown[]) => {
@@ -788,9 +859,96 @@ export class GameServer {
       ent.stats.lastAttackedUnit = rawTargetId as string;
     });
 
-    // ability:cast — trigger entity-attached cast scripts; forward to client for VFX.
-    this.engine.events.on('ability:cast', forwardCmd('castAbility'));
-    this.engine.events.on('ability:stop', forwardCmd('stopCastingAbility'));
+    // ability:cast — full cast pipeline:
+    //   1. Look up the ability def (data.abilities[abilityId]).
+    //   2. Enforce per-unit cooldown — pressing the bound key during cooldown is a no-op.
+    //   3. Deduct cost.unitAttributes from the unit, cost.playerAttributes from its owner.
+    //   4. Run scriptName (legacy single-script) and eventScripts.startCasting.
+    //   5. Broadcast a `castAbility` UICommand for client-side VFX.
+    const abilities = (gameData as any).abilities as Record<string, any> | undefined;
+    this.engine.events.on('ability:cast', (rawUid: unknown, rawAbilityId: unknown) => {
+      const uid = rawUid as string;
+      const abilityId = rawAbilityId as string;
+      if (!uid || !abilityId) return;
+      const def = abilities?.[abilityId];
+      if (!def) return;
+
+      const unit = this._entities.get(uid);
+      if (!unit) return;
+
+      // Cooldown: per-(unitId, abilityId).
+      const now = Date.now();
+      unit._abilityCooldowns = unit._abilityCooldowns || ({} as Record<string, number>);
+      const readyAt = unit._abilityCooldowns[abilityId] ?? 0;
+      if (now < readyAt) return; // still on cooldown
+      unit._abilityCooldowns[abilityId] = now + (Number(def.cooldown) || 0);
+
+      // Cost deduction. Negative deltas — taro semantics: cost > 0 reduces the attr.
+      const ownerId = (unit.stats as any)?.ownerId as string | undefined;
+      for (const [attrId, amt] of Object.entries(def.cost?.unitAttributes ?? {})) {
+        const v = Number(amt);
+        if (!Number.isFinite(v) || v === 0) continue;
+        const slot = `attr_${attrId}`;
+        const attr = (unit.stats as any)?.[slot];
+        if (!attr) continue;
+        const next = (attr.value ?? 0) - v;
+        // If the unit can't afford it, refund the cooldown and bail.
+        if (next < (attr.min ?? 0)) {
+          unit._abilityCooldowns[abilityId] = readyAt;
+          return;
+        }
+        this.engine.events.emit('setEntityAttribute', [uid, attrId, next]);
+      }
+      if (ownerId) {
+        for (const [attrId, amt] of Object.entries(def.cost?.playerAttributes ?? {})) {
+          const v = Number(amt);
+          if (!Number.isFinite(v) || v === 0) continue;
+          const player = this._entities.get(ownerId);
+          const slot = `attr_${attrId}`;
+          const attr = (player?.stats as any)?.[slot];
+          if (!attr) continue;
+          const next = (attr.value ?? 0) - v;
+          if (next < (attr.min ?? 0)) {
+            unit._abilityCooldowns[abilityId] = readyAt;
+            return;
+          }
+          this.engine.events.emit('player:setAttribute', [ownerId, attrId, next]);
+        }
+      }
+
+      // Run the ability's cast scripts (both modern eventScripts.startCasting and
+      // legacy top-level scriptName). thisEntity = the unit casting.
+      const triggeredBy = { unitId: uid, playerId: ownerId, abilityId };
+      const runIfPresent = (scriptName: string | undefined) => {
+        if (!scriptName) return;
+        if (this.scripts.triggers.getScript(scriptName)) {
+          this.scripts.runScript(scriptName, { triggeredBy, thisEntity: uid });
+        }
+      };
+      runIfPresent(def.eventScripts?.startCasting);
+      runIfPresent(def.scriptName);
+
+      // Forward to client for VFX (icon flash, animation hint, etc.).
+      this._transport.broadcast({
+        type: MessageType.UICommand,
+        data: { command: 'castAbility', args: [uid, abilityId] },
+      });
+    });
+    this.engine.events.on('ability:stop', (rawUid: unknown, rawAbilityId: unknown) => {
+      const uid = rawUid as string;
+      const abilityId = rawAbilityId as string;
+      const def = abilities?.[abilityId];
+      const unit = this._entities.get(uid);
+      const ownerId = (unit?.stats as any)?.ownerId as string | undefined;
+      const triggeredBy = { unitId: uid, playerId: ownerId, abilityId };
+      if (def?.eventScripts?.stopCasting && this.scripts.triggers.getScript(def.eventScripts.stopCasting)) {
+        this.scripts.runScript(def.eventScripts.stopCasting, { triggeredBy, thisEntity: uid });
+      }
+      this._transport.broadcast({
+        type: MessageType.UICommand,
+        data: { command: 'stopCastingAbility', args: [uid, abilityId] },
+      });
+    });
 
     // buff system — minimal: write the buff onto stats and forward.
     this.engine.events.on('buff:add', forwardCmd('addBuff'));
@@ -838,16 +996,41 @@ export class GameServer {
     this.engine.events.on('item:stopUse', forwardCmd('stopUsingItem'));
     this.engine.events.on('item:changeImage', forwardCmd('changeItemImage'));
 
-    // Item use → fire `itemIsUsed` (and `thisUnitUsesItem` per the unit's type scripts).
+    // Item use → fire `itemIsUsed` (and `thisUnitUsesItem` per the unit's type scripts),
+    // plus the built-in gun behaviour when the held item type is `isGun: true`.
     // ActionRunner emits `item:use` for both `useItemOnce` and `startUsingItem`; the only
-    // signal we have is the item entity. The unit using it is the item's owner.
+    // signal we have is the item entity. Held items live in unit.stats.inventory as bare
+    // `{id,type,quantity}` records — they aren't real entities — so we have to scan units'
+    // inventories to resolve the firing unit.
     this.engine.events.on('item:use', (rawEid: unknown) => {
       const itemId = rawEid as string;
       if (!itemId) return;
-      const item = this._entities.get(itemId) as { stats?: { ownerId?: string } } | undefined;
-      const unitId = item?.stats?.ownerId;
+
+      let firingUnit: any = null;
+      let invEntry: { id?: string; type?: string; quantity?: number } | undefined;
+      for (const ent of this._entities.values()) {
+        if (ent.category !== 'unit') continue;
+        const inv = (ent.stats?.inventory ?? []) as Array<{ id?: string; type?: string; quantity?: number }>;
+        const found = inv.find((i) => i.id === itemId);
+        if (found) { firingUnit = ent; invEntry = found; break; }
+      }
+      // World-item fallback: dropped/equipped items that *are* in `_entities` carry ownerId.
+      const worldItem = this._entities.get(itemId) as { stats?: { ownerId?: string; type?: string } } | undefined;
+      const unitId = firingUnit?.id ?? worldItem?.stats?.ownerId;
       this.scripts.trigger('itemIsUsed', { itemId, unitId });
       if (unitId) this.scripts.trigger('thisUnitUsesItem', { itemId, unitId });
+
+      // Built-in gun fire — matches taro's Item.use() (moddio2/src/gameClasses/Item.js):
+      // when the held item type has `isGun: true` and a `projectileType`, spawn one
+      // projectile from the gun's tip in the unit's facing direction. Without this,
+      // games that bind `button1` → `startUsingItem` produce no bullets unless they
+      // also wire an explicit `itemIsUsed` script that calls `createProjectileAtPosition`.
+      if (firingUnit && invEntry?.type) {
+        const itemType = this.types.get('itemTypes', invEntry.type) as Record<string, any> | null;
+        if (itemType?.isGun && itemType?.projectileType) {
+          this._fireGunProjectile(firingUnit, itemType);
+        }
+      }
     });
 
     // Update entity name and broadcast so clients can re-render the name sprite.
@@ -877,6 +1060,19 @@ export class GameServer {
       projectileTypes: (entitiesMap.projectileTypes as Record<string, unknown>) ?? {},
       playerTypes: (entitiesMap.playerTypes as Record<string, unknown>) ?? {},
     };
+    // Bridge physics velocity into the scripting runtime so `getEntityVelocityX/Y`
+    // can read live values without GameServer exposing `_entityBodies` publicly.
+    this.scripts.actions.velocityProvider = (eid: string) => {
+      const body = this._entityBodies.get(eid);
+      if (!body) return null;
+      const v = body.linearVelocity;
+      return { x: v.x, y: v.y };
+    };
+    // Expose game-owner userId for `playerIsCreator`. Taro path: `defaultData.owner`.
+    const ownerId =
+      (this._rawGameData?.defaultData?.owner as string | undefined) ??
+      ((gameData as unknown as Record<string, unknown>).defaultData as Record<string, unknown> | undefined)?.owner as string | undefined;
+    this.scripts.actions.gameOwnerUserId = ownerId ?? null;
 
     // Wall / unit / projectile collision triggers. PhysicsWorld.step emits
     // collisionStart events with rapier collider handles; resolve to body handles
@@ -912,14 +1108,35 @@ export class GameServer {
             this.scripts.trigger('entityTouchesUnit', { unitId: a.entityId, otherUnitId: b.entityId });
             this.scripts.trigger('entityTouchesUnit', { unitId: b.entityId, otherUnitId: a.entityId });
           }
-          // unit ↔ projectile (each side gets a perspective-correct trigger)
-          if (ca === 'unit' && cb === 'projectile') {
-            this.scripts.trigger('unitTouchesProjectile', { unitId: a.entityId, projectileId: b.entityId });
-            this.scripts.trigger('entityTouchesProjectile', { projectileId: b.entityId, unitId: a.entityId });
-          } else if (ca === 'projectile' && cb === 'unit') {
-            this.scripts.trigger('unitTouchesProjectile', { unitId: b.entityId, projectileId: a.entityId });
-            this.scripts.trigger('entityTouchesProjectile', { projectileId: a.entityId, unitId: b.entityId });
-          }
+          // unit ↔ projectile. Three perspectives + three trigger names:
+          //   - unit's per-type scripts listening for `unitTouchesProjectile` /
+          //     `entityTouchesProjectile`
+          //   - projectile's per-type scripts listening for `entityTouchesUnit`
+          //     (this is the damage-application path; the projectile's own
+          //     entityTouchesUnit handler reads getTriggeringUnit and calls
+          //     setEntityAttribute(unit, health, current - damage))
+          // Pass entityTypeId/Category explicitly so ScriptEngine.trigger filters
+          // each trigger to the correct per-type script bucket.
+          const fireUnitProjectilePair = (unitId: string, projectileId: string) => {
+            const unit = this._entities.get(unitId);
+            const proj = this._entities.get(projectileId);
+            // Unit's perspective.
+            this.scripts.trigger('unitTouchesProjectile', {
+              unitId, projectileId,
+              entityTypeId: unit?.stats?.type, entityTypeCategory: 'unitTypes',
+            });
+            this.scripts.trigger('entityTouchesProjectile', {
+              unitId, projectileId,
+              entityTypeId: unit?.stats?.type, entityTypeCategory: 'unitTypes',
+            });
+            // Projectile's perspective — this is what runs the damage script.
+            this.scripts.trigger('entityTouchesUnit', {
+              unitId, projectileId, otherUnitId: unitId,
+              entityTypeId: proj?.stats?.type, entityTypeCategory: 'projectileTypes',
+            });
+          };
+          if (ca === 'unit' && cb === 'projectile') fireUnitProjectilePair(a.entityId, b.entityId);
+          else if (ca === 'projectile' && cb === 'unit') fireUnitProjectilePair(b.entityId, a.entityId);
         }
       });
     }
@@ -1052,6 +1269,77 @@ export class GameServer {
     }
   }
 
+  /** Spawn one projectile from a unit's currently-held gun item type. Mirrors taro's
+   *  built-in `Item.use()` gun branch (moddio2/src/gameClasses/Item.js). Position is
+   *  `unit + bulletStartPosition` rotated by the unit's facing angle; velocity points
+   *  along that angle scaled by `projectileType.speed` (or `itemType.bulletForce` as a
+   *  fallback). Despawns after `projectileType.lifeSpan` ms. */
+  private _fireGunProjectile(unit: any, itemType: Record<string, any>): void {
+    const projectileTypeId = itemType.projectileType as string;
+    const projTypeDef = this.types.get('projectileTypes', projectileTypeId) as Record<string, any> | null;
+    if (!projTypeDef) return;
+
+    const tilePx = this._tilePx;
+    // bulletStartPosition is in pixels post-denormalize (3D) / raw (2D); convert to tile units.
+    const bsp = (itemType.bulletStartPosition as { x?: number; y?: number } | undefined) || { x: 0, y: 0 };
+    const offX = (Number(bsp.x) || 0) / tilePx;
+    const offY = (Number(bsp.y) || 0) / tilePx;
+    const rot = Number(unit.rotation) || 0;
+    // Same transform as taro: bullet-pos.x = unit.x + bsp.x*cos − bsp.y*(−sin),
+    // bullet-pos.y = unit.y + bsp.x*sin − bsp.y*cos. (modu's position.z plays world-Y.)
+    const px = unit.position.x + offX * Math.cos(rot) + offY * Math.sin(rot);
+    const pz = unit.position.z + offX * Math.sin(rot) - offY * Math.cos(rot);
+
+    const entityId = `prj_${Math.random().toString(36).slice(2, 10)}`;
+    const ent = this.engine.spawn(entityId);
+    ent.category = 'projectile';
+    ent.position.x = px;
+    ent.position.z = pz;
+    (ent as any).rotation = rot;
+    (ent as any).stats = {
+      ...projTypeDef,
+      type: projectileTypeId,
+      sourceUnitId: unit.id,
+      sourceItemType: (itemType as any).type ?? undefined,
+    };
+    this._entities.set(entityId, ent);
+
+    this._transport.broadcast({
+      type: MessageType.EntityCreate,
+      data: buildEntityCreatePayload('projectile', entityId, px, pz, rot, { ...projTypeDef, type: projectileTypeId }),
+    });
+    this.scripts.trigger('entityCreatedGlobal', { entityId, projectileId: entityId, category: 'projectile' });
+    this.scripts.trigger('entityCreated', { entityId, projectileId: entityId });
+
+    if (this._physics) {
+      // Speed: projectileType.speed wins; fall back to item's bulletForce since taro guns
+      // (e.g. F0mB1BW05's plasmaPistol) only set bulletForce on the item type.
+      const speed = Number(projTypeDef.speed) || Number(itemType.bulletForce) || 0;
+      if (speed > 0) {
+        this._createEntityBody(entityId, px, pz, projTypeDef);
+        const body = this._entityBodies.get(entityId);
+        if (body) {
+          // taro convention: angle 0 = up; forward vector = (sin a, −cos a).
+          const v = speed / GameServer.SCALE_RATIO;
+          body.linearVelocity = new Vec2(Math.sin(rot) * v, -Math.cos(rot) * v);
+        }
+      }
+      const life = Number(projTypeDef.lifeSpan) || 0;
+      if (life > 0) {
+        setTimeout(() => {
+          const e = this._entities.get(entityId);
+          if (e) {
+            e.destroy?.();
+            this._entities.delete(entityId);
+            this._entityBodies.delete(entityId);
+            this._aiUnitFacingRotation.delete(entityId);
+            this._transport.broadcast({ type: MessageType.EntityDestroy, data: { entityId, timestamp: Date.now() } });
+          }
+        }, life);
+      }
+    }
+  }
+
   /** Create a physics body for a dynamic entity — EXACTLY matching taro Rapier2dComponent.createBody() */
   private _createEntityBody(entityId: string, x: number, z: number, typeDef: Record<string, any>): void {
     if (!this._physics) return;
@@ -1171,7 +1459,8 @@ export class GameServer {
         if (!key.startsWith('attr_')) continue;
         const attr = entity.stats[key];
         if (attr.regenerateSpeed && attr.value < attr.max) {
-          attr.value = Math.min(attr.max, attr.value + attr.regenerateSpeed * (dt / 1000));
+          // Taro semantics: regenerateSpeed is added once every 200ms (5×/sec, AttributeComponent.js:34).
+          attr.value = Math.min(attr.max, attr.value + attr.regenerateSpeed * (dt / 200));
         }
       }
     }
@@ -1317,11 +1606,10 @@ export class GameServer {
         moveSpeed = speed / 1.41421356237;
       }
 
-      // Velocity tuned for a playable walking feel at common taro speed values (~10–40).
-      const MOVE_SCALE = 0.5;
-      const physicsImpulse = moveSpeed * MOVE_SCALE;
-      const vectorX = dirX * physicsImpulse;
-      const vectorY = dirY * physicsImpulse;
+      // Taro applies vector = direction * speed raw to the body — same SCALE_RATIO=30,
+      // no fudge factor. Unit.js:2422-2425 → Box2dComponent.js:441 (applyImpulse).
+      const vectorX = dirX * moveSpeed;
+      const vectorY = dirY * moveSpeed;
 
       if (vectorX !== 0 || vectorY !== 0) {
         switch (movementMethod) {
@@ -1356,42 +1644,79 @@ export class GameServer {
       if (unit.category !== 'unit') continue;
       if (playerUnitIds.has(id)) continue;
       const typeDef = this.types.get('unitTypes', unit.stats?.type) as any;
-      const ai = typeDef?.ai;
-      if (!ai?.enabled || ai.idleBehaviour !== 'wander') continue;
       const body = this._entityBodies.get(id);
       if (!body) continue;
 
       if (!unit._aiState) {
-        unit._aiState = { target: null as { x: number; y: number } | null, pickCooldownMs: 0 };
+        unit._aiState = { target: null as { x: number; y: number } | null, targetUnitId: null as string | null, pickCooldownMs: 0 };
       }
       const state = unit._aiState;
       state.pickCooldownMs -= dt;
 
-      // Convert pixel range → physics units (pixels / SCALE_RATIO).
-      const maxTravelPhys = (Number(ai.maxTravelDistance) || 200) / GameServer.SCALE_RATIO;
-      const reached =
-        state.target &&
-        Math.hypot(state.target.x - body.position.x, state.target.y - body.position.y) < 0.4;
-
-      if (!state.target || reached || state.pickCooldownMs <= 0) {
-        const angle = Math.random() * Math.PI * 2;
-        const dist = Math.random() * maxTravelPhys;
-        state.target = {
-          x: body.position.x + Math.cos(angle) * dist,
-          y: body.position.y + Math.sin(angle) * dist,
-        };
-        state.pickCooldownMs = 2000 + Math.random() * 3000; // 2–5s before next re-pick
+      // 1. If a script set a target unit (aiAttackUnit), pursue its current position.
+      //    The unit's position changes every tick so we re-resolve each frame.
+      if (state.targetUnitId) {
+        const target = this._entities.get(state.targetUnitId);
+        if (target) {
+          state.target = {
+            x: this._tileToPhysics(target.position.x),
+            y: this._tileToPhysics(target.position.z),
+          };
+        } else {
+          // Target gone — drop pursuit.
+          state.targetUnitId = null;
+          state.target = null;
+        }
       }
 
+      // 2. If no script target AND the type has wandering AI, pick a random wander target.
+      const ai = typeDef?.ai;
+      const wanderEnabled = ai?.enabled && ai.idleBehaviour === 'wander';
+      if (!state.target && wanderEnabled) {
+        const maxTravelPhys = (Number(ai.maxTravelDistance) || 200) / GameServer.SCALE_RATIO;
+        const reached =
+          state.target &&
+          Math.hypot((state.target as any).x - body.position.x, (state.target as any).y - body.position.y) < 0.4;
+        if (!state.target || reached || state.pickCooldownMs <= 0) {
+          const angle = Math.random() * Math.PI * 2;
+          const dist = Math.random() * maxTravelPhys;
+          state.target = {
+            x: body.position.x + Math.cos(angle) * dist,
+            y: body.position.y + Math.sin(angle) * dist,
+          };
+          state.pickCooldownMs = 2000 + Math.random() * 3000;
+        }
+      }
+
+      // 3. If we still have no target, this unit is idle — clear velocity so it doesn't
+      //    drift from a previous push.
+      if (!state.target) {
+        body.linearVelocity = new Vec2(0, 0);
+        continue;
+      }
+
+      // 4. Drive toward the target. Stop within `attackRange` if pursuing a unit.
       const dx = state.target.x - body.position.x;
       const dy = state.target.y - body.position.y;
       const mag = Math.hypot(dx, dy);
-      const speed = (typeDef.attributes?.speed?.value as number) || 10;
-      const AI_MOVE_SCALE = 0.25;
-      if (mag > 0.1) {
-        const vx = (dx / mag) * speed * AI_MOVE_SCALE;
-        const vy = (dy / mag) * speed * AI_MOVE_SCALE;
+      const speed = (typeDef?.attributes?.speed?.value as number) || (unit.stats?.speed as number) || 10;
+      const attackRangePhys = state.targetUnitId
+        ? (Number(ai?.attackRange ?? typeDef?.attackRange ?? 60) / GameServer.SCALE_RATIO)
+        : 0.4;
+      if (mag > attackRangePhys) {
+        // Same convention as the player branch: raw `direction * speed` in physics units.
+        const vx = (dx / mag) * speed;
+        const vy = (dy / mag) * speed;
         body.linearVelocity = new Vec2(vx, vy);
+      } else {
+        body.linearVelocity = new Vec2(0, 0);
+        if (state.targetUnitId) {
+          // In range — face the target so renderer/animations align.
+          unit.rotation = Math.atan2(-dx, -dy);
+        } else {
+          // Reached a wander/move-to target; release it so wandering picks a new one.
+          state.target = null;
+        }
       }
     }
   }
@@ -1470,9 +1795,46 @@ export class GameServer {
       case MessageType.PlayerMouseMoved:
         this._onPlayerMouseMoved(clientId, msg.data as any);
         break;
+      case MessageType.PlayerSelectInventorySlot: {
+        // Click-driven slot select. Bypasses ability bindings — clicking a slot always
+        // selects it, even when the unit type binds digit keys to abilities.
+        const playerData = this._players.get(clientId);
+        if (!playerData) break;
+        const unit = this._entities.get(playerData.unitId);
+        if (!unit?.stats) break;
+        const slotIdx = Number((msg.data as { slot?: unknown })?.slot);
+        if (!Number.isFinite(slotIdx) || slotIdx < 0) break;
+        const invSize = Number(unit.stats.inventorySize) || 0;
+        if (slotIdx >= invSize || unit.stats.isHidden) break;
+        const inv = (unit.stats.inventory ?? []) as Array<{ id?: string }>;
+        unit.stats.currentSlot = slotIdx;
+        unit.stats.currentItemId = inv[slotIdx]?.id ?? null;
+        this._transport.broadcast({
+          type: MessageType.EntityStatsUpdate,
+          data: { [playerData.unitId]: { currentSlot: unit.stats.currentSlot, currentItemId: unit.stats.currentItemId } },
+        });
+        break;
+      }
       case MessageType.Ping:
         this._transport.send(clientId, { type: MessageType.Pong, data: msg.data });
         break;
+      case MessageType.PlayerChat: {
+        // Inbound chat from a client. Echo to everyone with the sender id, and fire
+        // `playerSendsChatMessage` so scripts can react (commands, filters, …).
+        const data = msg.data as { text?: string };
+        const text = String(data?.text ?? '').slice(0, 500);
+        const playerData = this._players.get(clientId);
+        if (!playerData || !text) break;
+        const playerId = playerData.player.id;
+        // Update the per-player last-message store the resolver reads.
+        this.scripts.actions.setLastChatForPlayer(playerId, text);
+        this._transport.broadcast({
+          type: MessageType.ChatMessage,
+          data: { text, fromPlayerId: playerId, system: false },
+        });
+        this.scripts.trigger('playerSendsChatMessage', { playerId, message: text });
+        break;
+      }
     }
   }
 
@@ -1511,7 +1873,9 @@ export class GameServer {
       }
     }
 
-    this._players.set(clientId, { player, clientId, unitId });
+    // Tag the auto-spawn unit as a placeholder so a later playerCameraTrackUnit can clean
+    // it up (see camera:trackUnit handler). Empty string when no unit type exists at all.
+    this._players.set(clientId, { player, clientId, unitId, placeholderUnitId: unitId || undefined });
 
     // Tell this client which player + unit are theirs so it can lock the camera on it
     // regardless of earlier NPC spawns or later scripted unit creations.
@@ -1557,19 +1921,34 @@ export class GameServer {
     const abilities = (typeDef as any)?.controls?.abilities as Record<string, any> | undefined;
     const binding = abilities?.[data.key];
     const slot = isDown ? binding?.keyDown : binding?.keyUp;
-    if (!slot) {
-      // Fallback: number keys 1..9 select inventory slot 0..8 when the unit type
-      // doesn't bind them. Karmaslayers' fighter has no number-key abilities, so
-      // without this the inventory bar can't be navigated.
+    // A binding is only "actionable" if it actually resolves to a runnable script or
+    // a cast event. Many games ship `keyDown: { scriptName: '', cost: {} }` shells —
+    // those are truthy objects but do nothing, and the previous `if (!slot)` check
+    // treated them as bound, blocking the digit→inventory fallback below.
+    const namespacedScriptId = slot?.scriptName && typeId ? `unitTypes:${typeId}:${slot.scriptName}` : null;
+    const slotHasScript = !!(
+      slot?.scriptName &&
+      (this.scripts.triggers.getScript(slot.scriptName) ||
+        (namespacedScriptId && this.scripts.triggers.getScript(namespacedScriptId)))
+    );
+    const slotHasCast = !!(
+      slot && ((slot.event === 'startCasting' && slot.abilityId) || slot.event === 'stopCasting')
+    );
+    if (!slot || (!slotHasScript && !slotHasCast)) {
+      // Number keys 1..9 select inventory slot 0..8 when the unit type doesn't bind
+      // them to a real action.
       if (isDown && /^[1-9]$/.test(data.key)) {
         const slotIdx = Number(data.key) - 1;
-        const inv = (unit.stats?.inventory ?? []) as Array<{ id?: string }>;
-        unit.stats.currentSlot = slotIdx;
-        unit.stats.currentItemId = inv[slotIdx]?.id ?? null;
-        this._transport.broadcast({
-          type: MessageType.EntityStatsUpdate,
-          data: { [playerData.unitId]: { currentSlot: unit.stats.currentSlot, currentItemId: unit.stats.currentItemId } },
-        });
+        const invSize = Number(unit.stats?.inventorySize) || 0;
+        if (slotIdx < invSize && !unit.stats?.isHidden) {
+          const inv = (unit.stats?.inventory ?? []) as Array<{ id?: string }>;
+          unit.stats.currentSlot = slotIdx;
+          unit.stats.currentItemId = inv[slotIdx]?.id ?? null;
+          this._transport.broadcast({
+            type: MessageType.EntityStatsUpdate,
+            data: { [playerData.unitId]: { currentSlot: unit.stats.currentSlot, currentItemId: unit.stats.currentItemId } },
+          });
+        }
       }
       return;
     }
@@ -1635,15 +2014,29 @@ export class GameServer {
     // Carry inventory metadata from the type definition (the renderer's HUD reads
     // these off EntityStatsUpdate to draw the slot bar). Default items, if the
     // type has any, get installed into a fresh inventory array.
+    //
+    // Taro stores `defaultItems` as an array of `{ key, name, value }` where `.key`
+    // is the itemType id (see Unit.js: `taro.game.cloneAsset('itemTypes', item.key)`).
+    // We accept both shapes — array-of-{key,name} (taro/canonical) and the older
+    // record-of-{itemTypeId} form some legacy games may still carry.
     const invSize = Number((typeDef as any).inventorySize) || 0;
-    const defaultItems = ((typeDef as any).defaultItems ?? {}) as Record<string, { itemTypeId?: string; quantity?: number }>;
+    const rawDefaults = (typeDef as any).defaultItems;
+    const defaultsList: Array<{ typeId?: string; quantity?: number }> = Array.isArray(rawDefaults)
+      ? (rawDefaults as Array<Record<string, unknown>>).map((d) => ({
+          typeId: (d?.key as string | undefined) ?? (d?.itemTypeId as string | undefined),
+          quantity: Number(d?.quantity) || 1,
+        }))
+      : Object.values((rawDefaults ?? {}) as Record<string, Record<string, unknown>>).map((d) => ({
+          typeId: (d?.itemTypeId as string | undefined) ?? (d?.key as string | undefined),
+          quantity: Number(d?.quantity) || 1,
+        }));
     const startingInv: Array<{ id: string; type: string; quantity: number }> = [];
-    for (const [, def] of Object.entries(defaultItems)) {
-      if (def?.itemTypeId) {
+    for (const def of defaultsList) {
+      if (def.typeId) {
         startingInv.push({
           id: `inv_${Math.random().toString(36).slice(2, 10)}`,
-          type: def.itemTypeId,
-          quantity: Number(def.quantity) || 1,
+          type: def.typeId,
+          quantity: def.quantity ?? 1,
         });
       }
     }
@@ -1696,6 +2089,143 @@ export class GameServer {
     const resolve = (v: unknown): unknown => runner.resolveValue(v, vars);
 
     switch (type) {
+      // destroyEntity — fire `initEntityDestroy` first so cleanup scripts (e.g. drop
+      // loot, increment kill counter) can read the entity's stats one last time, then
+      // tear down the body, drop from registries, and broadcast EntityDestroy.
+      case 'destroyEntity': {
+        const entityId = resolve(action.entity) as string;
+        if (!entityId) return;
+        const ent = this._entities.get(entityId);
+        if (!ent) return;
+        const cat = ent.category as string | undefined;
+        const ctx: Record<string, unknown> = { entityId };
+        if (cat === 'unit') ctx.unitId = entityId;
+        else if (cat === 'item') ctx.itemId = entityId;
+        else if (cat === 'projectile') ctx.projectileId = entityId;
+        this.scripts.trigger('initEntityDestroy', ctx);
+
+        // Physics body cleanup (also drops the body→entity reverse map entry).
+        const body = this._entityBodies.get(entityId);
+        if (body && this._physics) {
+          this._bodyToEntity.delete(body.raw.handle);
+          this._physics.destroyBody(body);
+          this._entityBodies.delete(entityId);
+        }
+        ent.destroy?.();
+        this._entities.delete(entityId);
+        this._regionMembership.delete(entityId);
+        this._aiUnitFacingRotation.delete(entityId);
+        this._transport.broadcast({
+          type: MessageType.EntityDestroy,
+          data: { entityId, timestamp: Date.now() },
+        });
+        return;
+      }
+
+      // moveEntity / teleportEntity — set the entity's position. taro pixel coords →
+      // engine tile units. teleport also flags the protocol so client interpolation skips.
+      case 'moveEntity':
+      case 'teleportEntity': {
+        const entityId = resolve(action.entity) as string;
+        const pos = resolve(action.position) as { x?: number; y?: number } | null;
+        if (!entityId || !pos) return;
+        const ent = this._entities.get(entityId);
+        if (!ent) return;
+        const px = (pos.x ?? 0) / this._tilePx;
+        const pz = (pos.y ?? 0) / this._tilePx;
+        ent.position.x = px;
+        ent.position.z = pz;
+        const body = this._entityBodies.get(entityId);
+        if (body) body.position = new Vec2(this._tileToPhysics(px), this._tileToPhysics(pz));
+        // Streamed via _streamTransforms next tick; no need for a special broadcast.
+        return;
+      }
+
+      // hideEntity / showEntity — toggle stats.isHidden + broadcast.
+      case 'hideEntity':
+      case 'showEntity': {
+        const entityId = resolve(action.entity) as string;
+        if (!entityId) return;
+        const ent = this._entities.get(entityId);
+        if (!ent?.stats) return;
+        ent.stats.isHidden = (type === 'hideEntity');
+        this._transport.broadcast({
+          type: MessageType.EntityStatsUpdate,
+          data: { [entityId]: { isHidden: ent.stats.isHidden } },
+        });
+        return;
+      }
+
+      // makeUnitPickupItem — move the item into the unit's inventory + fire the
+      // pickup triggers (both unitPicksUpItem and the per-type alias thisUnitPicksUpItem).
+      case 'makeUnitPickupItem': {
+        const unitId = resolve(action.unit ?? action.entity) as string;
+        const itemId = resolve(action.item) as string;
+        if (!unitId || !itemId) return;
+        const unit = this._entities.get(unitId);
+        const item = this._entities.get(itemId);
+        if (!unit?.stats || !item) return;
+        const inv = (unit.stats.inventory ?? (unit.stats.inventory = [])) as Array<{ id: string; type: string; quantity: number }>;
+        // Append (or stack with existing slot of same type).
+        const stack = inv.find(it => it.type === item.stats?.type);
+        if (stack) {
+          stack.quantity = (stack.quantity || 1) + (Number(item.stats?.quantity) || 1);
+        } else {
+          inv.push({
+            id: itemId,
+            type: (item.stats?.type as string) || '',
+            quantity: Number(item.stats?.quantity) || 1,
+          });
+        }
+        // Drop the world entity now that it's owned.
+        item.destroy?.();
+        this._entities.delete(itemId);
+        this._transport.broadcast({ type: MessageType.EntityDestroy, data: { entityId: itemId, timestamp: Date.now() } });
+        this._transport.broadcast({
+          type: MessageType.EntityStatsUpdate,
+          data: { [unitId]: { inventory: inv } },
+        });
+        this.scripts.trigger('unitPicksUpItem', { unitId, itemId });
+        // Per-entity-type alias — taro game data uses both names.
+        this.scripts.trigger('thisUnitPicksUpItem', { unitId, itemId });
+        return;
+      }
+
+      // dropItem — drop the unit's currently-held item back into the world at its position.
+      case 'dropItem': {
+        const unitId = resolve(action.entity ?? action.unit) as string;
+        if (!unitId) return;
+        const unit = this._entities.get(unitId);
+        if (!unit?.stats) return;
+        const inv = (unit.stats.inventory ?? []) as Array<{ id?: string; type?: string; quantity?: number }>;
+        const slotIdx = Number(unit.stats.currentSlot) || 0;
+        const itemRec = inv[slotIdx];
+        if (!itemRec?.type) return;
+        inv.splice(slotIdx, 1);
+        this._transport.broadcast({
+          type: MessageType.EntityStatsUpdate,
+          data: { [unitId]: { inventory: inv, currentItemId: null } },
+        });
+        // Spawn a fresh world item at the unit's position.
+        this.engine.events.emit('item:spawn', [
+          itemRec.type,
+          { x: unit.position.x * this._tilePx, y: unit.position.z * this._tilePx },
+        ]);
+        this.scripts.trigger('unitDroppedAnItem', { unitId, itemId: itemRec.id });
+        return;
+      }
+
+      // rotateEntityToRadians — direct rotation.
+      case 'rotateEntityToRadians': {
+        const entityId = resolve(action.entity) as string;
+        const angle = Number(resolve(action.angle ?? action.rotation));
+        if (!entityId || !Number.isFinite(angle)) return;
+        const ent = this._entities.get(entityId);
+        if (!ent) return;
+        ent.rotation = angle;
+        return;
+      }
+
       case 'createUnitAtPosition':
       case 'createProjectileAtPosition':
       case 'createItemAtPositionWithQuantity':

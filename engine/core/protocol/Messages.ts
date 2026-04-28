@@ -3,9 +3,11 @@ export enum MessageType {
   PlayerKeyDown = 'playerKeyDown',
   PlayerKeyUp = 'playerKeyUp',
   PlayerMouseMoved = 'playerMouseMoved',
+  PlayerSelectInventorySlot = 'playerSelectInventorySlot',
   JoinGame = 'joinGame',
   LeaveGame = 'leaveGame',
   Ping = 'ping',
+  PlayerChat = 'playerChat',
 
   // Server → Client
   InitConnection = 'initConnection',

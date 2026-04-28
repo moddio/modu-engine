@@ -31,6 +31,7 @@ export class LocalGameSession {
   private _localPlayer: Player | null = null;
   private _tickInterval: ReturnType<typeof setInterval> | null = null;
   private _tickRate = 20; // Hz
+  private _tilePx = 64;
 
   constructor(config: LocalGameConfig) {
     this._config = config;
@@ -52,6 +53,10 @@ export class LocalGameSession {
       this._tickRate = data.settings.frameRate as number;
     }
 
+    // Map tile size — used everywhere pixel↔tile coords cross. Single source of truth.
+    const tw = (data.map as any)?.tilewidth;
+    if (typeof tw === 'number' && tw > 0) this._tilePx = tw;
+
     // Load entity types
     this.types.load(data.entities);
 
@@ -64,6 +69,12 @@ export class LocalGameSession {
     if (data.scripts) {
       this.scripts.load(data.scripts as Record<string, ScriptDef>);
     }
+    // Per-type scripts (entityTouchesWall / entityLeavesRegion / itemIsUsed / …)
+    // live under data.entities.<category>.<id>.scripts in the migrated shape.
+    const e = data.entities ?? {};
+    this.scripts.loadEntityTypeScripts('unitTypes', e.unitTypes as Record<string, unknown> | undefined);
+    this.scripts.loadEntityTypeScripts('itemTypes', e.itemTypes as Record<string, unknown> | undefined);
+    this.scripts.loadEntityTypeScripts('projectileTypes', e.projectileTypes as Record<string, unknown> | undefined);
 
     // Listen for script actions that create/destroy entities
     this.engine.events.on('scriptAction', (type: unknown, action: unknown, vars: unknown) => {
@@ -82,6 +93,9 @@ export class LocalGameSession {
           attr.value = Math.max(attr.min, Math.min(attr.max, value));
           if (attr.value <= attr.min) {
             this.scripts.trigger('entityAttributeBecomesZero', { entityId, attributeId: attrId });
+            // Taro game data uses both `entityAttributeBecomes*` and `unitAttributeBecomes*`
+            // for the same event. The migrator preserves trigger names verbatim, so emit both.
+            this.scripts.trigger('unitAttributeBecomesZero', { entityId, attributeId: attrId });
             // Death/respawn: when health reaches zero, hide entity and respawn after 3s
             if (attrId === 'health') {
               this._config.onEntityDestroy?.(entityId);
@@ -101,7 +115,8 @@ export class LocalGameSession {
             }
           }
           if (attr.value >= attr.max) {
-            this.scripts.trigger('entityAttributeBecomesFulll', { entityId, attributeId: attrId });
+            this.scripts.trigger('entityAttributeBecomesFull', { entityId, attributeId: attrId });
+            this.scripts.trigger('unitAttributeBecomesFull', { entityId, attributeId: attrId });
           }
         }
       }
@@ -134,7 +149,8 @@ export class LocalGameSession {
           if (!key.startsWith('attr_')) continue;
           const attr = stats[key];
           if (attr.regenerateSpeed && attr.value < attr.max) {
-            attr.value = Math.min(attr.max, attr.value + attr.regenerateSpeed * (dt / 1000));
+            // Taro semantics: regenerateSpeed is added once every 200ms (5×/sec, AttributeComponent.js:34).
+            attr.value = Math.min(attr.max, attr.value + attr.regenerateSpeed * (dt / 200));
           }
         }
 
@@ -342,7 +358,7 @@ export class LocalGameSession {
     // Move projectile in direction
     const speed = (typeDef as any).speed || 300;
     const lifeSpan = (typeDef as any).lifeSpan || 2000;
-    const worldSpeed = speed / 64;
+    const worldSpeed = speed / this._tilePx;
     const vx = Math.sin(angle) * worldSpeed;
     const vz = -Math.cos(angle) * worldSpeed;
 

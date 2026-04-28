@@ -30,10 +30,27 @@ export class ConditionEvaluator {
     if (op === 'AND') return this.evaluate(aNode, resolveValue) && this.evaluate(bNode, resolveValue);
     if (op === 'OR')  return this.evaluate(aNode, resolveValue) || this.evaluate(bNode, resolveValue);
 
-    const left = resolveValue(aNode);
-    const right = resolveValue(bNode);
+    let left = resolveValue(aNode);
+    let right = resolveValue(bNode);
+
+    // Match taro ConditionComponent.js:25–58 semantics:
+    //  1. If both operands are entities (have `_id`), compare by `_id`.
+    //  2. For `==` only: undefined coerces to false; non-objects stringify before compare.
+    //     This is so region-object equality works (same value → same JSON) and so
+    //     `"5" == 5` evaluates the way taro scripts expect.
+    if (left && (left as any)._id !== undefined && right && (right as any)._id !== undefined) {
+      left = (left as any)._id;
+      right = (right as any)._id;
+    }
+
     switch (op) {
-      case '==': return left == right;
+      case '==': {
+        if (left === undefined) left = false;
+        if (right === undefined) right = false;
+        const ls = typeof left === 'object' ? left : JSON.stringify(left);
+        const rs = typeof right === 'object' ? right : JSON.stringify(right);
+        return ls == rs;
+      }
       case '!=': return left != right;
       case '<':  return Number(left) <  Number(right);
       case '>':  return Number(left) >  Number(right);

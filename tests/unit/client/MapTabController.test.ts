@@ -72,6 +72,30 @@ describe('MapTabController', () => {
       expect(setControlsSpy).toHaveBeenCalledWith({ pannable: false });
       expect(entityManager.runtimeGroup.visible).toBe(true);
     });
+
+    it('restores camera rotation/zoom changed while in map tab', () => {
+      camera.azimuth = 0.1;
+      camera.elevation = 1.2;
+      camera.distance = 1.5;
+      devMode.changeTab('map');
+      // user rotates + zooms inside map tab
+      camera.azimuth = 0.9;
+      camera.elevation = 0.5;
+      camera.distance = 4;
+      devMode.changeTab('entities');
+      expect(camera.azimuth).toBeCloseTo(0.1);
+      expect(camera.elevation).toBeCloseTo(1.2);
+      expect(camera.distance).toBeCloseTo(1.5);
+    });
+
+    it('restores camera target panned in map tab when not following', () => {
+      camera.target.set(2, 0, 3);
+      devMode.changeTab('map');
+      camera.applyPan(50, -30); // pans target while in map
+      devMode.changeTab('entities');
+      expect(camera.target.x).toBeCloseTo(2);
+      expect(camera.target.z).toBeCloseTo(3);
+    });
   });
 
   describe('tab transitions that don\'t involve map', () => {

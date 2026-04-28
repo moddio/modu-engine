@@ -15,14 +15,22 @@ interface TabChangePayload {
   to: string;
 }
 
+interface SavedView {
+  azimuth: number;
+  elevation: number;
+  distance: number;
+  target: THREE.Vector3;
+  followTarget: THREE.Vector3 | null;
+}
+
 /**
  * Subscribes to `DevMode`'s `'tabChange'` event and toggles map-tab side-effects:
- *  - on enter: snapshot follow target, unfollow, enable pan, hide runtime entities
- *  - on leave: restore follow target, disable pan, show runtime entities
+ *  - on enter: snapshot camera view (rotation/zoom/target/follow), unfollow, enable pan, hide runtime entities
+ *  - on leave: restore camera view, disable pan, show runtime entities
  * Regions stay visible throughout (handled by EntityManager's group split).
  */
 export class MapTabController {
-  private _savedFollowTarget: THREE.Vector3 | null = null;
+  private _savedView: SavedView | null = null;
   private _inMapTab = false;
   private _handle: EventHandle;
 
@@ -36,20 +44,34 @@ export class MapTabController {
 
   private _enter(): void {
     this._inMapTab = true;
-    this._savedFollowTarget = this.deps.camera.followTarget;
-    this.deps.camera.unfollow();
-    this.deps.camera.setControls({ pannable: true });
+    const camera = this.deps.camera;
+    this._savedView = {
+      azimuth: camera.azimuth,
+      elevation: camera.elevation,
+      distance: camera.distance,
+      target: camera.target.clone(),
+      followTarget: camera.followTarget,
+    };
+    camera.unfollow();
+    camera.setControls({ pannable: true });
     this.deps.entityManager.setRuntimeEntitiesVisible(false);
   }
 
   private _leave(): void {
     this._inMapTab = false;
-    if (this._savedFollowTarget) {
-      const t = this._savedFollowTarget;
-      this.deps.camera.follow(t.x, t.y, t.z);
-      this._savedFollowTarget = null;
+    const camera = this.deps.camera;
+    if (this._savedView) {
+      const saved = this._savedView;
+      camera.azimuth = saved.azimuth;
+      camera.elevation = saved.elevation;
+      camera.distance = saved.distance;
+      camera.target.copy(saved.target);
+      if (saved.followTarget) {
+        camera.follow(saved.followTarget.x, saved.followTarget.y, saved.followTarget.z);
+      }
+      this._savedView = null;
     }
-    this.deps.camera.setControls({ pannable: false });
+    camera.setControls({ pannable: false });
     this.deps.entityManager.setRuntimeEntitiesVisible(true);
   }
 
