@@ -1036,6 +1036,7 @@ export class GameServer {
     // inventories to resolve the firing unit.
     this.engine.events.on('item:use', (rawEid: unknown) => {
       const itemId = rawEid as string;
+      console.log('[fire] server item:use received', { rawEid, itemId });
       if (!itemId) return;
 
       let firingUnit: any = null;
@@ -1049,6 +1050,14 @@ export class GameServer {
       // World-item fallback: dropped/equipped items that *are* in `_entities` carry ownerId.
       const worldItem = this._entities.get(itemId) as { stats?: { ownerId?: string; type?: string } } | undefined;
       const unitId = firingUnit?.id ?? worldItem?.stats?.ownerId;
+      console.log('[fire] server item:use resolved', {
+        itemId,
+        firingUnitId: firingUnit?.id,
+        invEntry,
+        worldItemOwner: worldItem?.stats?.ownerId,
+        worldItemType: worldItem?.stats?.type,
+        unitId,
+      });
       this.scripts.trigger('itemIsUsed', { itemId, unitId });
       if (unitId) this.scripts.trigger('thisUnitUsesItem', { itemId, unitId });
 
@@ -1057,11 +1066,34 @@ export class GameServer {
       // projectile from the gun's tip in the unit's facing direction. Without this,
       // games that bind `button1` → `startUsingItem` produce no bullets unless they
       // also wire an explicit `itemIsUsed` script that calls `createProjectileAtPosition`.
+      const itemType = invEntry?.type
+        ? (this.types.get('itemTypes', invEntry.type) as Record<string, any> | null)
+        : null;
       if (firingUnit && invEntry?.type) {
-        const itemType = this.types.get('itemTypes', invEntry.type) as Record<string, any> | null;
+        console.log('[fire] server item:use gun-check', {
+          itemTypeId: invEntry.type,
+          isGun: itemType?.isGun,
+          projectileType: itemType?.projectileType,
+          willFire: !!(itemType?.isGun && itemType?.projectileType),
+        });
         if (itemType?.isGun && itemType?.projectileType) {
           this._fireGunProjectile(firingUnit, itemType);
         }
+      } else {
+        console.log('[fire] server item:use NO firing unit or invEntry.type', { firingUnit: !!firingUnit, invEntryType: invEntry?.type });
+      }
+
+      // Held-item swing tween — only meaningful for melee items (taro's `playEffect('use')`
+      // → `tween.start('swingCW', ...)` path). Skip when isGun is true: rotating a gun 180°
+      // around the unit's hand would look like the player flipping the barrel backwards;
+      // gun visuals are bullets + recoil, not a swing arc. `useItem` is a transient flag
+      // on the unit's stats; clients react in updateEntityStats and never persist it
+      // (mergeStatsUpdate just overwrites the prior value, and snapshot rebuild ignores it).
+      if (unitId && !itemType?.isGun) {
+        this._transport.broadcast({
+          type: MessageType.EntityStatsUpdate,
+          data: { [unitId]: { useItem: true } },
+        });
       }
     });
 
@@ -1267,6 +1299,19 @@ export class GameServer {
   start(): void {
     this.scripts.trigger('gameStart');
     this.initializeEntities();
+
+    // Legacy taro multiplayer servers tick continuously between `gameStart` and the
+    // first `playerJoinsGame` (network delay + server idle time means many seconds
+    // pass before any client connects), so periodic stabilization scripts on
+    // `secondTick` — e.g. `everySeconds` resetting `state` to `@statePrepare` while
+    // `playerCount < 2` — have already settled the world by the time anyone joins.
+    // Single-player flows synchronously send `JoinGame` on the same call stack as
+    // start(), so without an explicit warmup the joining player sees whatever
+    // transient state the `gameStart` cascade left behind (F0mB1BW05's `prepare` →
+    // `checkWho'sAlive` → `gameOver` chain leaves `state` at `@stateGameOver`,
+    // sending the joiner to `observers` instead of a team).
+    this.scripts.trigger('secondTick');
+
     this._loop.start();
   }
 
@@ -1354,18 +1399,58 @@ export class GameServer {
   private _fireGunProjectile(unit: any, itemType: Record<string, any>): void {
     const projectileTypeId = itemType.projectileType as string;
     const projTypeDef = this.types.get('projectileTypes', projectileTypeId) as Record<string, any> | null;
-    if (!projTypeDef) return;
+    console.log('[fire] _fireGunProjectile entry', {
+      unitId: unit?.id,
+      unitPos: { x: unit?.position?.x, z: unit?.position?.z },
+      unitRotation: unit?.rotation,
+      projectileTypeId,
+      hasProjTypeDef: !!projTypeDef,
+      bulletStartPosition: itemType.bulletStartPosition,
+      bulletForce: itemType.bulletForce,
+    });
+    if (!projTypeDef) { console.log('[fire] BAIL — no projTypeDef for', projectileTypeId); return; }
 
     const tilePx = this._tilePx;
     // bulletStartPosition is in pixels post-denormalize (3D) / raw (2D); convert to tile units.
     const bsp = (itemType.bulletStartPosition as { x?: number; y?: number } | undefined) || { x: 0, y: 0 };
     const offX = (Number(bsp.x) || 0) / tilePx;
     const offY = (Number(bsp.y) || 0) / tilePx;
-    const rot = Number(unit.rotation) || 0;
-    // Same transform as taro: bullet-pos.x = unit.x + bsp.x*cos − bsp.y*(−sin),
-    // bullet-pos.y = unit.y + bsp.x*sin − bsp.y*cos. (modu's position.z plays world-Y.)
-    const px = unit.position.x + offX * Math.cos(rot) + offY * Math.sin(rot);
-    const pz = unit.position.z + offX * Math.sin(rot) - offY * Math.cos(rot);
+    // Aim direction: when the gun has `controls.mouseBehaviour.rotateToFaceMouseCursor`,
+    // the gun (and its bullet) tracks the player's cursor independently of the unit's
+    // own rotation — same convention as taro Item.js (`this._rotate` = mouse angle for
+    // a face-mouse gun, then `applyForce(direction)`). Without this, units whose type
+    // sets `rotateToFaceMouseCursor: false` (like F0mB1BW05's redFighter) always have
+    // rotation 0 and every bullet fires straight north.
+    const itemFacesMouse = (itemType as any)?.controls?.mouseBehaviour?.rotateToFaceMouseCursor === true;
+    const mp = (unit as any)._mousePosition as { x?: number; y?: number } | undefined;
+    let rot = Number(unit.rotation) || 0;
+    let dbgDx = 0, dbgDy = 0;
+    if (itemFacesMouse && mp && typeof mp.x === 'number' && typeof mp.y === 'number') {
+      const dx = (mp.x as number) - unit.position.x;
+      const dy = (mp.y as number) - unit.position.z;
+      // Same atan2(-dx, -dy) convention as the player face-mouse loop above (commit 2eb0cfb).
+      rot = Math.atan2(-dx, -dy);
+      dbgDx = dx; dbgDy = dy;
+    }
+    console.log('[fire-aim]', {
+      mouse: mp ? { x: mp.x, y: mp.y } : null,
+      unit: { x: unit.position.x, z: unit.position.z },
+      dx: dbgDx, dy: dbgDy,
+      rot, rotDeg: rot * 180 / Math.PI,
+      itemFacesMouse,
+      forwardX: -Math.sin(rot), forwardZ: -Math.cos(rot),
+    });
+    // modu's rotation convention (set by `_onPlayerMouseMoved` and the face-mouse tick
+    // loop) is `atan2(-dx, -dy)`, chosen so a sprite at rot=0 has its head pointing to
+    // world −Z. Under this convention, the unit's local "forward" axis maps to world
+    // (−sin θ, −cos θ) and "right" maps to (cos θ, −sin θ). bsp.x is lateral offset,
+    // bsp.y is forward offset, so:
+    //   world_offset = bsp.x · right + bsp.y · forward
+    //                = (bsp.x·cos − bsp.y·sin,  −bsp.x·sin − bsp.y·cos)
+    // Using taro's pixel-space rotation here would mirror the bullet to the opposite
+    // side of the unit and fire it backwards.
+    const px = unit.position.x + offX * Math.cos(rot) - offY * Math.sin(rot);
+    const pz = unit.position.z - offX * Math.sin(rot) - offY * Math.cos(rot);
 
     const entityId = `prj_${Math.random().toString(36).slice(2, 10)}`;
     const ent = this.engine.spawn(entityId);
@@ -1381,6 +1466,7 @@ export class GameServer {
     };
     this._entities.set(entityId, ent);
 
+    console.log('[fire] broadcasting projectile EntityCreate', { entityId, px, pz, rot, projectileTypeId });
     this._transport.broadcast({
       type: MessageType.EntityCreate,
       data: buildEntityCreatePayload('projectile', entityId, px, pz, rot, { ...projTypeDef, type: projectileTypeId }),
@@ -1396,9 +1482,13 @@ export class GameServer {
         this._createEntityBody(entityId, px, pz, projTypeDef);
         const body = this._entityBodies.get(entityId);
         if (body) {
-          // taro convention: angle 0 = up; forward vector = (sin a, −cos a).
-          const v = speed / GameServer.SCALE_RATIO;
-          body.linearVelocity = new Vec2(Math.sin(rot) * v, -Math.cos(rot) * v);
+          // Forward direction under modu's `atan2(-dx,-dy)` rotation convention is
+          // (−sin θ, −cos θ) — see the position-offset comment above. bulletForce /
+          // projectile.speed is in raw "taro physics units" (pixels / SCALE_RATIO),
+          // which maps 1:1 to rapier's setLinearVelocity (same as how unit movement
+          // velocities are passed through, see line 335 comment); dividing by
+          // SCALE_RATIO again would produce a 30× too-slow bullet.
+          body.linearVelocity = new Vec2(-Math.sin(rot) * speed, -Math.cos(rot) * speed);
         }
       }
       const life = Number(projTypeDef.lifeSpan) || 0;
@@ -1437,10 +1527,25 @@ export class GameServer {
     // Damping — taro's damping values are calibrated for a different physics scale
     // (larger world, different tick cadence). In modu they crush velocity to a crawl,
     // so attenuate them heavily for dynamic bodies.
-    const damp = (bodyDef.linearDamping ?? 0) as number;
+    // 3D body schema stores damping as {x,y,z} per-axis objects; legacy 2D body uses a
+    // scalar. Rapier's setLinear/AngularDamping take a single scalar — passing an object
+    // (or NaN derived from `object * 0.1`) silently produces NaN positions and the body
+    // renders at (NaN,NaN,NaN), i.e. invisible. Normalize to a scalar before applying.
+    const toScalar = (v: unknown): number => {
+      if (v == null) return 0;
+      if (typeof v === 'number') return Number.isFinite(v) ? v : 0;
+      if (typeof v === 'object') {
+        const o = v as { x?: number; y?: number; z?: number };
+        const n = Number(o.x ?? o.y ?? o.z ?? 0);
+        return Number.isFinite(n) ? n : 0;
+      }
+      const n = Number(v);
+      return Number.isFinite(n) ? n : 0;
+    };
+    const damp = toScalar(bodyDef.linearDamping);
     const attenuated = bodyDef.type === 'dynamic' ? Math.min(damp * 0.1, 2) : damp;
     body.raw.setLinearDamping(attenuated);
-    body.raw.setAngularDamping(bodyDef.angularDamping ?? 0);
+    body.raw.setAngularDamping(toScalar(bodyDef.angularDamping));
 
     // Collider — exactly as taro: halfWidth / scaleRatio
     // Taro: entity._bounds2d.x / 2 / this._scaleRatio
@@ -2023,9 +2128,9 @@ export class GameServer {
 
   private _onPlayerInput(clientId: string, data: { device: string; key: string }, isDown: boolean): void {
     const playerData = this._players.get(clientId);
-    if (!playerData) return;
+    if (!playerData) { console.log('[fire] server input no playerData', { clientId, data, isDown }); return; }
     const unit = this._entities.get(playerData.unitId);
-    if (!unit) return;
+    if (!unit) { console.log('[fire] server input no unit', { clientId, unitId: playerData.unitId }); return; }
 
     if (!unit._inputKeys) unit._inputKeys = new Set();
     if (isDown) unit._inputKeys.add(data.key);
@@ -2041,6 +2146,14 @@ export class GameServer {
     const abilities = (typeDef as any)?.controls?.abilities as Record<string, any> | undefined;
     const binding = abilities?.[data.key];
     const slot = isDown ? binding?.keyDown : binding?.keyUp;
+    if (data.device === 'mouse' || /^button[1-3]$/.test(data.key)) {
+      console.log('[fire] server input', {
+        key: data.key, isDown, typeId,
+        hasAbilities: !!abilities,
+        abilityKeys: abilities ? Object.keys(abilities) : null,
+        binding, slot,
+      });
+    }
     // A binding is only "actionable" if it actually resolves to a runnable script or
     // a cast event. Many games ship `keyDown: { scriptName: '', cost: {} }` shells —
     // those are truthy objects but do nothing, and the previous `if (!slot)` check
@@ -2054,6 +2167,9 @@ export class GameServer {
     const slotHasCast = !!(
       slot && ((slot.event === 'startCasting' && slot.abilityId) || slot.event === 'stopCasting')
     );
+    if (data.device === 'mouse' || /^button[1-3]$/.test(data.key)) {
+      console.log('[fire] server input slot-decision', { key: data.key, slotHasScript, slotHasCast, willRunScript: !!slot && (slotHasScript || slotHasCast) });
+    }
     if (!slot || (!slotHasScript && !slotHasCast)) {
       // Number keys 1..9 select inventory slot 0..8 when the unit type doesn't bind
       // them to a real action.
@@ -2080,6 +2196,9 @@ export class GameServer {
       // as an entity script, then fall back to the bare id.
       const namespacedId = typeId ? `unitTypes:${typeId}:${slot.scriptName}` : null;
       const indexed = namespacedId && this.scripts.triggers.getScript(namespacedId);
+      if (data.device === 'mouse' || /^button[1-3]$/.test(data.key)) {
+        console.log('[fire] server running script', { scriptName: slot.scriptName, namespacedId, hasIndexed: !!indexed, hasBare: !!this.scripts.triggers.getScript(slot.scriptName), isEntityScript: !!slot.isEntityScript });
+      }
       if (slot.isEntityScript && indexed) {
         this.scripts.runScript(namespacedId!, { triggeredBy: { ...triggeredBy, entityTypeId: typeId, entityTypeCategory: 'unitTypes' }, thisEntity: playerData.unitId });
       } else if (this.scripts.triggers.getScript(slot.scriptName)) {

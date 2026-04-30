@@ -139,22 +139,10 @@ export class ScriptEngine {
 
   /** Run a specific script by ID */
   runScript(scriptId: string, vars: ActionVars = {}): void {
-    console.log('[runScript] called', { scriptId, vars });
     const script = this.triggers.getScript(scriptId);
-    if (!script) {
-      console.warn('[runScript] script not found', { scriptId, knownScriptCount: this.triggers.scriptCount });
-      return;
-    }
-    console.log('[runScript] running', {
-      scriptId,
-      name: (script as any).name,
-      parent: script.parent,
-      parentCategory: (script as any).parentCategory,
-      actionCount: Array.isArray(script.actions) ? script.actions.length : 0,
-    });
+    if (!script) return;
     try {
       this.actions.run(script.actions, vars);
-      console.log('[runScript] finished', { scriptId });
     } catch (err) {
       console.error('[runScript] threw', { scriptId, error: err });
       throw err;

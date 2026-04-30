@@ -291,9 +291,9 @@ export class ActionRunner {
 
       case 'startUsingItem':
       case 'useItemOnce': {
-        this._engine.events.emit('item:use', [
-          this._resolveValue(action.entity, vars),
-        ]);
+        const resolved = this._resolveValue(action.entity, vars);
+        console.log('[fire] action item:use', { action: action.type, rawEntity: action.entity, resolved });
+        this._engine.events.emit('item:use', [resolved]);
         return undefined;
       }
 
