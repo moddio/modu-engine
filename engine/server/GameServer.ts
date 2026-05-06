@@ -41,6 +41,7 @@ export class GameServer {
    *  that units moving below the speed threshold hold their prior heading
    *  instead of snapping to 0 after _syncPhysicsToEntities zeroes body.angle. */
   private _aiUnitFacingRotation = new Map<string, number>();
+  private _loggedClampOnce = false;
 
   constructor(transport: ServerTransport) {
     this._transport = transport;
@@ -892,21 +893,47 @@ export class GameServer {
     });
 
     // ability:cast — full cast pipeline:
-    //   1. Look up the ability def (data.abilities[abilityId]).
+    //   1. Look up the ability def (data.abilities[abilityId]) and merge in the
+    //      casting unit's `controls.unitAbilities[abilityId]` override. Karmaslayers
+    //      and many other taro games leave the top-level `eventScripts.startCasting`
+    //      empty and put the real script id on the per-unit-type override — without
+    //      this merge, pressing the bound key (e.g. space / E / right-click) casts
+    //      the ability cosmetically but runs no script.
     //   2. Enforce per-unit cooldown — pressing the bound key during cooldown is a no-op.
     //   3. Deduct cost.unitAttributes from the unit, cost.playerAttributes from its owner.
-    //   4. Run scriptName (legacy single-script) and eventScripts.startCasting.
+    //   4. Run eventScripts.startCasting. NOTE: do NOT execute `def.scriptName`. In taro
+    //      that field is editor metadata pointing at a related utility script; the editor
+    //      uses it for navigation, not the engine for execution. Karmaslayers and many
+    //      other games ship `scriptName: 'playerJoinsGame'` on unrelated abilities, so
+    //      running it on cast spawns a fresh unit each time the bound key is pressed.
     //   5. Broadcast a `castAbility` UICommand for client-side VFX.
     const abilities = (gameData as any).abilities as Record<string, any> | undefined;
+    // Build the effective ability def for a casting unit by layering the unit-type
+    // override on top of the top-level def. Override fields with empty string fall
+    // back to the top-level — taro's editor writes `""` for "use the default".
+    const resolveAbilityDef = (unit: any, abilityId: string): { def: any; typeId: string | null } | null => {
+      const top = abilities?.[abilityId];
+      const typeId = ((unit.stats as any)?.type as string | undefined) ?? null;
+      const typeDef = typeId ? (this.types.get('unitTypes', typeId) as Record<string, unknown> | null) : null;
+      const override = (typeDef as any)?.controls?.unitAbilities?.[abilityId];
+      if (!top && !override) return null;
+      const merged: Record<string, unknown> = { ...(top ?? {}) };
+      for (const [k, v] of Object.entries(override ?? {})) {
+        if (v === '' || v === undefined || v === null) continue;
+        merged[k] = v;
+      }
+      return { def: merged, typeId };
+    };
     this.engine.events.on('ability:cast', (rawUid: unknown, rawAbilityId: unknown) => {
       const uid = rawUid as string;
       const abilityId = rawAbilityId as string;
       if (!uid || !abilityId) return;
-      const def = abilities?.[abilityId];
-      if (!def) return;
-
       const unit = this._entities.get(uid);
       if (!unit) return;
+      const resolved = resolveAbilityDef(unit, abilityId);
+      if (!resolved) return;
+      const def = resolved.def;
+      const typeId = resolved.typeId;
 
       // Cooldown: per-(unitId, abilityId).
       const now = Date.now();
@@ -948,17 +975,24 @@ export class GameServer {
         }
       }
 
-      // Run the ability's cast scripts (both modern eventScripts.startCasting and
-      // legacy top-level scriptName). thisEntity = the unit casting.
+      // Run the ability's cast script. thisEntity = the unit casting. Per-unit-type
+      // scripts are indexed under `unitTypes:<typeId>:<scriptId>` (see TriggerManager
+      // .loadEntityTypeScripts), so when the override points at one, the bare-id
+      // lookup fails — try the namespaced id and pass entityType context so action
+      // resolution treats it as an entity script.
       const triggeredBy = { unitId: uid, playerId: ownerId, abilityId };
-      const runIfPresent = (scriptName: string | undefined) => {
-        if (!scriptName) return;
-        if (this.scripts.triggers.getScript(scriptName)) {
-          this.scripts.runScript(scriptName, { triggeredBy, thisEntity: uid });
+      const startCasting = def.eventScripts?.startCasting;
+      if (startCasting) {
+        const namespacedId = typeId ? `unitTypes:${typeId}:${startCasting}` : null;
+        if (this.scripts.triggers.getScript(startCasting)) {
+          this.scripts.runScript(startCasting, { triggeredBy, thisEntity: uid });
+        } else if (namespacedId && this.scripts.triggers.getScript(namespacedId)) {
+          this.scripts.runScript(namespacedId, {
+            triggeredBy: { ...triggeredBy, entityTypeId: typeId, entityTypeCategory: 'unitTypes' },
+            thisEntity: uid,
+          });
         }
-      };
-      runIfPresent(def.eventScripts?.startCasting);
-      runIfPresent(def.scriptName);
+      }
 
       // Forward to client for VFX (icon flash, animation hint, etc.).
       this._transport.broadcast({
@@ -969,12 +1003,22 @@ export class GameServer {
     this.engine.events.on('ability:stop', (rawUid: unknown, rawAbilityId: unknown) => {
       const uid = rawUid as string;
       const abilityId = rawAbilityId as string;
-      const def = abilities?.[abilityId];
       const unit = this._entities.get(uid);
       const ownerId = (unit?.stats as any)?.ownerId as string | undefined;
+      const resolved = unit ? resolveAbilityDef(unit, abilityId) : null;
       const triggeredBy = { unitId: uid, playerId: ownerId, abilityId };
-      if (def?.eventScripts?.stopCasting && this.scripts.triggers.getScript(def.eventScripts.stopCasting)) {
-        this.scripts.runScript(def.eventScripts.stopCasting, { triggeredBy, thisEntity: uid });
+      const stopCasting = resolved?.def?.eventScripts?.stopCasting as string | undefined;
+      const typeId = resolved?.typeId ?? null;
+      if (stopCasting) {
+        const namespacedId = typeId ? `unitTypes:${typeId}:${stopCasting}` : null;
+        if (this.scripts.triggers.getScript(stopCasting)) {
+          this.scripts.runScript(stopCasting, { triggeredBy, thisEntity: uid });
+        } else if (namespacedId && this.scripts.triggers.getScript(namespacedId)) {
+          this.scripts.runScript(namespacedId, {
+            triggeredBy: { ...triggeredBy, entityTypeId: typeId, entityTypeCategory: 'unitTypes' },
+            thisEntity: uid,
+          });
+        }
       }
       this._transport.broadcast({
         type: MessageType.UICommand,
@@ -1939,14 +1983,62 @@ export class GameServer {
     }
   }
 
-  /** Sync physics body positions back to entity positions (physics → tile coords) */
+  /** Sync physics body positions back to entity positions (physics → tile coords).
+   *  After the post-step sync, clamp unit/item/projectile positions to within the
+   *  map's tile bounds when their type def has `confinedWithinMapBoundaries !== false`
+   *  (default true). Mirrors taro Rapier2dComponent post-step boundary check
+   *  (moddio2/engine/components/physics/rapier/Rapier2dComponent.js) — without it,
+   *  units driven by held WASD keys march past the edge of the map indefinitely. */
   private _syncPhysicsToEntities(): void {
+    const map = this._gameData?.map as { width?: unknown; height?: unknown } | undefined;
+    const mapW = Number(map?.width) || 0;
+    const mapH = Number(map?.height) || 0;
+    const padding = 0.5; // half a tile, matching taro's tileWidth / 2
+    const minX = padding, maxX = mapW - padding;
+    const minZ = padding, maxZ = mapH - padding;
+    const canClamp = mapW > 0 && mapH > 0;
+    if (this._tickCount % 60 === 1 && !this._loggedClampOnce) {
+      console.log('[clamp] startup', { mapW, mapH, canClamp, bodies: this._entityBodies.size });
+      this._loggedClampOnce = true;
+    }
+
     for (const [entityId, body] of this._entityBodies) {
       const entity = this._entities.get(entityId);
       if (!entity) continue;
       const pos = body.position;
-      entity.position.x = this._physicsToTile(pos.x);
-      entity.position.z = this._physicsToTile(pos.y); // Physics Y → Three.js Z
+      let x = this._physicsToTile(pos.x);
+      let z = this._physicsToTile(pos.y); // Physics Y → Three.js Z
+
+      if (canClamp) {
+        const cat = entity.category as string | undefined;
+        if (cat === 'unit' || cat === 'item' || cat === 'projectile') {
+          const typeKey = cat === 'unit' ? 'unitTypes' : cat === 'item' ? 'itemTypes' : 'projectileTypes';
+          const typeId = entity.stats?.type as string | undefined;
+          const typeDef = typeId ? this.types.get(typeKey, typeId) : null;
+          // Default true when the field is unset — matches the editor's
+          // defaultGameObjects.service.ts (unit/item/projectile/prop all init to true).
+          const confined = typeDef ? (typeDef as any).confinedWithinMapBoundaries !== false : true;
+          if (confined) {
+            const cx = Math.max(minX, Math.min(x, maxX));
+            const cz = Math.max(minZ, Math.min(z, maxZ));
+            if (cx !== x || cz !== z) {
+              if (cat === 'unit' && this._tickCount % 30 === 0) {
+                console.log('[clamp]', entityId, typeId, 'pre=', { x, z }, 'post=', { x: cx, z: cz }, 'map=', { mapW, mapH });
+              }
+              x = cx;
+              z = cz;
+              // Snap the rapier body to the clamped position so the next physics
+              // step starts inside the map. Without this, a unit pressed against
+              // the boundary would re-leave on every tick and the clamp would
+              // run forever, also poisoning collision response with the wall layer.
+              body.position = new Vec2(this._tileToPhysics(x), this._tileToPhysics(z));
+            }
+          }
+        }
+      }
+
+      entity.position.x = x;
+      entity.position.z = z;
       entity.rotation = body.angle;
     }
   }
@@ -2073,29 +2165,23 @@ export class GameServer {
     player.mount(this.engine.root);
     this._entities.set(player.id, player);
 
-    // Spawn unit
+    // Spawn the placeholder at map center. Compute the position BEFORE spawnUnit
+    // so the EntityCreate broadcast (and the physics body created inside spawnUnit)
+    // carry the final transform. Setting position after spawnUnit returns broadcasts
+    // the unit at (0, 0) first — clients render it at the map's top-left tile and
+    // only slide it toward center on the next snapshot, visible to players as units
+    // appearing at the corner on join.
     const unitTypes = this.types.getAll('unitTypes');
     let unitId = '';
     if (unitTypes.size > 0) {
       const [firstTypeId, firstTypeDef] = unitTypes.entries().next().value as [string, Record<string, unknown>];
-      const unit = this.spawnUnit(firstTypeId, firstTypeDef, player.id);
+      const map = this._gameData?.map as { width?: number; height?: number } | undefined;
+      const spawnX = map ? (map.width ?? 10) / 2 : 0;
+      const spawnZ = map ? (map.height ?? 10) / 2 : 0;
+      const unit = this.spawnUnit(firstTypeId, firstTypeDef, player.id, { x: spawnX, z: spawnZ });
       unitId = unit.id;
       player.addUnit(unit.id);
       player.selectUnit(unit.id);
-
-      // Place at map center
-      if (this._gameData?.map) {
-        const mapW = (this._gameData.map as any).width || 10;
-        const mapH = (this._gameData.map as any).height || 10;
-        unit.position.x = mapW / 2;
-        unit.position.z = mapH / 2;
-
-        // Update physics body position to match (tile coords → physics coords)
-        const body = this._entityBodies.get(unitId);
-        if (body) {
-          body.position = new Vec2(this._tileToPhysics(mapW / 2), this._tileToPhysics(mapH / 2));
-        }
-      }
     }
 
     // Tag the auto-spawn unit as a placeholder so a later playerCameraTrackUnit can clean
@@ -2292,6 +2378,29 @@ export class GameServer {
           regenerateSpeed: attrDef.regenerateSpeed ?? 0, name: attrDef.name ?? attrId,
           color: attrDef.color ?? '#ffffff',
         };
+      }
+    }
+
+    // Seed entity-scope variables from `typeDef.variables` defaults so per-unit
+    // gate checks (`getValueOfEntityVariable('isChatFeedbackOn')`, etc.) resolve
+    // to the configured default instead of undefined. Without this, region-entry
+    // scripts that gate their "Press [Space] to enter ..." chat prompt on
+    // `isChatFeedbackOn == true` always evaluate the gate as `undefined == true`
+    // and silently skip the prompt. Mirror onto stats.variables so the EntityCreate
+    // broadcast carries them and clients can render unit-variable-driven UI.
+    const typeVars = (typeDef as any).variables as Record<string, any> | undefined;
+    if (typeVars) {
+      const statsVars: Record<string, unknown> = {};
+      for (const [name, def] of Object.entries(typeVars)) {
+        if (!def || typeof def !== 'object') continue;
+        if (!('default' in def) || (def as any).default === undefined) continue;
+        const val = (def as any).default;
+        const dt = (def as any).dataType as string | undefined;
+        this.scripts.variables.setEntityVar(unit.id, name, val, dt);
+        statsVars[name] = val;
+      }
+      if (Object.keys(statsVars).length > 0) {
+        (unit.stats as any).variables = { ...((unit.stats as any).variables ?? {}), ...statsVars };
       }
     }
 

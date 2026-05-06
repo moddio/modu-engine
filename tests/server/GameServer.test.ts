@@ -177,6 +177,112 @@ describe('GameServer', () => {
     expect(castedWith[1]).toBe('fireball');
   });
 
+  it('ability cast does NOT execute def.scriptName (taro editor metadata, not a cast hook)', async () => {
+    // Karmaslayers and many cloned games ship abilities with `scriptName: 'playerJoinsGame'`
+    // (or other unrelated trigger script ids). That field is editor metadata in taro — it
+    // points at a related utility script for navigation, not a cast handler. Running it on
+    // cast spawns a fresh unit every time the bound key is pressed (regression: pressing E
+    // in karmaslayers re-ran playerJoinsGame and created a new unit instead of picking up).
+    const data = {
+      ...TEST_GAME_DATA,
+      entities: {
+        ...TEST_GAME_DATA.entities,
+        unitTypes: {
+          'soldier': {
+            ...TEST_GAME_DATA.entities.unitTypes.soldier,
+            controls: {
+              ...((TEST_GAME_DATA.entities.unitTypes.soldier as any).controls ?? {}),
+              abilities: {
+                e: { keyDown: { event: 'startCasting', abilityId: 'pickupItem' } },
+              },
+            },
+          },
+        },
+      },
+      abilities: {
+        pickupItem: { name: 'pick up item', cooldown: 0, scriptName: 'sideEffect' },
+      },
+      scripts: {
+        ...TEST_GAME_DATA.scripts,
+        sideEffect: { name: 'Side Effect', triggers: [], actions: [
+          { type: 'setVariable', variableName: 'sideEffectRan', value: true },
+        ]},
+      },
+      variables: {
+        ...TEST_GAME_DATA.variables,
+        sideEffectRan: { value: false, type: 'boolean' },
+      },
+    };
+    await server.init(data as any);
+    server.start();
+
+    transport.client.onMessage(() => {});
+    await transport.client.connect();
+    transport.client.send({ type: MessageType.JoinGame, data: { playerName: 'Test', isMobile: false } });
+    transport.client.send({ type: MessageType.PlayerKeyDown, data: { device: 'keyboard', key: 'e' } });
+
+    expect(server.scripts.variables.getGlobal('sideEffectRan')).toBe(false);
+  });
+
+  it('ability cast runs the per-unit-type override eventScripts.startCasting', async () => {
+    // Karmaslayers and most other taro games leave `data.abilities[abilityId].eventScripts`
+    // empty and put the actual cast script id on the per-unit-type override at
+    // `unitTypes.<typeId>.controls.unitAbilities[abilityId].eventScripts.startCasting`.
+    // The override script lives under `unitTypes.<typeId>.scripts` and is indexed under
+    // `unitTypes:<typeId>:<scriptId>`. Without resolving the override and the namespaced
+    // index, pressing space (the canonical "interact" key) casts the ability cosmetically
+    // but runs no script.
+    const data = {
+      ...TEST_GAME_DATA,
+      entities: {
+        ...TEST_GAME_DATA.entities,
+        unitTypes: {
+          'soldier': {
+            ...TEST_GAME_DATA.entities.unitTypes.soldier,
+            controls: {
+              ...((TEST_GAME_DATA.entities.unitTypes.soldier as any).controls ?? {}),
+              abilities: {
+                space: { keyDown: { event: 'startCasting', abilityId: 'spaceAction' } },
+              },
+              unitAbilities: {
+                spaceAction: {
+                  name: 'space',
+                  eventScripts: { startCasting: 'onSpace', stopCasting: '' },
+                  cooldown: '',
+                  cost: { unitAttributes: {}, playerAttributes: {} },
+                },
+              },
+            },
+            scripts: {
+              onSpace: {
+                triggers: [],
+                actions: [{ type: 'setVariable', variableName: 'spacePressed', value: true }],
+              },
+            },
+          },
+        },
+      },
+      abilities: {
+        spaceAction: {
+          name: 'space',
+          eventScripts: { startCasting: '', stopCasting: '' },
+          cooldown: 250,
+          cost: { unitAttributes: {}, playerAttributes: {} },
+        },
+      },
+      variables: { ...TEST_GAME_DATA.variables, spacePressed: { value: false, type: 'boolean' } },
+    };
+    await server.init(data as any);
+    server.start();
+
+    transport.client.onMessage(() => {});
+    await transport.client.connect();
+    transport.client.send({ type: MessageType.JoinGame, data: { playerName: 'Test', isMobile: false } });
+    transport.client.send({ type: MessageType.PlayerKeyDown, data: { device: 'keyboard', key: 'space' } });
+
+    expect(server.scripts.variables.getGlobal('spacePressed')).toBe(true);
+  });
+
   it('setEntityVariable mutation rides EntityStatsUpdate to clients', async () => {
     await server.init(TEST_GAME_DATA as any);
     server.start();
