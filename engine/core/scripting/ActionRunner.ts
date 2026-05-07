@@ -292,7 +292,6 @@ export class ActionRunner {
       case 'startUsingItem':
       case 'useItemOnce': {
         const resolved = this._resolveValue(action.entity, vars);
-        console.log('[fire] action item:use', { action: action.type, rawEntity: action.entity, resolved });
         this._engine.events.emit('item:use', [resolved]);
         return undefined;
       }
@@ -1834,11 +1833,25 @@ export class ActionRunner {
         const ent = this._engine.findById(eid);
         return (ent as any)?.stats?.[`attr_${attr}`]?.min;
       }
-      case 'getSourceItemOfProjectile':
-      case 'getSourceUnitOfProjectile': {
-        const pid = this._resolveValue(obj.projectile, vars) as string;
+      case 'getSourceItemOfProjectile': {
+        // Script data nests the projectile under `entity:` (legacy editor shape)
+        // while ActionComponent's runtime emitted `projectile:`. Accept both —
+        // reading only `obj.projectile` left every Karmaslayers damage chain
+        // resolving to undefined because the editor-authored CdoRHe0nNK uses
+        // `entity:`, so the entire fighter-attacks-mob branch was gated off.
+        const pid = this._resolveValue(obj.projectile ?? obj.entity, vars) as string;
         const proj = this._engine.findById(pid);
         return (proj as any)?.stats?.sourceId;
+      }
+      case 'getSourceUnitOfProjectile': {
+        const pid = this._resolveValue(obj.projectile ?? obj.entity, vars) as string;
+        const proj = this._engine.findById(pid);
+        // The firing unit. _fireGunProjectile stamps both `sourceUnitId` (the
+        // firing unit) and `sourceId` (the firing item record); the previous
+        // implementation collapsed both resolvers onto `sourceId`, so any
+        // script using `getSourceUnitOfProjectile` got the item id instead of
+        // the unit id and downstream `getOwner(...)` calls returned nothing.
+        return (proj as any)?.stats?.sourceUnitId ?? (proj as any)?.stats?.sourceId;
       }
       case 'getProjectileTypeOfProjectile': {
         const pid = this._resolveValue(obj.projectile, vars) as string;
@@ -1904,6 +1917,13 @@ export class ActionRunner {
         const x1 = x0 + (region.width ?? 0) / px, z1 = z0 + (region.height ?? 0) / px;
         return this._engine.root.children
           .filter(e => SCRIPT_ENTITY_CATEGORIES.has(e.category))
+          // Held items live on as hidden entities at their original world
+          // position so resolvers (`getOwnerOfItem`, attribute lookups, etc.)
+          // can still find them after pickup. Without skipping them here, the
+          // pickup script's `forAllEntities(entitiesInRegion)` re-grabs the
+          // same hidden item on every subsequent E press, stacking its quantity
+          // by 1 each time — a free-duplication exploit.
+          .filter(e => !((e as any).stats?.isHidden))
           .filter(e => {
             const p = (e as any).position;
             return p && p.x >= x0 && p.x <= x1 && p.z >= z0 && p.z <= z1;
@@ -2233,7 +2253,14 @@ export class ActionRunner {
           Number(this._resolveValue(obj.num2 ?? obj.b ?? obj.value2, vars)) || 0,
         );
       case 'getAttributeTypeOfAttribute':
-        return this._resolveValue(obj.attribute, vars);
+        // Editor-authored scripts pass the attribute reference under `entity:` (the
+        // generic entity-targeted shape), while ActionRunner's tests / runtime emitters
+        // sometimes use `attribute:`. Reading only `obj.attribute` made every
+        // `unitAttributeBecomesZero` death script fail its top-level
+        // `getAttributeTypeOfAttribute(getTriggeringAttribute()) == "health"` gate
+        // (resolved to undefined), so mobs reached 0 HP but never ran the destroy/loot
+        // branch — they sat at 0 HP, still rendered, still colliding, looking unkillable.
+        return this._resolveValue(obj.attribute ?? obj.entity, vars);
       case 'getTriggeringAttribute':
         return (vars.triggeredBy as any)?.attributeId;
       case 'getItemAtSlot':
@@ -2279,8 +2306,20 @@ export class ActionRunner {
         return ent?.lastRaycastCollisionPosition ?? null;
       }
       case 'playersAreHostile': {
-        // No relationship data wired yet — default to neutral.
-        return false;
+        const a = this._resolveValue(obj.playerA, vars) as string;
+        const b = this._resolveValue(obj.playerB, vars) as string;
+        if (!a || !b || a === b) return false;
+        // Default any two distinct players to hostile. Taro tracks per-player
+        // friend / neutral / hostile lists (Player.isFriendlyTo etc.); until
+        // those are wired here, returning `false` from this resolver gated off
+        // the entire damage chain in PvE/arena games — `unitTouchesProjectile`
+        // scripts in Karmaslayers, F0mB1BW05, celleater, etc. all read
+        // `playersAreHostile(firingPlayer, targetPlayer) == true` before
+        // applying damage. Treating distinct players as hostile by default
+        // matches taro's effective behaviour for games that don't author a
+        // friend list and only over-applies damage in the rare game that
+        // explicitly relies on neutral relations between distinct players.
+        return true;
       }
       case 'playerCustomInput':
         // Value from a client-submitted form; not wired in single-player yet.
@@ -2327,8 +2366,18 @@ export class ActionRunner {
         const ent = this._engine.findById(eid);
         // Engine stores positions in tile units; scripts work in pixels (taro convention).
         // Use the runtime mapTilePx — tilewidth varies per game (Karmaslayers = 16, others 32 / 64).
-        if (ent) return { x: ent.position.x * this.mapTilePx, y: ent.position.z * this.mapTilePx };
-        return { x: 0, y: 0 };
+        if (!ent) return { x: 0, y: 0 };
+        // Held inventory items are hidden at origin (0,0,0) — taro's model is that a
+        // carried item visually rides on its holder, so `getEntityPosition(heldItem)`
+        // should report the holder's location. Without this delegation, scripts like
+        // "press G to drop item" call `dropItemAtPosition(item, getEntityPosition(item))`
+        // and the dropped world item lands at the map origin instead of the player's feet.
+        const ownerId = (ent as any).stats?.ownerId as string | undefined;
+        if (ownerId && (ent as any).stats?.isHidden) {
+          const owner = this._engine.findById(ownerId);
+          if (owner) return { x: owner.position.x * this.mapTilePx, y: owner.position.z * this.mapTilePx };
+        }
+        return { x: ent.position.x * this.mapTilePx, y: ent.position.z * this.mapTilePx };
       }
 
       case 'distanceBetweenPositions': {
@@ -2359,8 +2408,21 @@ export class ActionRunner {
         const tb = (vars.triggeredBy ?? {}) as Record<string, unknown>;
         return tb.region ?? tb.regionId;
       }
-      case 'getEntityType':
+      case 'getEntityType': {
+        // Per-entity form (taro convention): `getEntityType({entity: ...})` returns the
+        // entity's category — `'unit'` / `'item'` / `'projectile'` / `'region'` / `'prop'`.
+        // Karmaslayers' "press E to pick up item" iterates `forAllEntities(entitiesInRegion)`
+        // and gates the `makeUnitPickupItem` action on `getEntityType(getSelectedEntity) == 'item'`;
+        // ignoring `obj.entity` collapses every comparison to `undefined == 'item'`, so the
+        // pickup action never fires. Only fall back to the trigger-context value when no
+        // entity is supplied (legacy no-arg shape).
+        if (obj.entity !== undefined) {
+          const eid = this._resolveValue(obj.entity, vars) as string;
+          const ent = this._engine.findById(eid);
+          return (ent as any)?.category;
+        }
         return vars.triggeredBy && (vars.triggeredBy as any).entityType;
+      }
 
       case 'getUnitTypeOfUnit': {
         const eid = this._resolveValue(obj.entity, vars) as string;

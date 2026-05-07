@@ -4,6 +4,7 @@ export enum MessageType {
   PlayerKeyUp = 'playerKeyUp',
   PlayerMouseMoved = 'playerMouseMoved',
   PlayerSelectInventorySlot = 'playerSelectInventorySlot',
+  PlayerSwapInventorySlot = 'playerSwapInventorySlot',
   JoinGame = 'joinGame',
   LeaveGame = 'leaveGame',
   Ping = 'ping',

@@ -408,6 +408,24 @@ describe('ActionRunner', () => {
     expect(vars.getGlobal('lp')).toBe('p1');
   });
 
+  // The legacy editor authors `getSourceItemOfProjectile` / `getSourceUnitOfProjectile`
+  // with the projectile reference under the `entity:` key (Karmaslayers' global
+  // `unitTouchesProjectile` damage script does this throughout). Reading only
+  // `obj.projectile` made the entire fighter-attacks-mob branch resolve to
+  // undefined, gating off the fallthrough damage and leaving every basic-weapon
+  // hit dealing 0 damage. Both shapes must work.
+  it('getSourceItemOfProjectile / getSourceUnitOfProjectile accept entity: key (editor shape)', () => {
+    const proj = engine.spawn('p1');
+    proj.category = 'projectile';
+    (proj as any).stats = { sourceId: 'inv_42', sourceUnitId: 'u_99' };
+    runner.run([
+      { type: 'setVariable', variableName: 'srcItem', value: { function: 'getSourceItemOfProjectile', entity: 'p1' } },
+      { type: 'setVariable', variableName: 'srcUnit', value: { function: 'getSourceUnitOfProjectile', entity: 'p1' } },
+    ]);
+    expect(vars.getGlobal('srcItem')).toBe('inv_42');
+    expect(vars.getGlobal('srcUnit')).toBe('u_99');
+  });
+
   it('entityWidth / entityHeight read from stats.bodies.default', () => {
     const u = new Unit('u1', { name: 'f', type: 't', health: 1, maxHealth: 1, speed: 0, ownerId: '', stateId: 'd', isHidden: false, opacity: 1, flip: 0, scale: 1 });
     (u.stats as any).bodies = { default: { width: 48, height: 96 } };
@@ -1081,6 +1099,22 @@ describe('ActionRunner', () => {
       expect(vars.getGlobal('vx')).toBe(3);
       expect(vars.getGlobal('vy')).toBe(-2);
       expect(vars.getGlobal('gone')).toBe(0);
+    });
+
+    it('getEntityType returns the entity category for the entity arg', () => {
+      // Karmaslayers' "press E to pick up item" iterates entitiesInRegion and
+      // gates `makeUnitPickupItem` on `getEntityType(getSelectedEntity) == 'item'`.
+      // Per-entity form must read `obj.entity` and return the entity's category.
+      const u = new Unit('u1', { name: 'f', type: 't', health: 1, maxHealth: 1, speed: 0, ownerId: '', stateId: 'd', isHidden: false, opacity: 1, flip: 0, scale: 1 });
+      u.mount(engine.root);
+      const item: any = { id: 'i1', category: 'item', stats: {} };
+      engine.findById = (id: string) => (id === 'u1' ? u : id === 'i1' ? item : null) as any;
+      runner.run([
+        { type: 'setVariable', variableName: 'utype', value: { function: 'getEntityType', entity: 'u1' } },
+        { type: 'setVariable', variableName: 'itype', value: { function: 'getEntityType', entity: 'i1' } },
+      ]);
+      expect(vars.getGlobal('utype')).toBe('unit');
+      expect(vars.getGlobal('itype')).toBe('item');
     });
   });
 

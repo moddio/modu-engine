@@ -384,6 +384,318 @@ describe('GameServer', () => {
     expect((server as any)._entities.get(placeholderId)).toBeTruthy();
   });
 
+  // Inventory items must be real entities (with category, ownerId, type, attr_*)
+  // mounted on engine.root so script resolvers (`getOwnerOfItem`, `getEntityAttribute`,
+  // `getItemTypeOfItem`) can find them via findById. Without an entity backing the
+  // inventory record, the global `unitTouchesProjectile` damage chain
+  // `getOwnerOfItem(getSourceItemOfProjectile(p))` resolves to undefined and no
+  // damage is applied.
+  it('giveItem registers the inventory record as a findable Item entity', async () => {
+    const data = JSON.parse(JSON.stringify(TEST_GAME_DATA));
+    data.entities.itemTypes = {
+      sword: { name: 'Sword', attributes: { dmg: { value: 25, min: 0, max: 100 } } },
+    };
+    data.entities.unitTypes.soldier.inventorySize = 4;
+    await server.init(data);
+    server.start();
+    transport.client.onMessage(() => {});
+    await transport.client.connect();
+    transport.client.send({ type: MessageType.JoinGame, data: { playerName: 'P', isMobile: false } });
+    const unit = [...(server as any)._entities.values()].find((e: any) => e.category === 'unit');
+    server.engine.events.emit('inventory:giveItem', [unit.id, 'sword', 1]);
+
+    const invId = (unit as any).stats.inventory[0].id;
+    const itemEnt = server.engine.findById(invId);
+    expect(itemEnt).toBeTruthy();
+    expect((itemEnt as any).category).toBe('item');
+    expect((itemEnt as any).stats.ownerId).toBe(unit.id);
+    expect((itemEnt as any).stats.type).toBe('sword');
+    // Item type attributes must be mirrored to attr_* slots so getEntityAttribute
+    // resolves to the configured value.
+    expect((itemEnt as any).stats.attr_dmg?.value).toBe(25);
+  });
+
+  // After granting an item to a unit whose currentSlot was empty (no defaultItems),
+  // currentItemId must update to the granted item's id. Karmaslayers grants the
+  // starting Slingshot via giveNewItemWithQuantityToUnit in playerJoinsGame; without
+  // this sync the cached null currentItemId from spawnUnit makes
+  // getItemCurrentlyHeldByUnit(unit) return null, so startUsingItem(currentItemId)
+  // emits item:use[null] and the click is silently dropped — items appear unusable.
+  it('giveItem updates currentItemId when it lands in the held slot', async () => {
+    const data = JSON.parse(JSON.stringify(TEST_GAME_DATA));
+    data.entities.itemTypes = { sword: { name: 'Sword' } };
+    data.entities.unitTypes.soldier.inventorySize = 4;
+    await server.init(data);
+    server.start();
+    const updates: any[] = [];
+    transport.client.onMessage((m) => {
+      if (m.type === MessageType.EntityStatsUpdate) updates.push(m.data);
+    });
+    await transport.client.connect();
+    transport.client.send({ type: MessageType.JoinGame, data: { playerName: 'P', isMobile: false } });
+    const unit = [...(server as any)._entities.values()].find((e: any) => e.category === 'unit');
+    expect((unit as any).stats.currentItemId).toBe(null);
+
+    server.engine.events.emit('inventory:giveItem', [unit.id, 'sword', 1]);
+
+    expect((unit as any).stats.currentItemId).not.toBe(null);
+    const grantedId = (unit as any).stats.inventory[0].id;
+    expect((unit as any).stats.currentItemId).toBe(grantedId);
+    // Last broadcast must include currentItemId so clients refresh the held-item HUD.
+    const last = updates[updates.length - 1];
+    expect(last[unit.id].currentItemId).toBe(grantedId);
+  });
+
+  // Drag-to-swap inventory: dropping a slot onto another exchanges the records,
+  // and broadcasts both the new inventory and (when the held slot was involved)
+  // the new currentItemId so the held-item HUD/sprite refresh in lock step.
+  it('PlayerSwapInventorySlot exchanges two slots and refreshes currentItemId', async () => {
+    const data = JSON.parse(JSON.stringify(TEST_GAME_DATA));
+    data.entities.itemTypes = { sword: { name: 'Sword' }, shield: { name: 'Shield' } };
+    data.entities.unitTypes.soldier.inventorySize = 4;
+    data.entities.unitTypes.soldier.defaultItems = [
+      { itemTypeId: 'sword', quantity: 1 },
+      { itemTypeId: 'shield', quantity: 1 },
+    ];
+    await server.init(data);
+    server.start();
+    const updates: any[] = [];
+    transport.client.onMessage((m) => {
+      if (m.type === MessageType.EntityStatsUpdate) updates.push(m.data);
+    });
+    await transport.client.connect();
+    transport.client.send({ type: MessageType.JoinGame, data: { playerName: 'P', isMobile: false } });
+
+    const unit = [...(server as any)._entities.values()].find((e: any) => e.category === 'unit');
+    const swordId = (unit as any).stats.inventory[0].id;
+    const shieldId = (unit as any).stats.inventory[1].id;
+    expect((unit as any).stats.currentSlot).toBe(0);
+    expect((unit as any).stats.currentItemId).toBe(swordId);
+
+    updates.length = 0;
+    transport.client.send({ type: MessageType.PlayerSwapInventorySlot, data: { from: 0, to: 1 } });
+
+    const inv = (unit as any).stats.inventory as Array<{ id: string; type: string }>;
+    expect(inv[0].id).toBe(shieldId);
+    expect(inv[1].id).toBe(swordId);
+    // Swapped into the held slot — currentItemId must follow.
+    expect((unit as any).stats.currentItemId).toBe(shieldId);
+    const last = updates[updates.length - 1];
+    expect(last[unit.id].inventory).toBeTruthy();
+    expect(last[unit.id].currentItemId).toBe(shieldId);
+  });
+
+  // Swapping into a slot past the dense tail: drag from a filled slot to an
+  // index that doesn't yet exist in the array. The handler must pad with nulls
+  // so the array length covers `to`, otherwise inv[currentSlot] reads
+  // `undefined` and currentItemId silently goes null.
+  it('PlayerSwapInventorySlot moves an item into an unfilled slot past array length', async () => {
+    const data = JSON.parse(JSON.stringify(TEST_GAME_DATA));
+    data.entities.itemTypes = { sword: { name: 'Sword' } };
+    data.entities.unitTypes.soldier.inventorySize = 4;
+    data.entities.unitTypes.soldier.defaultItems = [{ itemTypeId: 'sword', quantity: 1 }];
+    await server.init(data);
+    server.start();
+    transport.client.onMessage(() => {});
+    await transport.client.connect();
+    transport.client.send({ type: MessageType.JoinGame, data: { playerName: 'P', isMobile: false } });
+
+    const unit = [...(server as any)._entities.values()].find((e: any) => e.category === 'unit');
+    const swordId = (unit as any).stats.inventory[0].id;
+    expect((unit as any).stats.inventory).toHaveLength(1);
+
+    transport.client.send({ type: MessageType.PlayerSwapInventorySlot, data: { from: 0, to: 3 } });
+
+    const inv = (unit as any).stats.inventory as Array<{ id?: string } | null>;
+    expect(inv).toHaveLength(4);
+    expect(inv[0]).toBeNull();
+    expect(inv[3]?.id).toBe(swordId);
+    // currentSlot was 0, which is now empty — currentItemId must clear.
+    expect((unit as any).stats.currentItemId).toBeNull();
+  });
+
+  // Server-side validation: out-of-range or empty-source swaps are no-ops.
+  it('PlayerSwapInventorySlot ignores out-of-range, equal, and empty-source swaps', async () => {
+    const data = JSON.parse(JSON.stringify(TEST_GAME_DATA));
+    data.entities.itemTypes = { sword: { name: 'Sword' } };
+    data.entities.unitTypes.soldier.inventorySize = 4;
+    data.entities.unitTypes.soldier.defaultItems = [{ itemTypeId: 'sword', quantity: 1 }];
+    await server.init(data);
+    server.start();
+    transport.client.onMessage(() => {});
+    await transport.client.connect();
+    transport.client.send({ type: MessageType.JoinGame, data: { playerName: 'P', isMobile: false } });
+
+    const unit = [...(server as any)._entities.values()].find((e: any) => e.category === 'unit');
+    const swordId = (unit as any).stats.inventory[0].id;
+
+    // Out of range — past inventorySize.
+    transport.client.send({ type: MessageType.PlayerSwapInventorySlot, data: { from: 0, to: 99 } });
+    // Equal slots.
+    transport.client.send({ type: MessageType.PlayerSwapInventorySlot, data: { from: 0, to: 0 } });
+    // Empty source — slot 2 holds nothing.
+    transport.client.send({ type: MessageType.PlayerSwapInventorySlot, data: { from: 2, to: 0 } });
+
+    expect((unit as any).stats.inventory[0].id).toBe(swordId);
+    expect((unit as any).stats.inventory).toHaveLength(1);
+  });
+
+  // Karmaslayer-style melee weapons (knife, mace) tag the item as `isGun: true` and use
+  // a static-hitbox projectile (`speed: undefined`, `bulletForce: 0`, `lifeSpan: ~100ms`)
+  // that detects units in a sensor area at the spawn position. Body creation used to be
+  // gated behind `speed > 0`, so the hitbox spawned as a phantom data entity with no
+  // collider — `unitTouchesProjectile` never fired and every melee swing was a no-op.
+  // Body must be created regardless of speed so the sensor fixture's collision events
+  // still fire; only `linearVelocity` should depend on speed.
+  it('static-hitbox projectile (speed=0 isGun melee) gets a body so collisions fire', async () => {
+    const data = JSON.parse(JSON.stringify(TEST_GAME_DATA));
+    data.entities.itemTypes = {
+      knife: {
+        name: 'Knife',
+        isGun: true,
+        projectileType: 'hitbox',
+        bulletForce: 0,
+        bulletStartPosition: { x: 0, y: 0.5 },
+      },
+    };
+    data.entities.projectileTypes = {
+      hitbox: {
+        name: 'Hitbox',
+        // No `speed` — pure static hitbox.
+        lifeSpan: 100,
+        bodies: {
+          default: {
+            type: 'dynamic',
+            width: 2, height: 2,
+            fixtures: [{ shape: { type: 'circle' }, isSensor: true, density: 1 }],
+          },
+        },
+      },
+    };
+    data.entities.unitTypes.soldier.defaultItems = [{ itemTypeId: 'knife', quantity: 1 }];
+    await server.init(data);
+    server.start();
+    transport.client.onMessage(() => {});
+    await transport.client.connect();
+    transport.client.send({ type: MessageType.JoinGame, data: { playerName: 'P', isMobile: false } });
+    const unit = [...(server as any)._entities.values()].find((e: any) => e.category === 'unit');
+    expect(unit).toBeTruthy();
+
+    // Trigger an item:use for the held knife — `_fireGunProjectile` runs synchronously.
+    server.engine.events.emit('item:use', [(unit as any).stats.currentItemId]);
+
+    const proj = [...(server as any)._entities.values()].find((e: any) => e.category === 'projectile');
+    expect(proj).toBeTruthy();
+    // Critical: the projectile must have a physics body even with speed=0.
+    const body = (server as any)._entityBodies.get((proj as any).id);
+    expect(body).toBeTruthy();
+  });
+
+  // The melee hitbox (2-tile wide sensor) spawns at `bulletStartPosition` ahead of the
+  // firing unit but its radius overlaps the firing unit's own body. Without the self-
+  // collision filter in `fireUnitProjectilePair`, rapier's `collisionStart` event fires
+  // for the firing unit too, routing the global `unitTouchesProjectile` damage script
+  // to run with `triggeringUnit = firer`. In Karmaslayers the outer AND gate
+  // (`playerIsControlledByHuman(getOwner(triggeringUnit)) == false`) then fails and the
+  // entire chain no-ops — every melee swing reads as "no damage" even though the body
+  // is created and the sensor IS firing.
+  it('fireUnitProjectilePair skips trigger when projectile.sourceUnitId equals unit id', async () => {
+    const data = JSON.parse(JSON.stringify(TEST_GAME_DATA));
+    await server.init(data);
+    server.start();
+    transport.client.onMessage(() => {});
+    await transport.client.connect();
+    transport.client.send({ type: MessageType.JoinGame, data: { playerName: 'P', isMobile: false } });
+    const unit = [...(server as any)._entities.values()].find((e: any) => e.category === 'unit');
+    expect(unit).toBeTruthy();
+
+    // Spawn a "fired by this unit" projectile entity.
+    const projId = 'prj_self_test';
+    const proj = server.engine.spawn(projId);
+    (proj as any).category = 'projectile';
+    (proj as any).stats = { type: 'hitbox', sourceUnitId: (unit as any).id };
+    (server as any)._entities.set(projId, proj);
+
+    // Build rapier bodies for both at the same position so collisionStart fires
+    // when we step physics.
+    (server as any)._createEntityBody(projId, (unit as any).position.x, (unit as any).position.z, {
+      bodies: { default: { type: 'dynamic', width: 2, height: 2, fixtures: [{ shape: { type: 'circle' }, isSensor: true, density: 1 }] } },
+    });
+
+    // Track which trigger contexts fire.
+    const triggers: Array<{ name: string; unitId: string; projectileId?: string }> = [];
+    const orig = (server.scripts as any).trigger.bind(server.scripts);
+    (server.scripts as any).trigger = (name: string, ctx: any) => {
+      if (name === 'unitTouchesProjectile' || name === 'entityTouchesProjectile' || name === 'entityTouchesUnit') {
+        triggers.push({ name, unitId: ctx.unitId, projectileId: ctx.projectileId });
+      }
+      return orig(name, ctx);
+    };
+
+    // Step the physics world so the rapier collisionStart event fires for the
+    // overlapping unit/projectile pair.
+    (server as any)._physics.step(50);
+    await new Promise(r => setTimeout(r, 30));
+
+    // The unit-side `unitTouchesProjectile` for the firing unit must NOT fire —
+    // that's the guard. (The projectile-side `entityTouchesUnit` is suppressed by
+    // the same guard.)
+    const selfHits = triggers.filter(t => t.unitId === (unit as any).id && t.projectileId === projId);
+    expect(selfHits).toHaveLength(0);
+  });
+
+  // When a unit's `attr_health` drops to 0, the engine fires `unitAttributeBecomesZero`.
+  // The death script (e.g. Karmaslayers' e6UBM4PgBF) gates on
+  //   `getAttributeTypeOfAttribute(getTriggeringAttribute()) == "health"`
+  // and uses `getTriggeringUnit()` to identify the dead unit for `destroyEntity`.
+  // Two related bugs broke this:
+  //   1. The engine fired the trigger with only `entityId` set, so
+  //      `getTriggeringUnit()` (which reads `triggeredBy.unitId`) returned undefined
+  //      and `destroyEntity` got a no-op id.
+  //   2. The `getAttributeTypeOfAttribute` resolver only read `obj.attribute`, but the
+  //      editor-authored death script passes the attribute under `obj.entity` — so the
+  //      outer condition silently resolved to undefined and the destroy branch was
+  //      never reached even when (1) was fixed.
+  // Combined, these left mobs stuck at 0 HP, still rendered and still colliding.
+  it('zeroing health fires unitAttributeBecomesZero with unitId so death scripts can destroy', async () => {
+    const data = JSON.parse(JSON.stringify(TEST_GAME_DATA));
+    await server.init(data);
+    server.start();
+    transport.client.onMessage(() => {});
+    await transport.client.connect();
+    transport.client.send({ type: MessageType.JoinGame, data: { playerName: 'P', isMobile: false } });
+    const unit = [...(server as any)._entities.values()].find((e: any) => e.category === 'unit');
+    expect(unit).toBeTruthy();
+
+    let observed: any = null;
+    server.engine.events.on('unitAttributeBecomesZero', (ctx: any) => { observed = ctx; });
+
+    // Drop health to 0. The setEntityAttribute writeAttr clamps to min and fires the trigger.
+    server.engine.events.emit('setEntityAttribute', [(unit as any).id, 'health', 0]);
+
+    expect(observed).toBeTruthy();
+    // `unitId` must be present so getTriggeringUnit() resolves the dead unit.
+    expect(observed.unitId).toBe((unit as any).id);
+    expect(observed.attributeId).toBe('health');
+  });
+
+  // The legacy editor stores attribute references inside `entity:` (matching the
+  // generic entity-targeted shape) for `getAttributeTypeOfAttribute`. Reading only
+  // `obj.attribute` made every editor-authored death gate evaluate to undefined.
+  it('getAttributeTypeOfAttribute accepts legacy obj.entity shape', async () => {
+    const data = JSON.parse(JSON.stringify(TEST_GAME_DATA));
+    await server.init(data);
+    server.start();
+    const runner = (server as any).scripts.actions;
+    // Simulate the resolver call shape the death script uses:
+    //   {function: 'getAttributeTypeOfAttribute', entity: {function: 'getTriggeringAttribute'}}
+    const resolved = runner.resolveValue(
+      { function: 'getAttributeTypeOfAttribute', entity: { function: 'getTriggeringAttribute' } },
+      { triggeredBy: { attributeId: 'health' } },
+    );
+    expect(resolved).toBe('health');
+  });
+
   // Forward-compat: older games may carry a record-of-{itemTypeId} shape; accept it too.
   it('spawnUnit accepts legacy defaultItems record-of-itemTypeId shape', async () => {
     const data = JSON.parse(JSON.stringify(TEST_GAME_DATA));

@@ -2,6 +2,7 @@ import { Engine } from '../core/Engine';
 import { ScriptEngine } from '../core/scripting/ScriptEngine';
 import { EntityTypeRegistry } from '../core/game/EntityTypeRegistry';
 import { Unit } from '../core/game/Unit';
+import { Item } from '../core/game/Item';
 import { Player } from '../core/game/Player';
 import { PhysicsWorld } from '../core/physics/PhysicsWorld';
 import { Vec2 } from '../core/math/Vec2';
@@ -41,7 +42,6 @@ export class GameServer {
    *  that units moving below the speed threshold hold their prior heading
    *  instead of snapping to 0 after _syncPhysicsToEntities zeroes body.angle. */
   private _aiUnitFacingRotation = new Map<string, number>();
-  private _loggedClampOnce = false;
 
   constructor(transport: ServerTransport) {
     this._transport = transport;
@@ -231,15 +231,37 @@ export class GameServer {
       const entity = this._entities.get(entityId);
       const attr = entity?.stats?.[`attr_${attrId}`];
       if (!attr) return;
+      // Build a trigger context that resolves correctly via every shape the death/full
+      // scripts read: `getTriggeringUnit/Item/Projectile` look at `triggeredBy.unitId`
+      // / `.itemId` / `.projectileId` (per ActionRunner), and `thisEntity` falls back
+      // to whichever of those matches the entity's category. Firing only `entityId`
+      // left `getTriggeringUnit()` undefined, so the global death script
+      // `e6UBM4PgBF` (and Karmaslayers' loot/destroy chain hanging off it) couldn't
+      // identify the dead unit — the unit reached 0 HP, the script ran, but every
+      // `getTriggeringUnit` reference resolved to undefined and `destroyEntity` got
+      // a no-op id. Symptom: mob stuck at 0 HP, still rendered, still colliding.
+      const ent = this._entities.get(entityId);
+      const cat = (ent as any)?.category as string | undefined;
+      const triggerCtx: Record<string, unknown> = { entityId, attributeId: attrId };
+      if (cat === 'unit') triggerCtx.unitId = entityId;
+      else if (cat === 'item') triggerCtx.itemId = entityId;
+      else if (cat === 'projectile') triggerCtx.projectileId = entityId;
+      if (ent?.stats?.type) {
+        triggerCtx.entityTypeId = ent.stats.type;
+        triggerCtx.entityTypeCategory =
+          cat === 'unit' ? 'unitTypes' :
+          cat === 'item' ? 'itemTypes' :
+          cat === 'projectile' ? 'projectileTypes' : undefined;
+      }
       if (attr.value <= attr.min) {
         // Both event names: taro game data uses both spellings interchangeably and the
         // migrator preserves trigger names verbatim, so we have to fire both to match either.
-        this.scripts.trigger('entityAttributeBecomesZero', { entityId, attributeId: attrId });
-        this.scripts.trigger('unitAttributeBecomesZero', { entityId, attributeId: attrId });
+        this.scripts.trigger('entityAttributeBecomesZero', triggerCtx);
+        this.scripts.trigger('unitAttributeBecomesZero', triggerCtx);
       }
       if (attr.value >= attr.max) {
-        this.scripts.trigger('entityAttributeBecomesFull', { entityId, attributeId: attrId });
-        this.scripts.trigger('unitAttributeBecomesFull', { entityId, attributeId: attrId });
+        this.scripts.trigger('entityAttributeBecomesFull', triggerCtx);
+        this.scripts.trigger('unitAttributeBecomesFull', triggerCtx);
       }
     });
     this.engine.events.on('setEntityAttributeMax', (eId: unknown, aId: unknown, val: unknown) => {
@@ -389,6 +411,12 @@ export class GameServer {
       item.position.x = px; item.position.z = pz;
       (item as any).stats = { ...(typeDef as Record<string, unknown>), type: typeId, quantity: 1 };
       this._entities.set(entityId, item);
+      // Seed entity-scope variables from typeDef.variables defaults — same reason
+      // as the unit path in spawnUnit. Without this, scripts that gate behaviour on
+      // `getValueOfEntityVariable(item, 'foo')` (e.g. the "press G to drop"
+      // script's `dropPlaceAllowed == "anywhere"` check) always read undefined and
+      // silently no-op.
+      this._seedItemEntityVars(entityId, typeDef as Record<string, any>);
       // Build a physics body so unit sensors can detect the item entering them and the
       // engine can fire `itemEntersSensor` for cell-eats-food scripts (celleater).
       // Items live in `bodies.dropped` (units use `bodies.default`); _createEntityBody's
@@ -603,13 +631,17 @@ export class GameServer {
       if (!uid || !typeId) return;
       const unit = this._entities.get(uid);
       if (!unit?.stats) return;
-      const inv = (unit.stats.inventory ?? (unit.stats.inventory = [])) as Array<{ id: string; type: string; quantity: number }>;
+      const inv = (unit.stats.inventory ?? (unit.stats.inventory = [])) as Array<{ id: string; type: string; quantity: number } | null>;
       const id = `inv_${Math.random().toString(36).slice(2, 10)}`;
-      inv.push({ id, type: typeId, quantity: qty });
-      this._transport.broadcast({
-        type: MessageType.EntityStatsUpdate,
-        data: { [uid]: { inventory: inv } },
-      });
+      // Fill the first empty slot left by a prior drop; only grow the array
+      // when every existing slot is occupied, so giving an item after a drop
+      // refills the original slot instead of appearing past trailing items.
+      const newRec = { id, type: typeId, quantity: qty };
+      const emptyIdx = inv.findIndex(it => !it);
+      if (emptyIdx !== -1) inv[emptyIdx] = newRec;
+      else inv.push(newRec);
+      this._registerInventoryItemEntity(id, typeId, uid, qty);
+      this._syncCurrentItemAndBroadcast(uid, unit);
     });
 
     // --- Phase 3: entity stat mutations + visual UICommand forwards ---
@@ -756,16 +788,21 @@ export class GameServer {
       const unit = this._entities.get(uid);
       if (!unit?.stats) return;
       const slotIdx = Number(rawSlot) || 0;
-      const inv = (unit.stats.inventory ?? []) as Array<{ id?: string; type?: string }>;
+      const inv = (unit.stats.inventory ?? []) as Array<{ id?: string; type?: string } | null>;
       const item = inv[slotIdx];
       if (!item?.type) return;
-      inv.splice(slotIdx, 1);
+      // Leave the slot empty (null) rather than splicing — splice would shift every
+      // trailing slot one position forward, breaking the player's spatial mapping
+      // of "slot 3 is my potion" the moment they drop slot 0.
+      if (item.id) {
+        const carried = this._entities.get(item.id);
+        carried?.destroy?.();
+        this._entities.delete(item.id);
+      }
+      inv[slotIdx] = null;
       // Spawn world item at unit's position via the same path as item:spawn.
       this.engine.events.emit('item:spawn', [item.type, { x: unit.position.x * this._tilePx, y: unit.position.z * this._tilePx }]);
-      this._transport.broadcast({
-        type: MessageType.EntityStatsUpdate,
-        data: { [uid]: { inventory: inv } },
-      });
+      this._syncCurrentItemAndBroadcast(uid, unit);
     });
     this.engine.events.on('inventory:dropAt', (rawIid: unknown, rawPos: unknown) => {
       const iid = rawIid as string;
@@ -775,17 +812,25 @@ export class GameServer {
       if (!pos) return;
       // Detach from owner, spawn at the position.
       const typeId = item.stats.type as string;
-      this.engine.events.emit('item:spawn', [typeId, pos]);
-      // Optionally also remove from owner's inventory.
       const ownerId = item.stats.ownerId as string;
+      this.engine.events.emit('item:spawn', [typeId, pos]);
+      // Remove from owner's inventory and destroy the carried-item entity. Without
+      // destroying it, `_entities.get(iid)` keeps resolving and a stale
+      // `currentItemId` pointing at this id (the "press G to drop" script reads
+      // `getItemCurrentlyHeldByUnit` which returns `currentItemId` directly) lets
+      // the same id be dropped repeatedly — each press spawning a fresh world item.
       if (ownerId) {
         const owner = this._entities.get(ownerId);
         if (owner?.stats?.inventory) {
-          owner.stats.inventory = (owner.stats.inventory as Array<{ id?: string }>).filter(it => it.id !== iid);
-          this._transport.broadcast({
-            type: MessageType.EntityStatsUpdate,
-            data: { [ownerId]: { inventory: owner.stats.inventory } },
-          });
+          // Null the matching slot in place rather than filtering — `filter`
+          // shifts every trailing slot one position forward, which moves the
+          // player's other items out from under their slot indices.
+          const ownerInv = owner.stats.inventory as Array<{ id?: string } | null>;
+          const slotIdx = ownerInv.findIndex(it => it?.id === iid);
+          if (slotIdx !== -1) ownerInv[slotIdx] = null;
+          item.destroy?.();
+          this._entities.delete(iid);
+          this._syncCurrentItemAndBroadcast(ownerId, owner);
         }
       }
     });
@@ -793,11 +838,11 @@ export class GameServer {
       const uid = rawUid as string;
       const unit = this._entities.get(uid);
       if (!unit?.stats) return;
-      const inv = (unit.stats.inventory ?? []) as Array<{ type?: string }>;
+      const inv = (unit.stats.inventory ?? []) as Array<{ type?: string } | null>;
       const px = unit.position.x * this._tilePx;
       const py = unit.position.z * this._tilePx;
       for (const it of inv) {
-        if (it.type) this.engine.events.emit('item:spawn', [it.type, { x: px, y: py }]);
+        if (it?.type) this.engine.events.emit('item:spawn', [it.type, { x: px, y: py }]);
       }
       unit.stats.inventory = [];
       this._transport.broadcast({
@@ -1080,7 +1125,6 @@ export class GameServer {
     // inventories to resolve the firing unit.
     this.engine.events.on('item:use', (rawEid: unknown) => {
       const itemId = rawEid as string;
-      console.log('[fire] server item:use received', { rawEid, itemId });
       if (!itemId) return;
 
       let firingUnit: any = null;
@@ -1094,14 +1138,6 @@ export class GameServer {
       // World-item fallback: dropped/equipped items that *are* in `_entities` carry ownerId.
       const worldItem = this._entities.get(itemId) as { stats?: { ownerId?: string; type?: string } } | undefined;
       const unitId = firingUnit?.id ?? worldItem?.stats?.ownerId;
-      console.log('[fire] server item:use resolved', {
-        itemId,
-        firingUnitId: firingUnit?.id,
-        invEntry,
-        worldItemOwner: worldItem?.stats?.ownerId,
-        worldItemType: worldItem?.stats?.type,
-        unitId,
-      });
       this.scripts.trigger('itemIsUsed', { itemId, unitId });
       if (unitId) this.scripts.trigger('thisUnitUsesItem', { itemId, unitId });
 
@@ -1114,26 +1150,22 @@ export class GameServer {
         ? (this.types.get('itemTypes', invEntry.type) as Record<string, any> | null)
         : null;
       if (firingUnit && invEntry?.type) {
-        console.log('[fire] server item:use gun-check', {
-          itemTypeId: invEntry.type,
-          isGun: itemType?.isGun,
-          projectileType: itemType?.projectileType,
-          willFire: !!(itemType?.isGun && itemType?.projectileType),
-        });
         if (itemType?.isGun && itemType?.projectileType) {
-          this._fireGunProjectile(firingUnit, itemType);
+          this._fireGunProjectile(firingUnit, itemType, invEntry.id);
         }
-      } else {
-        console.log('[fire] server item:use NO firing unit or invEntry.type', { firingUnit: !!firingUnit, invEntryType: invEntry?.type });
       }
 
-      // Held-item swing tween — only meaningful for melee items (taro's `playEffect('use')`
-      // → `tween.start('swingCW', ...)` path). Skip when isGun is true: rotating a gun 180°
-      // around the unit's hand would look like the player flipping the barrel backwards;
-      // gun visuals are bullets + recoil, not a swing arc. `useItem` is a transient flag
-      // on the unit's stats; clients react in updateEntityStats and never persist it
-      // (mergeStatsUpdate just overwrites the prior value, and snapshot rebuild ignores it).
-      if (unitId && !itemType?.isGun) {
+      // Held-item swing tween. Taro's `Item.use()` calls `playEffect('use')`
+      // unconditionally — the per-item `animations.use` is what differentiates a
+      // sword swing from a gun recoil. Modu doesn't have per-item animation
+      // playback yet; the renderer falls back to a generic 180° swingCW tween.
+      // Karmaslayer-style games tag every weapon (knives, maces, slingshots,
+      // bows) as `isGun: true` to drive the hitbox-projectile pipeline, so
+      // gating the swing on `!isGun` swallowed the use animation for the entire
+      // weapon roster. Send the `useItem` cue for every fire — for a true barrel
+      // gun the swing is a stylization, not a functional issue (the bullet
+      // spawn position uses unit rotation, not the held-item sprite rotation).
+      if (unitId) {
         this._transport.broadcast({
           type: MessageType.EntityStatsUpdate,
           data: { [unitId]: { useItem: true } },
@@ -1247,6 +1279,16 @@ export class GameServer {
           const fireUnitProjectilePair = (unitId: string, projectileId: string) => {
             const unit = this._entities.get(unitId);
             const proj = this._entities.get(projectileId);
+            // Skip self-collision: the projectile spawns from `sourceUnitId` and its body
+            // is wide enough (knife hitbox is 2 tiles) to overlap the firing unit at the
+            // bsp offset. Without this filter the global damage script
+            // (`unitTouchesProjectile` → CdoRHe0nNK) runs with `triggeringUnit = firing
+            // unit`, the human-vs-AI gate `playerIsControlledByHuman(getOwner(...)) ==
+            // false` evaluates true (the firer IS human), the AND fails, and damage
+            // never reaches the actual target — every melee swing reads as "no damage".
+            // Taro's Box2dComponent ignores body pairs whose `groupIndex` matches; the
+            // equivalent here is filtering at the trigger source.
+            if ((proj as any)?.stats?.sourceUnitId === unitId) return;
             // Unit's perspective.
             this.scripts.trigger('unitTouchesProjectile', {
               unitId, projectileId,
@@ -1435,24 +1477,116 @@ export class GameServer {
     }
   }
 
+  /** Register a server-side Item entity for an inventory record so script resolvers
+   *  (`getOwnerOfItem`, `getEntityAttribute`, `getItemTypeOfItem`) can find it via
+   *  `engine.findById`. Inventory records on `unit.stats.inventory` are plain
+   *  `{id,type,quantity}` objects — without a backing entity, the global
+   *  `unitTouchesProjectile` damage script's chain
+   *  `getOwnerOfItem(getSourceItemOfProjectile(p))` resolves to undefined and no
+   *  damage is applied. Mirrors the type's `attributes` to `attr_<id>` slots so
+   *  `getEntityAttribute(item, 'ppf17VZEo2')` (Karmaslayers' "Damage" attribute on
+   *  weapons) returns the configured value. The entity is hidden and has no
+   *  physics body — purely a data carrier for resolvers. */
+  private _registerInventoryItemEntity(invId: string, typeId: string, ownerUnitId: string, quantity: number): void {
+    if (this._entities.has(invId)) {
+      // Pickup case: the world item is already in _entities. Convert it from a world
+      // drop to a carried record by setting ownerId and mirroring attributes.
+      const existing = this._entities.get(invId);
+      if (existing?.stats) {
+        existing.stats.ownerId = ownerUnitId;
+        existing.stats.quantity = quantity;
+        this._mirrorItemTypeAttributesToStats(existing.stats, typeId);
+      }
+      return;
+    }
+    const typeDef = this.types.get('itemTypes', typeId) as Record<string, any> | null;
+    const item = new Item(invId);
+    item.category = 'item';
+    (item as any).stats = {
+      ...(typeDef ?? {}),
+      type: typeId,
+      ownerId: ownerUnitId,
+      quantity,
+      isHidden: true,
+    };
+    this._mirrorItemTypeAttributesToStats((item as any).stats, typeId);
+    item.mount(this.engine.root);
+    this._entities.set(invId, item);
+    // Same reason as item:spawn: scripts that read entity vars on inventory items
+    // (e.g. drop-item bindings checking `dropPlaceAllowed == "anywhere"`) need
+    // the typeDef defaults seeded in the variable store.
+    if (typeDef) this._seedItemEntityVars(invId, typeDef);
+  }
+
+  /** Seed an item entity's variable-store entries from its typeDef.variables defaults.
+   *  Mirrors the unit path in spawnUnit. Without this, `getValueOfEntityVariable(item, ...)`
+   *  always returns undefined and any script that gates on item entity vars silently no-ops. */
+  private _seedItemEntityVars(entityId: string, typeDef: Record<string, any>): void {
+    const typeVars = typeDef?.variables as Record<string, any> | undefined;
+    if (!typeVars) return;
+    for (const [name, def] of Object.entries(typeVars)) {
+      if (!def || typeof def !== 'object') continue;
+      if (!('default' in def) || (def as any).default === undefined) continue;
+      const val = (def as any).default;
+      const dt = (def as any).dataType as string | undefined;
+      this.scripts.variables.setEntityVar(entityId, name, val, dt);
+    }
+  }
+
+  /** Mirror an item type's `attributes.<attrId>` defaults onto stats.`attr_<attrId>`
+   *  in the same shape as Unit attributes (see spawnUnit). Idempotent — won't
+   *  clobber an attribute that's already present (e.g. a script wrote a runtime
+   *  override before this is called for a world item that was later picked up). */
+  private _mirrorItemTypeAttributesToStats(stats: Record<string, any>, typeId: string): void {
+    const typeDef = this.types.get('itemTypes', typeId) as Record<string, any> | null;
+    const attrDefs = typeDef?.attributes as Record<string, any> | undefined;
+    if (!attrDefs) return;
+    for (const [attrId, attrDef] of Object.entries(attrDefs)) {
+      if (stats[`attr_${attrId}`]) continue;
+      stats[`attr_${attrId}`] = {
+        value: attrDef.value ?? 0,
+        min: attrDef.min ?? 0,
+        max: attrDef.max ?? 100,
+        regenerateSpeed: attrDef.regenerateSpeed ?? 0,
+        name: attrDef.name ?? attrId,
+        color: attrDef.color ?? '#ffffff',
+      };
+    }
+  }
+
+  /** Re-derive `currentItemId` from `inv[currentSlot]` after an inventory mutation
+   *  and broadcast both `inventory` and `currentItemId` together. The cached value
+   *  on `unit.stats.currentItemId` is otherwise only refreshed by spawnUnit and the
+   *  digit-key / makeUnitSelectItemAtSlot paths — `inventory:giveItem` and
+   *  `makeUnitPickupItem` left it stale at its spawn-time value (null for any unit
+   *  whose typeDef has no `defaultItems`). That stale null then made
+   *  `getItemCurrentlyHeldByUnit(unit)` return null, so `startUsingItem` actions
+   *  emitted `item:use[null]` and the click was silently dropped before any item
+   *  script ran or any projectile spawned. */
+  private _syncCurrentItemAndBroadcast(unitId: string, unit: any): void {
+    const inv = (unit.stats?.inventory ?? []) as Array<{ id?: string }>;
+    const currentSlot = Number(unit.stats?.currentSlot) || 0;
+    const newCurrentId = inv[currentSlot]?.id ?? null;
+    const update: Record<string, unknown> = { inventory: inv };
+    if (unit.stats.currentItemId !== newCurrentId) {
+      unit.stats.currentItemId = newCurrentId;
+      update.currentItemId = newCurrentId;
+    }
+    this._transport.broadcast({
+      type: MessageType.EntityStatsUpdate,
+      data: { [unitId]: update },
+    });
+  }
+
   /** Spawn one projectile from a unit's currently-held gun item type. Mirrors taro's
    *  built-in `Item.use()` gun branch (moddio2/src/gameClasses/Item.js). Position is
    *  `unit + bulletStartPosition` rotated by the unit's facing angle; velocity points
    *  along that angle scaled by `projectileType.speed` (or `itemType.bulletForce` as a
    *  fallback). Despawns after `projectileType.lifeSpan` ms. */
-  private _fireGunProjectile(unit: any, itemType: Record<string, any>): void {
+  private _fireGunProjectile(unit: any, itemType: Record<string, any>, sourceItemId?: string): void {
     const projectileTypeId = itemType.projectileType as string;
     const projTypeDef = this.types.get('projectileTypes', projectileTypeId) as Record<string, any> | null;
-    console.log('[fire] _fireGunProjectile entry', {
-      unitId: unit?.id,
-      unitPos: { x: unit?.position?.x, z: unit?.position?.z },
-      unitRotation: unit?.rotation,
-      projectileTypeId,
-      hasProjTypeDef: !!projTypeDef,
-      bulletStartPosition: itemType.bulletStartPosition,
-      bulletForce: itemType.bulletForce,
-    });
-    if (!projTypeDef) { console.log('[fire] BAIL — no projTypeDef for', projectileTypeId); return; }
+    if (!projTypeDef) return;
 
     const tilePx = this._tilePx;
     // bulletStartPosition is in pixels post-denormalize (3D) / raw (2D); convert to tile units.
@@ -1468,22 +1602,12 @@ export class GameServer {
     const itemFacesMouse = (itemType as any)?.controls?.mouseBehaviour?.rotateToFaceMouseCursor === true;
     const mp = (unit as any)._mousePosition as { x?: number; y?: number } | undefined;
     let rot = Number(unit.rotation) || 0;
-    let dbgDx = 0, dbgDy = 0;
     if (itemFacesMouse && mp && typeof mp.x === 'number' && typeof mp.y === 'number') {
       const dx = (mp.x as number) - unit.position.x;
       const dy = (mp.y as number) - unit.position.z;
       // Same atan2(-dx, -dy) convention as the player face-mouse loop above (commit 2eb0cfb).
       rot = Math.atan2(-dx, -dy);
-      dbgDx = dx; dbgDy = dy;
     }
-    console.log('[fire-aim]', {
-      mouse: mp ? { x: mp.x, y: mp.y } : null,
-      unit: { x: unit.position.x, z: unit.position.z },
-      dx: dbgDx, dy: dbgDy,
-      rot, rotDeg: rot * 180 / Math.PI,
-      itemFacesMouse,
-      forwardX: -Math.sin(rot), forwardZ: -Math.cos(rot),
-    });
     // modu's rotation convention (set by `_onPlayerMouseMoved` and the face-mouse tick
     // loop) is `atan2(-dx, -dy)`, chosen so a sprite at rot=0 has its head pointing to
     // world −Z. Under this convention, the unit's local "forward" axis maps to world
@@ -1505,12 +1629,19 @@ export class GameServer {
     (ent as any).stats = {
       ...projTypeDef,
       type: projectileTypeId,
+      // sourceId: the firing item entity id — what `getSourceItemOfProjectile`
+      //   resolves to (ActionRunner reads `proj.stats.sourceId`). Karmaslayers'
+      //   global `unitTouchesProjectile` damage script chains
+      //   `getOwnerOfItem(getSourceItemOfProjectile(p))` → `getEntityAttribute(p,
+      //   'ppf17VZEo2')` to compute hit damage; without this set, the chain
+      //   resolves to undefined and no damage applies.
+      // sourceUnitId: kept for engine internals; the firing unit's id.
+      sourceId: sourceItemId,
       sourceUnitId: unit.id,
       sourceItemType: (itemType as any).type ?? undefined,
     };
     this._entities.set(entityId, ent);
 
-    console.log('[fire] broadcasting projectile EntityCreate', { entityId, px, pz, rot, projectileTypeId });
     this._transport.broadcast({
       type: MessageType.EntityCreate,
       data: buildEntityCreatePayload('projectile', entityId, px, pz, rot, { ...projTypeDef, type: projectileTypeId }),
@@ -1519,11 +1650,22 @@ export class GameServer {
     this.scripts.trigger('entityCreated', { entityId, projectileId: entityId });
 
     if (this._physics) {
+      // Always create the projectile's physics body so its sensor fixture can fire
+      // collision events. Karmaslayer-style melee weapons (knife, mace, etc.) tag the
+      // item as `isGun: true` to drive the projectile pipeline as a hitbox, but their
+      // projectileType has `speed: undefined` and the item has `bulletForce: 0` — they
+      // are static hitboxes that detect units in a 2×2 sensor at the spawn position
+      // and rely on `lifeSpan` to despawn ~100ms later. Gating body creation behind
+      // `speed > 0` (the prior behaviour) skipped that body entirely, so the hitbox
+      // spawned as a phantom data entity with no collider — no `unitTouchesProjectile`
+      // event ever fires, no damage applies, and the entire melee roster of HRP5883Eb
+      // looks like "click does nothing". For travelling bullets (Slingshot etc.) the
+      // body is needed too; speed only governs whether we apply linear velocity.
+      this._createEntityBody(entityId, px, pz, projTypeDef);
       // Speed: projectileType.speed wins; fall back to item's bulletForce since taro guns
       // (e.g. F0mB1BW05's plasmaPistol) only set bulletForce on the item type.
       const speed = Number(projTypeDef.speed) || Number(itemType.bulletForce) || 0;
       if (speed > 0) {
-        this._createEntityBody(entityId, px, pz, projTypeDef);
         const body = this._entityBodies.get(entityId);
         if (body) {
           // Forward direction under modu's `atan2(-dx,-dy)` rotation convention is
@@ -1539,13 +1681,24 @@ export class GameServer {
       if (life > 0) {
         setTimeout(() => {
           const e = this._entities.get(entityId);
-          if (e) {
-            e.destroy?.();
-            this._entities.delete(entityId);
-            this._entityBodies.delete(entityId);
-            this._aiUnitFacingRotation.delete(entityId);
-            this._transport.broadcast({ type: MessageType.EntityDestroy, data: { entityId, timestamp: Date.now() } });
+          if (!e) return;
+          // Tear the rapier body down properly; previously this only removed the map
+          // entry, leaving the body (and its `_bodyToEntity` reverse-map slot) live
+          // in the physics world. Each fired projectile would leak one rapier body —
+          // a slow drip for travelling bullets, but a per-click leak for melee
+          // hitboxes that fire at 60Hz of click-spam, eventually grinding the
+          // physics world to a crawl as broadphase has to consider hundreds of stale
+          // colliders that overlap every other entity.
+          const body = this._entityBodies.get(entityId);
+          if (body && this._physics) {
+            this._bodyToEntity.delete(body.raw.handle);
+            this._physics.destroyBody(body);
           }
+          this._entityBodies.delete(entityId);
+          e.destroy?.();
+          this._entities.delete(entityId);
+          this._aiUnitFacingRotation.delete(entityId);
+          this._transport.broadcast({ type: MessageType.EntityDestroy, data: { entityId, timestamp: Date.now() } });
         }, life);
       }
     }
@@ -1699,9 +1852,18 @@ export class GameServer {
       for (const key of Object.keys(entity.stats)) {
         if (!key.startsWith('attr_')) continue;
         const attr = entity.stats[key];
-        if (attr.regenerateSpeed && attr.value < attr.max) {
+        if (attr.regenerateSpeed) {
           // Taro semantics: regenerateSpeed is added once every 200ms (5×/sec, AttributeComponent.js:34).
-          attr.value = Math.min(attr.max, attr.value + attr.regenerateSpeed * (dt / 200));
+          // Direction-aware bound check: positive regen pushes toward max, negative
+          // regen toward min — without the min clamp a "drop spam cooldown" attribute
+          // (regenerateSpeed: -0.25, min: 0) drifts negative on every tick instead of
+          // settling at 0, breaking scripts that gate on `attr == 0`.
+          const speed = Number(attr.regenerateSpeed);
+          const min = Number(attr.min ?? 0);
+          const max = Number(attr.max ?? Number.MAX_SAFE_INTEGER);
+          if ((speed > 0 && attr.value < max) || (speed < 0 && attr.value > min)) {
+            attr.value = Math.max(min, Math.min(max, attr.value + speed * (dt / 200)));
+          }
         }
       }
     }
@@ -1997,11 +2159,6 @@ export class GameServer {
     const minX = padding, maxX = mapW - padding;
     const minZ = padding, maxZ = mapH - padding;
     const canClamp = mapW > 0 && mapH > 0;
-    if (this._tickCount % 60 === 1 && !this._loggedClampOnce) {
-      console.log('[clamp] startup', { mapW, mapH, canClamp, bodies: this._entityBodies.size });
-      this._loggedClampOnce = true;
-    }
-
     for (const [entityId, body] of this._entityBodies) {
       const entity = this._entities.get(entityId);
       if (!entity) continue;
@@ -2022,9 +2179,6 @@ export class GameServer {
             const cx = Math.max(minX, Math.min(x, maxX));
             const cz = Math.max(minZ, Math.min(z, maxZ));
             if (cx !== x || cz !== z) {
-              if (cat === 'unit' && this._tickCount % 30 === 0) {
-                console.log('[clamp]', entityId, typeId, 'pre=', { x, z }, 'post=', { x: cx, z: cz }, 'map=', { mapW, mapH });
-              }
               x = cx;
               z = cz;
               // Snap the rapier body to the clamped position so the next physics
@@ -2132,6 +2286,37 @@ export class GameServer {
         });
         break;
       }
+      case MessageType.PlayerSwapInventorySlot: {
+        // Drag-driven slot swap. The client lets the player drop one inventory
+        // slot onto another to exchange the records (or move into an empty slot).
+        // Slot indices are positions in `unit.stats.inventory`; we pad with nulls
+        // when `to` lies past the dense tail so the held-slot index stays stable
+        // for downstream `inv[currentSlot]` resolution.
+        const playerData = this._players.get(clientId);
+        if (!playerData) break;
+        const unit = this._entities.get(playerData.unitId);
+        if (!unit?.stats || unit.stats.isHidden) break;
+        const data = msg.data as { from?: unknown; to?: unknown };
+        const from = Number(data?.from);
+        const to = Number(data?.to);
+        if (!Number.isFinite(from) || !Number.isFinite(to)) break;
+        if (from < 0 || to < 0 || from === to) break;
+        const invSize = Number(unit.stats.inventorySize) || 0;
+        if (from >= invSize || to >= invSize) break;
+        const inv = (unit.stats.inventory ?? (unit.stats.inventory = [])) as Array<{ id?: string } | null>;
+        // Source slot must contain something to drag; empty drags are a no-op.
+        if (!inv[from]) break;
+        // Pad to the target index with nulls so swapping into a "visually empty
+        // but past array length" slot doesn't leave gaps that JSON-serialize as
+        // missing entries the client can't index.
+        const maxIdx = Math.max(from, to);
+        while (inv.length <= maxIdx) inv.push(null);
+        const tmp = inv[from] ?? null;
+        inv[from] = inv[to] ?? null;
+        inv[to] = tmp;
+        this._syncCurrentItemAndBroadcast(playerData.unitId, unit);
+        break;
+      }
       case MessageType.Ping:
         this._transport.send(clientId, { type: MessageType.Pong, data: msg.data });
         break;
@@ -2214,9 +2399,9 @@ export class GameServer {
 
   private _onPlayerInput(clientId: string, data: { device: string; key: string }, isDown: boolean): void {
     const playerData = this._players.get(clientId);
-    if (!playerData) { console.log('[fire] server input no playerData', { clientId, data, isDown }); return; }
+    if (!playerData) return;
     const unit = this._entities.get(playerData.unitId);
-    if (!unit) { console.log('[fire] server input no unit', { clientId, unitId: playerData.unitId }); return; }
+    if (!unit) return;
 
     if (!unit._inputKeys) unit._inputKeys = new Set();
     if (isDown) unit._inputKeys.add(data.key);
@@ -2232,14 +2417,6 @@ export class GameServer {
     const abilities = (typeDef as any)?.controls?.abilities as Record<string, any> | undefined;
     const binding = abilities?.[data.key];
     const slot = isDown ? binding?.keyDown : binding?.keyUp;
-    if (data.device === 'mouse' || /^button[1-3]$/.test(data.key)) {
-      console.log('[fire] server input', {
-        key: data.key, isDown, typeId,
-        hasAbilities: !!abilities,
-        abilityKeys: abilities ? Object.keys(abilities) : null,
-        binding, slot,
-      });
-    }
     // A binding is only "actionable" if it actually resolves to a runnable script or
     // a cast event. Many games ship `keyDown: { scriptName: '', cost: {} }` shells —
     // those are truthy objects but do nothing, and the previous `if (!slot)` check
@@ -2253,9 +2430,6 @@ export class GameServer {
     const slotHasCast = !!(
       slot && ((slot.event === 'startCasting' && slot.abilityId) || slot.event === 'stopCasting')
     );
-    if (data.device === 'mouse' || /^button[1-3]$/.test(data.key)) {
-      console.log('[fire] server input slot-decision', { key: data.key, slotHasScript, slotHasCast, willRunScript: !!slot && (slotHasScript || slotHasCast) });
-    }
     if (!slot || (!slotHasScript && !slotHasCast)) {
       // Number keys 1..9 select inventory slot 0..8 when the unit type doesn't bind
       // them to a real action.
@@ -2282,9 +2456,6 @@ export class GameServer {
       // as an entity script, then fall back to the bare id.
       const namespacedId = typeId ? `unitTypes:${typeId}:${slot.scriptName}` : null;
       const indexed = namespacedId && this.scripts.triggers.getScript(namespacedId);
-      if (data.device === 'mouse' || /^button[1-3]$/.test(data.key)) {
-        console.log('[fire] server running script', { scriptName: slot.scriptName, namespacedId, hasIndexed: !!indexed, hasBare: !!this.scripts.triggers.getScript(slot.scriptName), isEntityScript: !!slot.isEntityScript });
-      }
       if (slot.isEntityScript && indexed) {
         this.scripts.runScript(namespacedId!, { triggeredBy: { ...triggeredBy, entityTypeId: typeId, entityTypeCategory: 'unitTypes' }, thisEntity: playerData.unitId });
       } else if (this.scripts.triggers.getScript(slot.scriptName)) {
@@ -2369,6 +2540,9 @@ export class GameServer {
     (unit.stats as any).inventory = startingInv;
     (unit.stats as any).currentSlot = 0;
     (unit.stats as any).currentItemId = startingInv[0]?.id ?? null;
+    for (const rec of startingInv) {
+      this._registerInventoryItemEntity(rec.id, rec.type, unit.id, rec.quantity);
+    }
 
     const attrDefs = typeDef.attributes as Record<string, any> | undefined;
     if (attrDefs) {
@@ -2547,33 +2721,71 @@ export class GameServer {
             });
           }
         } else {
-          const inv = (unit.stats.inventory ?? (unit.stats.inventory = [])) as Array<{ id: string; type: string; quantity: number }>;
-          // Append (or stack with existing slot of same type).
-          const stack = inv.find(it => it.type === itemStats?.type);
+          const inv = (unit.stats.inventory ?? (unit.stats.inventory = [])) as Array<{ id: string; type: string; quantity: number } | null>;
+          // Stack with an existing slot of the same type when present, otherwise
+          // fill the first empty slot (left behind by a prior drop). Empty slots
+          // are `null` since drop leaves the position in place rather than
+          // splicing.
+          //
+          // When the inventory is full of distinct types and the new item won't
+          // stack, REFUSE the pickup: bail out before hiding the world entity
+          // so the player can still walk back and try after dropping something.
+          // Without this guard, the new record was pushed past `inventorySize`
+          // into an invisible slot — the UI showed no change, but the world
+          // item had already been hidden, leaving the player unable to recover
+          // it from any slot.
+          // Try to stack first, but respect the type's `maxQuantity` cap (taro
+          // semantics: chests have maxQuantity:1, can never stack). If stacking
+          // would overflow OR no slot of the same type exists, fall through to
+          // placing the item in the first empty slot.
+          //
+          // When neither stacking nor a free slot is possible, REFUSE the
+          // pickup — bail before hiding the world entity so the player can
+          // walk back and try after dropping something. Without this guard the
+          // record was either pushed past `inventorySize` into an invisible
+          // slot, or stacked past `maxQuantity` past the type's cap, while the
+          // world item was already hidden — leaving the player unable to
+          // recover it from any slot.
+          const incomingQty = Number(itemStats?.quantity) || 1;
+          const maxQty = Number(itemStats?.maxQuantity) || Infinity;
+          const stack = inv.find((it): it is { id: string; type: string; quantity: number } =>
+            !!it && it.type === itemStats?.type && (Number(it.quantity) || 1) + incomingQty <= maxQty,
+          );
           if (stack) {
-            stack.quantity = (stack.quantity || 1) + (Number(itemStats?.quantity) || 1);
+            stack.quantity = (stack.quantity || 1) + incomingQty;
           } else {
-            inv.push({
+            const invSize = Number(unit.stats.inventorySize) || inv.length;
+            const emptyIdx = inv.findIndex(it => !it);
+            const haveRoom = emptyIdx !== -1 || inv.length < invSize;
+            if (!haveRoom) return;
+            const newRec = {
               id: itemId,
               type: (itemStats?.type as string) || '',
-              quantity: Number(itemStats?.quantity) || 1,
-            });
+              quantity: incomingQty,
+            };
+            if (emptyIdx !== -1) inv[emptyIdx] = newRec;
+            else inv.push(newRec);
           }
-          this._transport.broadcast({
-            type: MessageType.EntityStatsUpdate,
-            data: { [unitId]: { inventory: inv } },
-          });
+          // Convert the world item entity to a carried record: keep it in _entities
+          // (so script resolvers like getOwnerOfItem / getEntityAttribute / getItemTypeOfItem
+          // still find it) but stamp ownerId, mirror the type's attributes, and tear down
+          // its physics body. Without this the inventory item id has no backing entity and
+          // the global unitTouchesProjectile damage script
+          // (`getOwnerOfItem(getSourceItemOfProjectile(p))`) returns undefined → no damage.
+          this._registerInventoryItemEntity(itemId, (itemStats?.type as string) || '', unitId, Number(itemStats?.quantity) || 1);
+          this._syncCurrentItemAndBroadcast(unitId, unit);
         }
-        // Drop the world entity now that it's owned. Tear down the physics body too —
-        // dropped items have a sensor collider; leaving it would re-fire itemEntersSensor.
+        // Tear down the world physics body — picked-up items must not keep firing
+        // itemEntersSensor against units that brush them. The entity itself stays
+        // alive (hidden) so resolvers still resolve it; only the visible / collidable
+        // representation is destroyed on the wire.
         const itemBody = this._entityBodies.get(itemId);
         if (itemBody && this._physics) {
           this._bodyToEntity.delete(itemBody.raw.handle);
           this._physics.destroyBody(itemBody);
           this._entityBodies.delete(itemId);
         }
-        item.destroy?.();
-        this._entities.delete(itemId);
+        if (item?.stats) item.stats.isHidden = true;
         this._transport.broadcast({ type: MessageType.EntityDestroy, data: { entityId: itemId, timestamp: Date.now() } });
         this.scripts.trigger('unitPicksUpItem', { unitId, itemId });
         // Per-entity-type alias — taro game data uses both names.
@@ -2587,15 +2799,22 @@ export class GameServer {
         if (!unitId) return;
         const unit = this._entities.get(unitId);
         if (!unit?.stats) return;
-        const inv = (unit.stats.inventory ?? []) as Array<{ id?: string; type?: string; quantity?: number }>;
+        const inv = (unit.stats.inventory ?? []) as Array<{ id?: string; type?: string; quantity?: number } | null>;
         const slotIdx = Number(unit.stats.currentSlot) || 0;
         const itemRec = inv[slotIdx];
         if (!itemRec?.type) return;
-        inv.splice(slotIdx, 1);
-        this._transport.broadcast({
-          type: MessageType.EntityStatsUpdate,
-          data: { [unitId]: { inventory: inv, currentItemId: null } },
-        });
+        // Leave the slot empty (null) rather than splicing — splice would shift
+        // every trailing slot forward and reassign the player's other items to
+        // different slot indices.
+        inv[slotIdx] = null;
+        // Remove the carried-item entity (registered on pickup/give). A fresh world
+        // entity is spawned below — keeping the old one would leak a hidden item.
+        if (itemRec.id) {
+          const carried = this._entities.get(itemRec.id);
+          carried?.destroy?.();
+          this._entities.delete(itemRec.id);
+        }
+        this._syncCurrentItemAndBroadcast(unitId, unit);
         // Spawn a fresh world item at the unit's position.
         this.engine.events.emit('item:spawn', [
           itemRec.type,
