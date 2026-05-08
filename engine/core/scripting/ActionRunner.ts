@@ -2531,8 +2531,21 @@ export class ActionRunner {
       // --- Entity state/dimensions ---
       case 'getEntityState': {
         const eid = this._resolveValue(obj.entity, vars) as string;
-        const ent = this._engine.findById(eid);
-        return (ent as any)?.stats?.stateId ?? 'default';
+        const ent = this._engine.findById(eid) as any;
+        if (!ent) return 'default';
+        // Items have implicit state derived from inventory ownership in taro:
+        // no owner → 'dropped'; owner's currentItemId === item → 'selected';
+        // otherwise → 'unselected'. We never write `stateId` on item entities,
+        // so the bare `stats.stateId` lookup returned the fallback for *every*
+        // item — making `state != 'dropped'` checks (e.g. the Poop Helmet's
+        // per-second generator) run on ground-dropped items too.
+        if (ent.category === 'item') {
+          const ownerId = ent.stats?.ownerId as string | undefined;
+          if (!ownerId) return 'dropped';
+          const owner = this._engine.findById(ownerId) as any;
+          return owner?.stats?.currentItemId === eid ? 'selected' : 'unselected';
+        }
+        return ent.stats?.stateId ?? 'default';
       }
 
       case 'entityWidth':

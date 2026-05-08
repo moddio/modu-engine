@@ -6,7 +6,7 @@ import { Item } from '../core/game/Item';
 import { Player } from '../core/game/Player';
 import { PhysicsWorld } from '../core/physics/PhysicsWorld';
 import { Vec2 } from '../core/math/Vec2';
-import { CollisionCategory, DefaultCollisionMask } from '../core/physics/CollisionFilter';
+import { CollisionCategory, DefaultCollisionMask, categoryForEntityType } from '../core/physics/CollisionFilter';
 import { GameLoop } from './GameLoop';
 import { MessageType, encodeTransform } from '../core/protocol/Messages';
 import { buildEntityCreatePayload } from '../core/protocol/EntityStream';
@@ -421,7 +421,7 @@ export class GameServer {
       // engine can fire `itemEntersSensor` for cell-eats-food scripts (celleater).
       // Items live in `bodies.dropped` (units use `bodies.default`); _createEntityBody's
       // body resolution falls through to dropped automatically.
-      this._createEntityBody(entityId, px, pz, typeDef as Record<string, any>);
+      this._createEntityBody(entityId, px, pz, typeDef as Record<string, any>, 'item');
       // entityCreatedGlobal carries itemId so ActionRunner's listener captures it.
       this.scripts.trigger('entityCreatedGlobal', { entityId, itemId: entityId });
       this.scripts.trigger('entityCreated', { itemId: entityId });
@@ -1146,8 +1146,9 @@ export class GameServer {
       // projectile from the gun's tip in the unit's facing direction. Without this,
       // games that bind `button1` → `startUsingItem` produce no bullets unless they
       // also wire an explicit `itemIsUsed` script that calls `createProjectileAtPosition`.
-      const itemType = invEntry?.type
-        ? (this.types.get('itemTypes', invEntry.type) as Record<string, any> | null)
+      const itemTypeKey = invEntry?.type ?? worldItem?.stats?.type;
+      const itemType = itemTypeKey
+        ? (this.types.get('itemTypes', itemTypeKey) as Record<string, any> | null)
         : null;
       if (firingUnit && invEntry?.type) {
         if (itemType?.isGun && itemType?.projectileType) {
@@ -1155,20 +1156,23 @@ export class GameServer {
         }
       }
 
-      // Held-item swing tween. Taro's `Item.use()` calls `playEffect('use')`
-      // unconditionally — the per-item `animations.use` is what differentiates a
-      // sword swing from a gun recoil. Modu doesn't have per-item animation
-      // playback yet; the renderer falls back to a generic 180° swingCW tween.
-      // Karmaslayer-style games tag every weapon (knives, maces, slingshots,
-      // bows) as `isGun: true` to drive the hitbox-projectile pipeline, so
-      // gating the swing on `!isGun` swallowed the use animation for the entire
-      // weapon roster. Send the `useItem` cue for every fire — for a true barrel
-      // gun the swing is a stylization, not a functional issue (the bullet
-      // spawn position uses unit rotation, not the held-item sprite rotation).
-      if (unitId) {
+      // Held-item use tween. Taro's `Item.use()` calls `playEffect('use')`,
+      // which reads the item type's `effects.use.tween` and starts the named
+      // tween from its TweenComponent table (taro: `gs/taro/src/gameClasses/
+      // components/TweenComponent.js`). Real values: `swingCW` / `swingCCW`
+      // (rotate ±π), `swing360CW` (rotate +2π), `poke` (translate +50 along
+      // item-Y), `recoil` (translate −10 along item-Y); `""` and `"none"`
+      // mean no tween. Broadcast the tween *name* so the renderer can pick
+      // the right animation — sending `useItem: true` made every weapon play
+      // the same swingCW arc (knives, guns, bows all looked like a generic
+      // sword swing).
+      const useTween = itemType?.effects?.use?.tween;
+      const hasUseTween =
+        typeof useTween === 'string' && useTween !== '' && useTween !== 'none';
+      if (unitId && hasUseTween) {
         this._transport.broadcast({
           type: MessageType.EntityStatsUpdate,
-          data: { [unitId]: { useItem: true } },
+          data: { [unitId]: { useItem: useTween } },
         });
       }
     });
@@ -1303,6 +1307,21 @@ export class GameServer {
               unitId, projectileId, otherUnitId: unitId,
               entityTypeId: proj?.stats?.type, entityTypeCategory: 'projectileTypes',
             });
+            // taro/modd projectile types carry `destroyOnContactWith.units`. When
+            // true, the projectile despawns after the impact triggers run — that's
+            // why a stock `bullet` disappears on hit instead of phasing through and
+            // re-firing collisionStart for every overlapping tick (which in damage-
+            // on-contact games drains the mob's HP to zero in one frame). The
+            // damage application above already saw the contact, so destroying after
+            // it is safe and matches taro's "this projectile may be destroyed before
+            // inflicting damage" ordering note in Box2dComponent._triggerContactEvent.
+            const projTypeId = (proj as any)?.stats?.type as string | undefined;
+            const projTypeDef = projTypeId
+              ? (this.types.get('projectileTypes', projTypeId) as Record<string, any> | null)
+              : null;
+            if (projTypeDef?.destroyOnContactWith?.units) {
+              this._handleScriptAction('destroyEntity', { entity: projectileId }, {});
+            }
           };
           if (ca === 'unit' && cb === 'projectile') fireUnitProjectilePair(a.entityId, b.entityId);
           else if (ca === 'projectile' && cb === 'unit') fireUnitProjectilePair(b.entityId, a.entityId);
@@ -1661,7 +1680,7 @@ export class GameServer {
       // event ever fires, no damage applies, and the entire melee roster of HRP5883Eb
       // looks like "click does nothing". For travelling bullets (Slingshot etc.) the
       // body is needed too; speed only governs whether we apply linear velocity.
-      this._createEntityBody(entityId, px, pz, projTypeDef);
+      this._createEntityBody(entityId, px, pz, projTypeDef, 'projectile');
       // Speed: projectileType.speed wins; fall back to item's bulletForce since taro guns
       // (e.g. F0mB1BW05's plasmaPistol) only set bulletForce on the item type.
       const speed = Number(projTypeDef.speed) || Number(itemType.bulletForce) || 0;
@@ -1704,8 +1723,14 @@ export class GameServer {
     }
   }
 
-  /** Create a physics body for a dynamic entity — EXACTLY matching taro Rapier2dComponent.createBody() */
-  private _createEntityBody(entityId: string, x: number, z: number, typeDef: Record<string, any>): void {
+  /** Create a physics body for a dynamic entity — EXACTLY matching taro Rapier2dComponent.createBody().
+   *  `category` selects which `CollisionCategory.*` bit the body lives in; the mask is derived from
+   *  the body fixture's `collidesWith` (taro convention) and falls back to the per-category default.
+   *  Passing the wrong category collapses every entity into UNIT and forces overlap-resolution between
+   *  units and items — which is exactly the "dropped meat bounces off the player" bug, since item
+   *  types declare `collidesWith.units: false` but the engine ignored that and made the meat body
+   *  physically resolve against the unit it was spawned on top of. */
+  private _createEntityBody(entityId: string, x: number, z: number, typeDef: Record<string, any>, category: 'unit' | 'item' | 'projectile' | 'prop' = 'unit'): void {
     if (!this._physics) return;
     // taro stores itemTypes' colliders under `bodies.dropped` (since items spawn in the
     // "dropped on the ground" state) while units use `bodies.default`; the legacy 2D
@@ -1721,13 +1746,11 @@ export class GameServer {
       position: new Vec2(this._tileToPhysics(x), this._tileToPhysics(z)),
     });
 
-    // Damping — taro's damping values are calibrated for a different physics scale
-    // (larger world, different tick cadence). In modu they crush velocity to a crawl,
-    // so attenuate them heavily for dynamic bodies.
-    // 3D body schema stores damping as {x,y,z} per-axis objects; legacy 2D body uses a
-    // scalar. Rapier's setLinear/AngularDamping take a single scalar — passing an object
-    // (or NaN derived from `object * 0.1`) silently produces NaN positions and the body
-    // renders at (NaN,NaN,NaN), i.e. invisible. Normalize to a scalar before applying.
+    // Damping. 3D body schema stores damping as {x,y,z} per-axis objects; legacy
+    // 2D body uses a scalar. Rapier's setLinear/AngularDamping take a single
+    // scalar — passing an object (or NaN derived from `object * 0.1`) silently
+    // produces NaN positions and the body renders at (NaN,NaN,NaN), i.e.
+    // invisible. Normalize to a scalar before applying.
     const toScalar = (v: unknown): number => {
       if (v == null) return 0;
       if (typeof v === 'number') return Number.isFinite(v) ? v : 0;
@@ -1740,7 +1763,16 @@ export class GameServer {
       return Number.isFinite(n) ? n : 0;
     };
     const damp = toScalar(bodyDef.linearDamping);
-    const attenuated = bodyDef.type === 'dynamic' ? Math.min(damp * 0.1, 2) : damp;
+    // Units take continuous WASD impulses every tick, so the equilibrium
+    // velocity is `impulse / damping` — taro's calibrated damping values
+    // crush units to a crawl in modu's coordinate system, so we attenuate by
+    // 10× for unit bodies to keep them moving. Items and projectiles get one
+    // velocity push (loot scatter, projectile fire) and then coast on damping
+    // alone; attenuating their damping makes scattered loot slide ~10× longer
+    // than the data intends ("just dropped meat keeps moving"). For them, use
+    // the raw data value so the meat actually settles within its data-implied
+    // timescale (~exp(-damp) per second).
+    const attenuated = (bodyDef.type === 'dynamic' && category === 'unit') ? Math.min(damp * 0.1, 2) : damp;
     body.raw.setLinearDamping(attenuated);
     body.raw.setAngularDamping(toScalar(bodyDef.angularDamping));
 
@@ -1760,6 +1792,28 @@ export class GameServer {
     const sensorFix = typeDef.bodies?.default?.fixtures?.[0] ?? typeDef.bodies?.dropped?.fixtures?.[0];
     const isSensor = !!(fixture.isSensor ?? sensorFix?.isSensor);
 
+    // Build the collision mask from the body fixture's `collidesWith` (taro convention:
+    // `{ walls, units, items, projectiles }`, sometimes with singular aliases). Without
+    // this an item with `collidesWith.units: false` (e.g. HRP5883Eb meat) still gets the
+    // UNIT bit set in its mask, the meat body physically resolves against the unit it was
+    // dropped on top of, and Rapier shoves the meat ~1 tile away — the "bounces off
+    // immediately after dropped" bug. Fall back to the per-category default when the
+    // field is absent so legacy bodies without `collidesWith` keep their old behaviour.
+    const cat = categoryForEntityType(category);
+    const cw = fixture.collidesWith as Record<string, unknown> | undefined;
+    let mask = DefaultCollisionMask[cat] ?? 0xFFFF;
+    if (cw && typeof cw === 'object') {
+      mask = 0;
+      const flag = (k: string) => Boolean(cw[k] ?? cw[k.replace(/s$/, '')]);
+      if (flag('walls')) mask |= CollisionCategory.WALL;
+      if (flag('units')) mask |= CollisionCategory.UNIT;
+      if (flag('items')) mask |= CollisionCategory.ITEM;
+      if (flag('projectiles')) mask |= CollisionCategory.PROJECTILE;
+      // Props aren't represented in taro's `collidesWith` — keep the prop bit on so any
+      // entity that does want unit/wall collision also collides with props by default.
+      mask |= CollisionCategory.PROP;
+    }
+
     body.addCollider({
       shape: 'box',
       width: hw,
@@ -1768,8 +1822,8 @@ export class GameServer {
       friction: fixture.friction ?? 0,
       restitution: fixture.restitution ?? 0,
       isSensor,
-      category: CollisionCategory.UNIT,
-      mask: DefaultCollisionMask[CollisionCategory.UNIT],
+      category: cat,
+      mask,
     });
 
     // Lock rotation so body doesn't spin from collisions.
@@ -2202,20 +2256,27 @@ export class GameServer {
     for (const [id, entity] of this._entities) {
       if (!entity.alive) continue;
       if (entity.category === 'player') continue; // Players don't have transforms
-      // Items are stationary world drops (the spawn EntityCreate carries their position).
-      // Their dynamic Rapier bodies, with very small colliders + zero gravity, can drift
-      // to NaN over many integration steps; that NaN then poisons client interpolation
-      // (`obj.position += (target - pos) * lerp` → NaN forever) and the food meshes
-      // disappear. Skip them in the snapshot — moveEntity / teleportEntity broadcasts
-      // explicit transforms when scripts do move an item.
-      if (entity.category === 'item') continue;
+      // Hidden items (carried inventory entities at owner-position) don't have
+      // a visible representation on the client, so streaming their transform is
+      // wasted bandwidth and re-pulls the client mesh back from its hide-state.
+      if (entity.category === 'item' && (entity as any).stats?.isHidden) continue;
+      const x = entity.position.x;
+      const z = entity.position.z;
+      const r = entity.rotation || 0;
+      // Guard against NaN positions — Rapier dynamic bodies with very small
+      // colliders + zero gravity (notably food items) can integrate to NaN over
+      // many ticks; broadcasting the bad value poisons the client's interp
+      // (`obj.position += (target - pos) * lerp` → NaN forever) and the mesh
+      // vanishes. Skip the bad entity rather than the whole item category — a
+      // blanket category skip leaves *correct* positions on the floor too,
+      // which is exactly the bug the pig-loot script hit: `setVelocityOfEntityXY`
+      // scattered the meat server-side, the client visual stayed at the spawn
+      // point, and pressing E at the visible position missed an `entitiesInRegion`
+      // check that uses the drifted server coords.
+      if (!Number.isFinite(x) || !Number.isFinite(z) || !Number.isFinite(r)) continue;
       transforms.push({
         entityId: id,
-        transform: encodeTransform({
-          x: entity.position.x,
-          y: entity.position.z,
-          rotation: entity.rotation || 0,
-        }),
+        transform: encodeTransform({ x, y: z, rotation: r }),
       });
     }
     if (transforms.length > 0) {
@@ -2589,7 +2650,7 @@ export class GameServer {
     this._entities.set(unit.id, unit);
 
     // Create physics body for the unit
-    this._createEntityBody(unit.id, unit.position.x, unit.position.z, typeDef as Record<string, any>);
+    this._createEntityBody(unit.id, unit.position.x, unit.position.z, typeDef as Record<string, any>, 'unit');
 
     this._transport.broadcast({
       type: MessageType.EntityCreate,
@@ -2765,14 +2826,14 @@ export class GameServer {
             };
             if (emptyIdx !== -1) inv[emptyIdx] = newRec;
             else inv.push(newRec);
+            // Only the new-slot path puts itemId into the inventory — stamp
+            // ownerId / mirror attributes onto the world entity so resolvers
+            // (`getOwnerOfItem`, attribute lookups, etc.) keep finding the
+            // backing entity for this slot. The stack path reuses the kept
+            // slot's existing entity, so the world entity has no role to play
+            // — see the explicit teardown below.
+            this._registerInventoryItemEntity(itemId, (itemStats?.type as string) || '', unitId, Number(itemStats?.quantity) || 1);
           }
-          // Convert the world item entity to a carried record: keep it in _entities
-          // (so script resolvers like getOwnerOfItem / getEntityAttribute / getItemTypeOfItem
-          // still find it) but stamp ownerId, mirror the type's attributes, and tear down
-          // its physics body. Without this the inventory item id has no backing entity and
-          // the global unitTouchesProjectile damage script
-          // (`getOwnerOfItem(getSourceItemOfProjectile(p))`) returns undefined → no damage.
-          this._registerInventoryItemEntity(itemId, (itemStats?.type as string) || '', unitId, Number(itemStats?.quantity) || 1);
           this._syncCurrentItemAndBroadcast(unitId, unit);
         }
         // Tear down the world physics body — picked-up items must not keep firing
@@ -2790,6 +2851,20 @@ export class GameServer {
         this.scripts.trigger('unitPicksUpItem', { unitId, itemId });
         // Per-entity-type alias — taro game data uses both names.
         this.scripts.trigger('thisUnitPicksUpItem', { unitId, itemId });
+        // Garbage-collect the world entity when no inventory slot references it.
+        // Stack-pickups (`stack.quantity += incomingQty`) keep the existing slot's
+        // id and never put `itemId` into the inventory — without this delete the
+        // entity lingers as a hidden orphan that resolvers (`getOwnerOfItem`,
+        // attribute lookups) still surface and that re-streams to late joiners as
+        // a phantom item the player can never pick up. Same reason for the
+        // `isUsedOnPickup` consume path: the food was fully resolved into attr
+        // bonuses, the entity has no remaining role.
+        const stillReferenced = ((unit.stats?.inventory ?? []) as Array<{ id?: string } | null>)
+          .some(rec => rec?.id === itemId);
+        if (!stillReferenced) {
+          item?.destroy?.();
+          this._entities.delete(itemId);
+        }
         return;
       }
 
@@ -2923,7 +2998,7 @@ export class GameServer {
           if (classId === 'projectile' && this._physics) {
             const speed = Number((typeDef as any)?.speed ?? 0);
             if (speed > 0) {
-              this._createEntityBody(entityId, px, pz, typeDef as Record<string, any>);
+              this._createEntityBody(entityId, px, pz, typeDef as Record<string, any>, 'projectile');
               const body = this._entityBodies.get(entityId);
               if (body) {
                 // taro convention: angle 0 = up; project forward = (sin(a), -cos(a)). Velocity in

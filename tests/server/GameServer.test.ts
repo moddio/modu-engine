@@ -644,6 +644,95 @@ describe('GameServer', () => {
     expect(selfHits).toHaveLength(0);
   });
 
+  // taro/modd projectileTypes carry `destroyOnContactWith.{units,walls,items,projectiles,debris}`
+  // (see `bullet`/`explosion`/`blood` in any moddio editor `game.json`). When this
+  // flag is true for the contacted category, the projectile must despawn after the
+  // hit — that's how bullets disappear on impact instead of phasing through and
+  // continuing to deal damage every tick they overlap. Without honouring the flag
+  // a projectile sits inside the mob until lifeSpan expires, so it keeps re-firing
+  // collision triggers and (in damage-on-contact games) drains health to zero in a
+  // single overlap. Field is preserved by GameMigrator, so the gap is purely the
+  // collision handler not consulting it.
+  it('projectile with destroyOnContactWith.units=true is destroyed after hitting a mob', async () => {
+    const data = JSON.parse(JSON.stringify(TEST_GAME_DATA));
+    data.entities.projectileTypes = {
+      bullet: {
+        name: 'Bullet',
+        lifeSpan: 5000,
+        destroyOnContactWith: { units: true, walls: true, items: false, projectiles: false, debris: false },
+        bodies: {
+          default: { type: 'dynamic', width: 1, height: 1, fixtures: [{ shape: { type: 'circle' }, isSensor: true, density: 1 }] },
+        },
+      },
+    };
+    await server.init(data);
+    server.start();
+    transport.client.onMessage(() => {});
+    await transport.client.connect();
+    transport.client.send({ type: MessageType.JoinGame, data: { playerName: 'P', isMobile: false } });
+    const unit = [...(server as any)._entities.values()].find((e: any) => e.category === 'unit');
+    expect(unit).toBeTruthy();
+
+    // Spawn a projectile fired by *some other* unit so the self-collision guard
+    // in fireUnitProjectilePair doesn't suppress the contact handling.
+    const projId = 'prj_destroy_test';
+    const proj = server.engine.spawn(projId);
+    (proj as any).category = 'projectile';
+    (proj as any).stats = { type: 'bullet', sourceUnitId: 'other_unit' };
+    (server as any)._entities.set(projId, proj);
+    (server as any)._createEntityBody(projId, (unit as any).position.x, (unit as any).position.z, {
+      bodies: { default: { type: 'dynamic', width: 1, height: 1, fixtures: [{ shape: { type: 'circle' }, isSensor: true, density: 1 }] } },
+    });
+
+    expect((server as any)._entities.has(projId)).toBe(true);
+
+    // Step physics so the collisionStart event fires for the overlapping pair.
+    (server as any)._physics.step(50);
+    await new Promise(r => setTimeout(r, 30));
+
+    // Projectile must be gone from the entity registry.
+    expect((server as any)._entities.has(projId)).toBe(false);
+  });
+
+  // The other half of the contract: when destroyOnContactWith.units is false
+  // (e.g. the `explosion`/`blood` projectile types in stock celleater/karmaslayers
+  // data) the projectile must keep living through the hit so its lifeSpan-driven
+  // animation/lingering AoE keeps running.
+  it('projectile with destroyOnContactWith.units=false survives mob contact', async () => {
+    const data = JSON.parse(JSON.stringify(TEST_GAME_DATA));
+    data.entities.projectileTypes = {
+      lingering: {
+        name: 'Lingering AoE',
+        lifeSpan: 5000,
+        destroyOnContactWith: { units: false, walls: false, items: false, projectiles: false, debris: false },
+        bodies: {
+          default: { type: 'dynamic', width: 1, height: 1, fixtures: [{ shape: { type: 'circle' }, isSensor: true, density: 1 }] },
+        },
+      },
+    };
+    await server.init(data);
+    server.start();
+    transport.client.onMessage(() => {});
+    await transport.client.connect();
+    transport.client.send({ type: MessageType.JoinGame, data: { playerName: 'P', isMobile: false } });
+    const unit = [...(server as any)._entities.values()].find((e: any) => e.category === 'unit');
+    expect(unit).toBeTruthy();
+
+    const projId = 'prj_survive_test';
+    const proj = server.engine.spawn(projId);
+    (proj as any).category = 'projectile';
+    (proj as any).stats = { type: 'lingering', sourceUnitId: 'other_unit' };
+    (server as any)._entities.set(projId, proj);
+    (server as any)._createEntityBody(projId, (unit as any).position.x, (unit as any).position.z, {
+      bodies: { default: { type: 'dynamic', width: 1, height: 1, fixtures: [{ shape: { type: 'circle' }, isSensor: true, density: 1 }] } },
+    });
+
+    (server as any)._physics.step(50);
+    await new Promise(r => setTimeout(r, 30));
+
+    expect((server as any)._entities.has(projId)).toBe(true);
+  });
+
   // When a unit's `attr_health` drops to 0, the engine fires `unitAttributeBecomesZero`.
   // The death script (e.g. Karmaslayers' e6UBM4PgBF) gates on
   //   `getAttributeTypeOfAttribute(getTriggeringAttribute()) == "health"`

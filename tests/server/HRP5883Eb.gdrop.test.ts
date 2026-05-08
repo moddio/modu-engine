@@ -162,4 +162,102 @@ describe.skipIf(!URI)('HRP5883Eb press G drops item', () => {
     expect(inv[1]?.id).toBe(slot1IdBefore);
     expect(inv[2]?.id).toBe(slot2IdBefore);
   });
+
+  // User report: dropping a meat at the player's feet makes it "bounce off"
+  // immediately. Root cause: `_createEntityBody` was hard-coding every body to
+  // `category: UNIT, mask: DefaultCollisionMask[UNIT]` (0x001F = walls + units +
+  // props + items + projectiles), ignoring the body fixture's `collidesWith`
+  // field. Meat declares `collidesWith.units: false`, but the engine made its
+  // body physically resolve against the unit it was dropped on top of, and
+  // Rapier shoved the meat out by ~0.3 tiles per half-second.
+  it('a dropped item at the unit position is not shoved away by physics', async () => {
+    await init();
+    const players = (server as any)._players as Map<string, any>;
+    const [, playerData] = [...players.entries()][0];
+    const unit = (server as any)._entities.get(playerData.unitId);
+    const unitBody = (server as any)._entityBodies.get(playerData.unitId);
+    expect(unitBody, 'unit body must exist').toBeTruthy();
+
+    // Teleport the unit body to an interior tile so wall-collision drift can't
+    // masquerade as the bug we're trying to catch.
+    const tilePx = (server as any)._tilePx;
+    const targetTile = { x: 30, z: 30 };
+    const RAPIER = await import('@dimforge/rapier2d-compat');
+    unitBody.raw.setTranslation(new RAPIER.Vector2((server as any)._tileToPhysics(targetTile.x), (server as any)._tileToPhysics(targetTile.z)), true);
+    unitBody.raw.setLinvel(new RAPIER.Vector2(0, 0), true);
+    unit.position.x = targetTile.x;
+    unit.position.z = targetTile.z;
+
+    const meatType = 'M94GUBy6iN';
+    server.engine.events.emit('item:spawn', [meatType, { x: targetTile.x * tilePx, y: targetTile.z * tilePx }]);
+    await new Promise(r => setTimeout(r, 10));
+
+    let meatId: string | null = null;
+    for (const [id, e] of (server as any)._entities.entries()) {
+      const ee: any = e;
+      if (ee.category === 'item' && ee.stats?.type === meatType && !ee.stats?.ownerId) meatId = id;
+    }
+    expect(meatId).not.toBeNull();
+    const meatBody = (server as any)._entityBodies.get(meatId!);
+    expect(meatBody, 'meat body must exist').toBeTruthy();
+    const before = { x: meatBody.position.x, y: meatBody.position.y };
+
+    for (let i = 0; i < 10; i++) (server as any)._tick(50);
+
+    const after = { x: meatBody.position.x, y: meatBody.position.y };
+    const driftPhys = Math.hypot(after.x - before.x, after.y - before.y);
+    const driftTiles = (server as any)._physicsToTile(driftPhys);
+    // 1/8 tile threshold. The bug produced ~0.34 tiles of drift; the fix lands
+    // it at ~0.003 (numerical noise from the unit body's own settle).
+    expect(driftTiles, 'meat should not be shoved by the unit body').toBeLessThan(0.125);
+  });
+
+  // User report: even after the unit-collision fix, scattered meat (loot from
+  // a kill, where the death script applies setVelocityOfEntityXY ±12) keeps
+  // sliding for several seconds before settling. Cause: `_createEntityBody`
+  // attenuates linearDamping by 10× for every dynamic body — a tuning meant
+  // for unit-movement feel. The meat type's data declares linearDamping=5
+  // (Box2d/Rapier per-second decay; v ≈ 0.7% after 1 s), but the engine
+  // applies 0.5 (v ≈ 60% after 1 s) so the scatter visibly drifts ~10× longer
+  // than the game intended.
+  it('a scattered meat settles within ~1 second per its data damping', async () => {
+    await init();
+    const players = (server as any)._players as Map<string, any>;
+    const [, playerData] = [...players.entries()][0];
+    const unitBody = (server as any)._entityBodies.get(playerData.unitId);
+    const tilePx = (server as any)._tilePx;
+    const targetTile = { x: 30, z: 30 };
+    const RAPIER = await import('@dimforge/rapier2d-compat');
+    unitBody.raw.setTranslation(new RAPIER.Vector2((server as any)._tileToPhysics(targetTile.x), (server as any)._tileToPhysics(targetTile.z)), true);
+
+    const meatType = 'M94GUBy6iN';
+    server.engine.events.emit('item:spawn', [meatType, { x: targetTile.x * tilePx, y: targetTile.z * tilePx }]);
+    await new Promise(r => setTimeout(r, 10));
+
+    let meatId: string | null = null;
+    for (const [id, e] of (server as any)._entities.entries()) {
+      const ee: any = e;
+      if (ee.category === 'item' && ee.stats?.type === meatType && !ee.stats?.ownerId) meatId = id;
+    }
+    expect(meatId).not.toBeNull();
+    const meatBody = (server as any)._entityBodies.get(meatId!);
+    // The data's `linearDamping: {x:5,y:5,z:0}` should land on Rapier verbatim;
+    // before the fix the engine attenuated it to 0.5, so this read-back is the
+    // direct regression check on the attenuation removal.
+    expect(meatBody.raw.linearDamping(), 'item damping must respect data, not be attenuated').toBeCloseTo(5, 3);
+
+    // Apply the same scatter the game's death script applies (±12 random),
+    // pinned to a deterministic value so the threshold below is meaningful.
+    server.engine.events.emit('physics:setVelocity', [meatId, 12, 12]);
+
+    // Tick for ~3 s of sim time. Rapier's empirical decay at damping=5 leaves
+    // ~20% of velocity per second, so 3 s reaches ~0.14 phys/s (well-stopped).
+    // The bug (damping=0.5) only got the body down to ~7 phys/s in the same
+    // window — still a visible slide.
+    for (let i = 0; i < 60; i++) (server as any)._tick(50);
+
+    const v = meatBody.linearVelocity;
+    const speedPhys = Math.hypot(v.x, v.y);
+    expect(speedPhys, 'meat should be effectively stopped after 3 s of damping').toBeLessThan(0.5);
+  });
 });

@@ -199,4 +199,55 @@ describe.skipIf(!URI)('HRP5883Eb press E picks up nearby item', () => {
       .reduce((s, it) => s + (Number(it.quantity) || 0), 0);
     expect(qtyAfter).toBe(qtyBefore + 1);
   });
+
+  // User report: "sometimes cant pick up items, and if i pick up another item,
+  // the prev one will get into the inventory, and the current one become ghost
+  // item, cant be pick up anymore". Two stackable items in the same press-E
+  // pickup region (288×288) get processed back-to-back by `forAllEntities`. The
+  // first pickup fills an empty slot; the second STACKS onto it and bumps qty.
+  // The bug was that the second world entity was still routed through
+  // `_registerInventoryItemEntity` (stamping ownerId + isHidden) even though no
+  // inventory slot referenced it — leaving a hidden orphan in `_entities` that
+  // resolvers (`getOwnerOfItem`, `getEntityAttribute`) still surfaced and that
+  // re-streamed to late joiners as a phantom item.
+  it('two stackable items in pickup range: no hidden orphan after a single E press', async () => {
+    await init();
+    const players = (server as any)._players as Map<string, any>;
+    const [clientId, playerData] = [...players.entries()][0];
+    await new Promise(r => setTimeout(r, 100));
+    const unit = (server as any)._entities.get(playerData.unitId);
+
+    const tilePx = (server as any)._tilePx;
+    const stackType = 'M94GUBy6iN'; // Meat — stackable, maxQuantity 64
+    const beforeMeat = ((unit.stats as any).inventory as any[])
+      .filter(it => it?.type === stackType)
+      .reduce((s, it) => s + (Number(it.quantity) || 0), 0);
+
+    server.engine.events.emit('item:spawn', [stackType, { x: unit.position.x * tilePx + 8,  y: unit.position.z * tilePx }]);
+    server.engine.events.emit('item:spawn', [stackType, { x: unit.position.x * tilePx + 24, y: unit.position.z * tilePx }]);
+    await new Promise(r => setTimeout(r, 30));
+
+    const worldMeats = [...(server as any)._entities.entries()]
+      .filter(([, e]: any) => e.category === 'item' && e.stats?.type === stackType && !e.stats?.ownerId)
+      .map(([id]: any) => id);
+    expect(worldMeats.length).toBe(2);
+
+    (server as any)._onPlayerInput(clientId, { device: 'keyboard', key: 'e' }, true);
+    await new Promise(r => setTimeout(r, 50));
+
+    const afterMeat = ((unit.stats as any).inventory as any[])
+      .filter(it => it?.type === stackType)
+      .reduce((s, it) => s + (Number(it.quantity) || 0), 0);
+    expect(afterMeat).toBe(beforeMeat + 2);
+
+    const inv = ((unit.stats as any).inventory ?? []) as any[];
+    let hiddenOrphans = 0;
+    for (const id of worldMeats) {
+      const e: any = (server as any)._entities.get(id);
+      if (!e) continue;
+      const inSlot = inv.some((s: any) => s?.id === id);
+      if (e.stats?.isHidden && !inSlot) hiddenOrphans++;
+    }
+    expect(hiddenOrphans, 'no item should be hidden but missing from inventory').toBe(0);
+  });
 });

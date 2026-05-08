@@ -3,6 +3,7 @@ import { Engine } from '../../../../engine/core/Engine';
 import { ActionRunner } from '../../../../engine/core/scripting/ActionRunner';
 import { VariableStore } from '../../../../engine/core/scripting/VariableStore';
 import { Unit } from '../../../../engine/core/game/Unit';
+import { Item } from '../../../../engine/core/game/Item';
 import { Player } from '../../../../engine/core/game/Player';
 
 describe('ActionRunner', () => {
@@ -265,6 +266,63 @@ describe('ActionRunner', () => {
     }]);
 
     expect(vars.getGlobal('hp')).toBe(42);
+  });
+
+  describe('getEntityState item state derivation', () => {
+    // Items have implicit state in taro: 'dropped' (no owner), 'selected'
+    // (owner.currentItemId === item.id), 'unselected' (in inventory but not held).
+    // The Poop Helmet's per-second poop generator gates its action on
+    // `state != 'dropped'` — without correct derivation, ground-dropped helmets
+    // kept generating poop every tick.
+    it('returns "dropped" for a world item (no ownerId)', () => {
+      const it = new Item('itm1', { type: 'helmet', quantity: 1 } as any);
+      it.mount(engine.root);
+      runner.run([{
+        type: 'setVariable',
+        variableName: 's',
+        value: { function: 'getEntityState', entity: 'itm1' },
+      }]);
+      expect(vars.getGlobal('s')).toBe('dropped');
+    });
+
+    it('returns "selected" when owner.currentItemId === item.id', () => {
+      const u = new Unit('u1', { name: 'f', type: 't', health: 1, maxHealth: 1, speed: 0, ownerId: '', stateId: 'd', isHidden: false, opacity: 1, flip: 0, scale: 1 });
+      (u.stats as any).currentItemId = 'itm1';
+      u.mount(engine.root);
+      const it = new Item('itm1', { type: 'helmet', quantity: 1, ownerId: 'u1' } as any);
+      it.mount(engine.root);
+      runner.run([{
+        type: 'setVariable',
+        variableName: 's',
+        value: { function: 'getEntityState', entity: 'itm1' },
+      }]);
+      expect(vars.getGlobal('s')).toBe('selected');
+    });
+
+    it('returns "unselected" when owned but not held', () => {
+      const u = new Unit('u1', { name: 'f', type: 't', health: 1, maxHealth: 1, speed: 0, ownerId: '', stateId: 'd', isHidden: false, opacity: 1, flip: 0, scale: 1 });
+      (u.stats as any).currentItemId = 'other-item';
+      u.mount(engine.root);
+      const it = new Item('itm1', { type: 'helmet', quantity: 1, ownerId: 'u1' } as any);
+      it.mount(engine.root);
+      runner.run([{
+        type: 'setVariable',
+        variableName: 's',
+        value: { function: 'getEntityState', entity: 'itm1' },
+      }]);
+      expect(vars.getGlobal('s')).toBe('unselected');
+    });
+
+    it('still returns stats.stateId for non-item entities', () => {
+      const u = new Unit('u1', { name: 'f', type: 't', health: 1, maxHealth: 1, speed: 0, ownerId: '', stateId: 'aggro', isHidden: false, opacity: 1, flip: 0, scale: 1 });
+      u.mount(engine.root);
+      runner.run([{
+        type: 'setVariable',
+        variableName: 's',
+        value: { function: 'getEntityState', entity: 'u1' },
+      }]);
+      expect(vars.getGlobal('s')).toBe('aggro');
+    });
   });
 
   it('getEntityAttribute returns undefined for missing entity (no crash)', () => {
