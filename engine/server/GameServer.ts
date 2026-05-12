@@ -1156,6 +1156,67 @@ export class GameServer {
         }
       }
 
+      // Consumable items: apply `bonus.consume` to the firing unit's attrs
+      // (`unitAttribute`) and the owning player's attrs (`playerAttribute`),
+      // then decrement the inventory stack by 1. Mirrors taro's `Item.use()`
+      // consumable branch (moddio2/src/gameClasses/Item.js, ~line 710). Without
+      // this, every inventory consumable (food, potions, scrolls, …) is a
+      // silent no-op when the player clicks "use": Hunger / HP / score never
+      // change and the stack never empties. The pickup-side path (line ~2765,
+      // `isUsedOnPickup`) only covers items eaten on contact (celleater food),
+      // not held-in-inventory consumables that the player chooses to use.
+      if (firingUnit && itemType?.type === 'consumable' && itemType?.bonus?.consume) {
+        const remaining = Number(invEntry?.quantity) || 0;
+        if (remaining > 0) {
+          const consume = itemType.bonus.consume as Record<string, any>;
+          for (const [attrId, raw] of Object.entries(consume.unitAttribute ?? {})) {
+            const slot = `attr_${attrId}`;
+            const cur = (firingUnit.stats as any)[slot] ?? { value: 0, min: 0, max: Number.MAX_SAFE_INTEGER };
+            const next = Math.max(cur.min ?? 0, Math.min(cur.max ?? Number.MAX_SAFE_INTEGER, (cur.value ?? 0) + Number(raw || 0)));
+            (firingUnit.stats as any)[slot] = { ...cur, value: next };
+            this._transport.broadcast({
+              type: MessageType.EntityStatsUpdate,
+              data: { [firingUnit.id]: { [slot]: { value: next, min: cur.min, max: cur.max } } },
+            });
+          }
+          const ownerId = firingUnit.stats?.ownerId as string | undefined;
+          const player = ownerId ? this._entities.get(ownerId) : null;
+          if (player?.stats) {
+            for (const [attrId, raw] of Object.entries(consume.playerAttribute ?? {})) {
+              const slot = `attr_${attrId}`;
+              const cur = (player.stats as any)[slot] ?? { value: 0, min: 0, max: Number.MAX_SAFE_INTEGER };
+              const next = Math.max(cur.min ?? 0, Math.min(cur.max ?? Number.MAX_SAFE_INTEGER, (cur.value ?? 0) + Number(raw || 0)));
+              (player.stats as any)[slot] = { ...cur, value: next };
+              this._transport.broadcast({
+                type: MessageType.EntityStatsUpdate,
+                data: { [ownerId!]: { [slot]: { value: next, min: cur.min, max: cur.max } } },
+              });
+            }
+          }
+          // Decrement the stack. `invEntry.quantity` is the player-visible
+          // count broadcast via `_syncCurrentItemAndBroadcast`; the backing
+          // entity's `stats.quantity` mirrors it so `getItemQuantity` / other
+          // resolvers see the same value. When the stack empties, clear the
+          // slot and tear down the backing entity so the held-item sprite
+          // refreshes and resolvers stop returning the corpse.
+          const nextQty = remaining - 1;
+          invEntry!.quantity = nextQty;
+          const worldEnt = this._entities.get(itemId);
+          if (worldEnt?.stats) (worldEnt.stats as any).quantity = nextQty;
+          if (nextQty <= 0) {
+            const inv = (firingUnit.stats?.inventory ?? []) as Array<{ id?: string } | null>;
+            const idx = inv.findIndex(r => r?.id === itemId);
+            if (idx !== -1) inv[idx] = null;
+            // Taro fires `ThisItemsQuantityBecomesZero` before the slot is
+            // gone so any cleanup script can still resolve the item.
+            this.scripts.trigger('ThisItemsQuantityBecomesZero', { itemId, unitId: firingUnit.id });
+            worldEnt?.destroy?.();
+            this._entities.delete(itemId);
+          }
+          this._syncCurrentItemAndBroadcast(firingUnit.id, firingUnit);
+        }
+      }
+
       // Held-item use tween. Taro's `Item.use()` calls `playEffect('use')`,
       // which reads the item type's `effects.use.tween` and starts the named
       // tween from its TweenComponent table (taro: `gs/taro/src/gameClasses/
@@ -1763,17 +1824,23 @@ export class GameServer {
       return Number.isFinite(n) ? n : 0;
     };
     const damp = toScalar(bodyDef.linearDamping);
-    // Units take continuous WASD impulses every tick, so the equilibrium
-    // velocity is `impulse / damping` — taro's calibrated damping values
-    // crush units to a crawl in modu's coordinate system, so we attenuate by
-    // 10× for unit bodies to keep them moving. Items and projectiles get one
-    // velocity push (loot scatter, projectile fire) and then coast on damping
-    // alone; attenuating their damping makes scattered loot slide ~10× longer
-    // than the data intends ("just dropped meat keeps moving"). For them, use
-    // the raw data value so the meat actually settles within its data-implied
-    // timescale (~exp(-damp) per second).
-    const attenuated = (bodyDef.type === 'dynamic' && category === 'unit') ? Math.min(damp * 0.1, 2) : damp;
-    body.raw.setLinearDamping(attenuated);
+    // Impulse/force-mode units take continuous WASD impulses every tick, so the
+    // equilibrium velocity is `impulse / damping`. Taro's calibrated damping
+    // values crush them to a crawl in modu's coordinate system, so for those
+    // movement methods only we attenuate by 10× (capped at 2) to keep them
+    // moving. Velocity-mode units set body.linearVelocity directly while keys
+    // are held — damping doesn't bound their moving speed, it only governs
+    // post-release deceleration, so attenuating it just makes them slide for
+    // seconds after the player lets go ("slayer feels too slippery", HRP5883Eb).
+    // Items and projectiles get one velocity push and coast on damping alone;
+    // attenuating their damping makes scattered loot slide ~10× longer than the
+    // data intends, so they always use the raw value too.
+    const movementMethod = (typeDef?.controls?.movementMethod ?? 'velocity') as string;
+    const isImpulseDriven = movementMethod === 'impulse' || movementMethod === 'force';
+    const linDamp = (bodyDef.type === 'dynamic' && category === 'unit' && isImpulseDriven)
+      ? Math.min(damp * 0.1, 2)
+      : damp;
+    body.raw.setLinearDamping(linDamp);
     body.raw.setAngularDamping(toScalar(bodyDef.angularDamping));
 
     // Collider — exactly as taro: halfWidth / scaleRatio
