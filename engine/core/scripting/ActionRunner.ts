@@ -1872,9 +1872,16 @@ export class ActionRunner {
         const item = this._engine.findById(iid);
         return (item as any)?.stats?.quantity ?? 1;
       }
+      // Returns the human-readable `name` of an item type (e.g. "Common Chest"),
+      // not the type id. Pattern-matching scripts like HRP5883Eb's "is this any
+      // *Chest*?" loot dispatch read this and feed it into `subString` — returning
+      // the bare id (a short hash like "khPoe32YLW") made every such match miss
+      // and chests silently never opened.
       case 'getItemTypeName': {
         const tid = this._resolveValue(obj.itemType, vars);
-        return typeof tid === 'string' ? tid : '';
+        if (typeof tid !== 'string') return '';
+        const def = this.typeRegistries.itemTypes?.[tid] as { name?: string } | undefined;
+        return typeof def?.name === 'string' ? def.name : tid;
       }
       case 'unitIsCarryingItemType': {
         const uid = this._resolveValue(obj.entity ?? obj.unit, vars) as string;
@@ -2639,6 +2646,21 @@ export class ActionRunner {
         const k = this._resolveValue(obj.keyword, vars);
         if (k === undefined || k === null) return false;
         return s.indexOf(String(k)) > -1;
+      }
+      // taro `subString` (editor key in actions.json: "string contains string") is a
+      // *contains* check despite the name — fields are `sourceString` + `patternString`,
+      // and it returns true iff sourceString includes patternString. The slice action
+      // is the separately-named `substringOf` (above). HRP5883Eb's Slayer-uses-item
+      // dispatch gates every chest-opening branch on `subString(itemTypeName, "Chest")`,
+      // so without this case the resolver returned undefined → `undefined == true` was
+      // false → no chest ever ran its loot-roll, the chest stayed in the inventory, and
+      // the player saw "I can't use the chest."
+      case 'subString': {
+        const s = this._resolveValue(obj.sourceString, vars);
+        if (typeof s !== 'string') return false;
+        const p = this._resolveValue(obj.patternString, vars);
+        if (p === undefined || p === null) return false;
+        return s.indexOf(String(p)) > -1;
       }
       case 'stringStartsWith': {
         const s = this._resolveValue(obj.sourceString, vars);

@@ -1131,8 +1131,11 @@ export class GameServer {
       let invEntry: { id?: string; type?: string; quantity?: number } | undefined;
       for (const ent of this._entities.values()) {
         if (ent.category !== 'unit') continue;
-        const inv = (ent.stats?.inventory ?? []) as Array<{ id?: string; type?: string; quantity?: number }>;
-        const found = inv.find((i) => i.id === itemId);
+        // Inventory slots can be null after a consumable empties (see the
+        // `if (nextQty <= 0) inv[idx] = null` branch below) — guard the find
+        // so we don't deref `i.id` on a null hole.
+        const inv = (ent.stats?.inventory ?? []) as Array<{ id?: string; type?: string; quantity?: number } | null>;
+        const found = inv.find((i) => i?.id === itemId) ?? undefined;
         if (found) { firingUnit = ent; invEntry = found; break; }
       }
       // World-item fallback: dropped/equipped items that *are* in `_entities` carry ownerId.
@@ -2175,10 +2178,20 @@ export class GameServer {
   }
 
   /**
-   * Minimal AI loop: runs the `wander` idle behaviour for units whose type has
-   * `ai.enabled === true`. Units pick a random target inside `ai.maxTravelDistance`
-   * (pixels) and walk toward it, re-picking when they arrive or after a timeout.
-   * Sensor / attack responses are not wired yet.
+   * AI loop. Drives wandering, sensor-based aggro, pursuit, and weapon use for any
+   * unit whose type has `ai.enabled === true`. Mirrors taro AIComponent
+   * (moddio2/src/gameClasses/components/unit/AIComponent.js):
+   *  - Idle wander: `ai.idleBehaviour === 'wander'` picks random targets inside
+   *    `ai.maxTravelDistance` (pixels).
+   *  - Sensor aggro: when no target is set, scan for the nearest player unit inside
+   *    `ai.sensorRadius` (tile units in modu data) and, if `ai.sensorResponse === 'fight'`,
+   *    acquire it as the targetUnitId.
+   *  - Pursuit: drive toward the target's live position; if it moves beyond
+   *    `ai.letGoDistance` (pixels), drop pursuit.
+   *  - Attack: when within `ai.maxAttackRange` (tile units in modu data) of the target,
+   *    halt and emit `item:use` on the unit's `currentItemId`, throttled by the held
+   *    item's `fireRate`. The item-use handler fires the projectile that actually
+   *    damages the player.
    */
   private _processAI(dt: number): void {
     // Collect the set of units currently controlled by a connected player so we skip them.
@@ -2193,13 +2206,76 @@ export class GameServer {
       if (!body) continue;
 
       if (!unit._aiState) {
-        unit._aiState = { target: null as { x: number; y: number } | null, targetUnitId: null as string | null, pickCooldownMs: 0 };
+        unit._aiState = {
+          target: null as { x: number; y: number } | null,
+          targetUnitId: null as string | null,
+          pickCooldownMs: 0,
+          attackCooldownMs: 0,
+        };
       }
       const state = unit._aiState;
       state.pickCooldownMs -= dt;
+      state.attackCooldownMs = (state.attackCooldownMs ?? 0) - dt;
 
-      // 1. If a script set a target unit (aiAttackUnit), pursue its current position.
-      //    The unit's position changes every tick so we re-resolve each frame.
+      const ai = typeDef?.ai;
+
+      // 1. Sensor aggro: with no current target, look for the nearest player unit inside
+      //    `ai.sensorRadius` (tile units, modu data convention — original taro stored these
+      //    in pixels but karmaslayers-class clones have them migrated to tiles, see
+      //    e.g. wolf `sensorRadius: 7`). Only `sensorResponse: 'fight'` is wired here;
+      //    flee/none fall through and the unit keeps wandering.
+      if (ai?.enabled && !state.targetUnitId && ai.sensorResponse === 'fight') {
+        const sensorRadiusTiles = Number(ai.sensorRadius) || 0;
+        if (sensorRadiusTiles > 0) {
+          const sensorRadiusPhys = this._tileToPhysics(sensorRadiusTiles);
+          const limitSq = sensorRadiusPhys * sensorRadiusPhys;
+          let bestId: string | null = null;
+          let bestDistSq = limitSq;
+          for (const pid of playerUnitIds) {
+            const pUnit = this._entities.get(pid);
+            if (!pUnit) continue;
+            if ((pUnit.stats as any)?.isHidden) continue;
+            if ((pUnit.stats as any)?.isUnTargetable) continue;
+            const pBody = this._entityBodies.get(pid);
+            if (!pBody) continue;
+            const ddx = pBody.position.x - body.position.x;
+            const ddy = pBody.position.y - body.position.y;
+            const dSq = ddx * ddx + ddy * ddy;
+            if (dSq <= bestDistSq) {
+              bestDistSq = dSq;
+              bestId = pid;
+            }
+          }
+          if (bestId) {
+            state.targetUnitId = bestId;
+            state.pickCooldownMs = 10000;
+          }
+        }
+      }
+
+      // 2. Let-go: if the current target ran past `ai.letGoDistance` (pixels) or is gone,
+      //    drop pursuit. Taro's parseInt-guard means a missing/NaN field disables the cap.
+      if (state.targetUnitId) {
+        const target = this._entities.get(state.targetUnitId);
+        const tBody = target ? this._entityBodies.get(state.targetUnitId) : null;
+        if (!target || !tBody) {
+          state.targetUnitId = null;
+          state.target = null;
+        } else if (ai?.letGoDistance != null) {
+          const letGoPhys = Number(ai.letGoDistance) / GameServer.SCALE_RATIO;
+          if (Number.isFinite(letGoPhys) && letGoPhys > 0) {
+            const ddx = tBody.position.x - body.position.x;
+            const ddy = tBody.position.y - body.position.y;
+            if (ddx * ddx + ddy * ddy > letGoPhys * letGoPhys) {
+              state.targetUnitId = null;
+              state.target = null;
+            }
+          }
+        }
+      }
+
+      // 3. If a target unit is set (sensor aggro OR `ai:attackUnit` script), pursue its
+      //    current position. The unit's position changes every tick so we re-resolve each frame.
       if (state.targetUnitId) {
         const target = this._entities.get(state.targetUnitId);
         if (target) {
@@ -2208,14 +2284,12 @@ export class GameServer {
             y: this._tileToPhysics(target.position.z),
           };
         } else {
-          // Target gone — drop pursuit.
           state.targetUnitId = null;
           state.target = null;
         }
       }
 
-      // 2. If no script target AND the type has wandering AI, pick a random wander target.
-      const ai = typeDef?.ai;
+      // 4. If no script/sensor target AND the type has wandering AI, pick a random wander target.
       const wanderEnabled = ai?.enabled && ai.idleBehaviour === 'wander';
       if (!state.target && wanderEnabled) {
         const maxTravelPhys = (Number(ai.maxTravelDistance) || 200) / GameServer.SCALE_RATIO;
@@ -2233,20 +2307,22 @@ export class GameServer {
         }
       }
 
-      // 3. If we still have no target, this unit is idle — clear velocity so it doesn't
+      // 5. If we still have no target, this unit is idle — clear velocity so it doesn't
       //    drift from a previous push.
       if (!state.target) {
         body.linearVelocity = new Vec2(0, 0);
         continue;
       }
 
-      // 4. Drive toward the target. Stop within `attackRange` if pursuing a unit.
+      // 6. Drive toward the target. Stop within `maxAttackRange` if pursuing a unit.
+      //    `maxAttackRange` is in tile units in modu data; the wander branch uses a small
+      //    physics-unit threshold so the unit visibly arrives at its random destination.
       const dx = state.target.x - body.position.x;
       const dy = state.target.y - body.position.y;
       const mag = Math.hypot(dx, dy);
       const speed = (typeDef?.attributes?.speed?.value as number) || (unit.stats?.speed as number) || 10;
       const attackRangePhys = state.targetUnitId
-        ? (Number(ai?.attackRange ?? typeDef?.attackRange ?? 60) / GameServer.SCALE_RATIO)
+        ? this._tileToPhysics(Number(ai?.maxAttackRange ?? ai?.attackRange ?? 0.75))
         : 0.4;
       if (mag > attackRangePhys) {
         // Same convention as the player branch: raw `direction * speed` in physics units.
@@ -2256,8 +2332,31 @@ export class GameServer {
       } else {
         body.linearVelocity = new Vec2(0, 0);
         if (state.targetUnitId) {
-          // In range — face the target so renderer/animations align.
-          unit.rotation = Math.atan2(-dx, -dy);
+          // In range — face the target. The post-physics facing loop drives rotation off
+          // `body.linearVelocity`, which is zero now, so it would restore the cached
+          // heading or snap to 0. Write into the cache so the unit stays locked onto the
+          // target even while standing still.
+          const r = Math.atan2(-dx, -dy);
+          unit.rotation = r;
+          this._aiUnitFacingRotation.set(id, r);
+
+          // Fire the held weapon, throttled by the item type's `fireRate` (ms between
+          // shots — same field the player branch reads). taro Item.use() runs on every
+          // gameLoop tick while the button is held; throttling here gives the same net
+          // cadence without the per-tick spam.
+          if (state.attackCooldownMs <= 0) {
+            const currentItemId = (unit.stats as any)?.currentItemId as string | null | undefined;
+            if (currentItemId) {
+              const inv = ((unit.stats as any)?.inventory ?? []) as Array<{ id?: string; type?: string }>;
+              const invEntry = inv.find((i) => i?.id === currentItemId);
+              const itemType = invEntry?.type
+                ? (this.types.get('itemTypes', invEntry.type) as Record<string, any> | null)
+                : null;
+              const fireRate = Number(itemType?.fireRate) || 1000;
+              this.engine.events.emit('item:use', [currentItemId]);
+              state.attackCooldownMs = fireRate;
+            }
+          }
         } else {
           // Reached a wander/move-to target; release it so wandering picks a new one.
           state.target = null;
@@ -2445,6 +2544,9 @@ export class GameServer {
         this._syncCurrentItemAndBroadcast(playerData.unitId, unit);
         break;
       }
+      case MessageType.ShopBuyItem:
+        this._onShopBuyItem(clientId, msg.data as { shopId?: unknown; itemTypeId?: unknown });
+        break;
       case MessageType.Ping:
         this._transport.send(clientId, { type: MessageType.Pong, data: msg.data });
         break;
@@ -2604,6 +2706,102 @@ export class GameServer {
     }
   }
 
+  /**
+   * Shop purchase: the client sends ShopBuyItem after the player clicks "Buy"
+   * in the shop modal opened by an `openShopForPlayer` UICommand. The shop
+   * entry lives in `rawGameData.shops[shopId].itemTypes[itemTypeId]`:
+   *
+   *   price.coins             — legacy taro coin cost (unused by karmaslayers-class clones)
+   *   price.playerAttributes  — {attrId: amount} costs deducted from the player's `attr_<id>`
+   *   price.requiredItemTypes — {itemTypeId: count} costs consumed across the unit's inventory
+   *   quantity                — how many of the bought item to grant (default 1)
+   *
+   * Affordability is all-or-nothing: if any leg of the price can't be paid the
+   * purchase is rejected before any deduction happens. Required-item consumption
+   * walks the unit's inventory slots and decrements quantity per slot, freeing
+   * the slot to null when it empties — mirroring how the original taro engine
+   * processed `Unit.prototype.buyItem`.
+   */
+  private _onShopBuyItem(clientId: string, data: { shopId?: unknown; itemTypeId?: unknown }): void {
+    const playerData = this._players.get(clientId);
+    if (!playerData) return;
+    const unit = this._entities.get(playerData.unitId);
+    if (!unit?.stats) return;
+    const shopId = typeof data?.shopId === 'string' ? data.shopId : null;
+    const itemTypeId = typeof data?.itemTypeId === 'string' ? data.itemTypeId : null;
+    if (!shopId || !itemTypeId) return;
+    const shops = (this._rawGameData?.shops ?? {}) as Record<string, any>;
+    const shop = shops[shopId];
+    if (!shop) return;
+    const entry = shop.itemTypes?.[itemTypeId];
+    if (!entry || entry.isPurchasable === false) return;
+
+    const price = entry.price ?? {};
+    const playerAttrCosts: Record<string, number> = price.playerAttributes ?? {};
+    const requiredItems: Record<string, number> = price.requiredItemTypes ?? {};
+    const coinsCost = Number(price.coins) || 0;
+    const playerId = (unit.stats as any).ownerId as string | undefined;
+    const player = playerId ? this._entities.get(playerId) : null;
+
+    // Affordability check — bail before any deduction so a partial-failure doesn't
+    // strip resources without delivering the item.
+    for (const [attrId, rawAmt] of Object.entries(playerAttrCosts)) {
+      const amt = Number(rawAmt) || 0;
+      if (amt <= 0) continue;
+      const attr = (player?.stats as any)?.[`attr_${attrId}`];
+      const have = Number(attr?.value) || 0;
+      if (have < amt) return;
+    }
+    if (coinsCost > 0) {
+      const coins = Number((player?.stats as any)?.coins) || 0;
+      if (coins < coinsCost) return;
+    }
+    const inv = ((unit.stats as any).inventory ?? []) as Array<{ id?: string; type?: string; quantity?: number } | null>;
+    for (const [reqType, rawNeed] of Object.entries(requiredItems)) {
+      const need = Number(rawNeed) || 0;
+      if (need <= 0) continue;
+      let have = 0;
+      for (const slot of inv) {
+        if (slot?.type === reqType) have += Number(slot.quantity) || 0;
+        if (have >= need) break;
+      }
+      if (have < need) return;
+    }
+
+    // All checks passed — deduct each cost.
+    for (const [attrId, rawAmt] of Object.entries(playerAttrCosts)) {
+      const amt = Number(rawAmt) || 0;
+      if (amt <= 0 || !playerId) continue;
+      const attr = (player?.stats as any)?.[`attr_${attrId}`];
+      const next = (Number(attr?.value) || 0) - amt;
+      this.engine.events.emit('player:setAttribute', [playerId, attrId, next]);
+    }
+    if (coinsCost > 0 && playerId && player) {
+      const next = (Number((player.stats as any).coins) || 0) - coinsCost;
+      (player.stats as any).coins = next;
+      this._transport.broadcast({ type: MessageType.EntityStatsUpdate, data: { [playerId]: { coins: next } } });
+    }
+    for (const [reqType, rawNeed] of Object.entries(requiredItems)) {
+      let need = Number(rawNeed) || 0;
+      if (need <= 0) continue;
+      for (let i = 0; i < inv.length && need > 0; i++) {
+        const slot = inv[i];
+        if (slot?.type !== reqType) continue;
+        const slotQty = Number(slot.quantity) || 0;
+        const take = Math.min(slotQty, need);
+        const remaining = slotQty - take;
+        if (remaining > 0) inv[i] = { ...slot, quantity: remaining };
+        else inv[i] = null;
+        need -= take;
+      }
+    }
+    this._syncCurrentItemAndBroadcast(playerData.unitId, unit);
+
+    // Grant the purchased item.
+    const grantQty = Number(entry.quantity) || 1;
+    this.engine.events.emit('inventory:giveItem', [playerData.unitId, itemTypeId, grantQty]);
+  }
+
   private _onPlayerMouseMoved(clientId: string, data: { x: number; y: number; yaw?: number; pitch?: number }): void {
     const playerData = this._players.get(clientId);
     if (!playerData) return;
@@ -2760,6 +2958,26 @@ export class GameServer {
           this._bodyToEntity.delete(body.raw.handle);
           this._physics.destroyBody(body);
           this._entityBodies.delete(entityId);
+        }
+        // Items live in two places: the `_entities` map (their backing entity) and
+        // the holding unit's `stats.inventory` slot record (`{id, type, quantity}`).
+        // Tearing down only the entity leaves a dangling slot that still renders the
+        // chest icon and pins `currentItemId` to a dead id — the player perceives
+        // this as "I clicked use but nothing happened" because the chest icon never
+        // disappeared. HRP5883Eb's `thisUnitUsesItem` chest-loot dispatch invokes
+        // `destroyEntity(getTriggeringItem)` on the held chest precisely to clear the
+        // slot, so the cleanup belongs here, not at the script call sites.
+        if (cat === 'item') {
+          const ownerId = (ent.stats as any)?.ownerId as string | undefined;
+          const owner = ownerId ? this._entities.get(ownerId) : null;
+          const inv = (owner as any)?.stats?.inventory as Array<{ id?: string } | null> | undefined;
+          if (Array.isArray(inv)) {
+            const slot = inv.findIndex(rec => rec?.id === entityId);
+            if (slot !== -1) {
+              inv[slot] = null;
+              this._syncCurrentItemAndBroadcast(ownerId!, owner);
+            }
+          }
         }
         ent.destroy?.();
         this._entities.delete(entityId);

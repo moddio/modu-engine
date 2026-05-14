@@ -95,6 +95,19 @@ export class PhysicsWorld {
     this.world.timestep = dt / 1000;
     this.world.step(this._eventQueue);
 
+    // Rapier's `addForce` is persistent — it keeps applying the force every step
+    // until `resetForces` is called. Box2D's `applyForce` (which taro and our
+    // script `applyForceOnEntityAngle` were calibrated against) is one-shot per
+    // step: m_force accumulates within a frame, integrates, then clears. Without
+    // resetting here, a script that calls applyForce once (e.g. the karmaslayers
+    // Poop Helmet spawning a Poop with `applyForceOnEntityAngle(force=375)`)
+    // accelerates the body toward the terminal velocity F/(m·damping) = 75 phys/s
+    // and the Poop rockets across the map instead of falling behind the wearer.
+    // Reset after integration so applyForce semantics match taro/Box2D.
+    for (const body of this._bodies.values()) {
+      body.raw.resetForces(false);
+    }
+
     // Process collision events
     this._eventQueue.drainCollisionEvents((handle1, handle2, started) => {
       this.events.emit(started ? 'collisionStart' : 'collisionEnd', [handle1, handle2]);
