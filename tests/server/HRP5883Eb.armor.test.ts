@@ -7,9 +7,9 @@ import { Engine } from '../../engine/core/Engine';
 import { MongoClient, ObjectId } from 'mongodb';
 
 const URI = process.env.MODDIO_DATABASE;
-const WOLF_HELMET = 'Tl1m28OOY9'; // bonus.passive.unitAttribute.health = +40
+const WOLF_HELMET = 'Tl1m28OOY9'; // bonus.passive.unitAttribute.health = +40% (percentage)
 
-describe.skipIf(!URI)('HRP5883Eb armor passive bonus repro', () => {
+describe.skipIf(!URI)('HRP5883Eb armor passive bonus', () => {
   let server: GameServer;
   let transport: ReturnType<typeof createInMemoryPair>;
   let rawGameData: any;
@@ -36,15 +36,7 @@ describe.skipIf(!URI)('HRP5883Eb armor passive bonus repro', () => {
 
   afterEach(() => { server.stop(); Engine.reset(); });
 
-  it('Wolf Helmet game-data has passive +40% health bonus', () => {
-    const it = rawGameData.itemTypes[WOLF_HELMET];
-    expect(it).toBeDefined();
-    expect(it.name).toBe('Wolf Helmet');
-    expect(it.bonus?.passive?.unitAttribute?.health).toBeDefined();
-    expect(it.bonus.passive.unitAttribute.health.value).toBe(40);
-  });
-
-  it('picking up Wolf Helmet should increase unit health (max)', async () => {
+  async function init() {
     const migrated = GameMigrator.migrate({ data: rawGameData } as any);
     await server.init(migrated as any, rawGameData);
     server.start();
@@ -52,31 +44,77 @@ describe.skipIf(!URI)('HRP5883Eb armor passive bonus repro', () => {
     await transport.client.connect();
     transport.client.send({ type: MessageType.JoinGame, data: { playerName: 'Tester', isMobile: false } });
     await new Promise(r => setTimeout(r, 200));
-
     const players = (server as any)._players as Map<string, any>;
     const [, playerData] = [...players.entries()][0];
-    const unit = (server as any)._entities.get(playerData.unitId);
+    return (server as any)._entities.get(playerData.unitId);
+  }
 
-    const healthBefore = (unit.stats as any).attr_health;
-    console.log('health before pickup:', JSON.stringify(healthBefore));
+  it('Wolf Helmet game-data has passive +40% health bonus', () => {
+    const it = rawGameData.itemTypes[WOLF_HELMET];
+    expect(it).toBeDefined();
+    expect(it.name).toBe('Wolf Helmet');
+    expect(it.bonus?.passive?.unitAttribute?.health).toMatchObject({ type: 'percentage', value: 40 });
+  });
 
-    // Give a Wolf Helmet — same path as picking it up off the ground
+  it('picking up Wolf Helmet raises max HP +40% (taro updateStats math)', async () => {
+    const unit = await init();
+    const before = { ...(unit.stats as any).attr_health };
+    expect(before.value).toBe(100);
+    expect(before.max).toBe(100);
+
     server.engine.events.emit('inventory:giveItem', [unit.id, WOLF_HELMET, 1]);
     await new Promise(r => setTimeout(r, 50));
 
+    const after = (unit.stats as any).attr_health;
+    expect(after.max).toBeCloseTo(140, 5);
+    expect(after.value).toBeCloseTo(140, 5);
+  });
+
+  it('dropping the Wolf Helmet removes the bonus (back to 100)', async () => {
+    const unit = await init();
+    server.engine.events.emit('inventory:giveItem', [unit.id, WOLF_HELMET, 1]);
+    await new Promise(r => setTimeout(r, 50));
+    expect((unit.stats as any).attr_health.max).toBeCloseTo(140, 5);
+
     const inv = (unit.stats as any).inventory as any[];
     const slot = inv.findIndex((it: any) => it?.type === WOLF_HELMET);
-    expect(slot).toBeGreaterThanOrEqual(0);
+    server.engine.events.emit('inventory:dropSlot', [unit.id, slot]);
+    await new Promise(r => setTimeout(r, 50));
 
-    const healthAfter = (unit.stats as any).attr_health;
-    console.log('health after pickup:', JSON.stringify(healthAfter));
+    const after = (unit.stats as any).attr_health;
+    expect(after.max).toBeCloseTo(100, 5);
+    expect(after.value).toBeCloseTo(100, 5);
+  });
 
-    // If passive bonus is applied, the max should be >= original + 40
-    const beforeMax = Number(healthBefore?.max) || 0;
-    const afterMax = Number(healthAfter?.max) || 0;
-    console.log('max delta:', afterMax - beforeMax);
+  it('reconcile is idempotent — re-sync without inventory change does not stack', async () => {
+    const unit = await init();
+    server.engine.events.emit('inventory:giveItem', [unit.id, WOLF_HELMET, 1]);
+    await new Promise(r => setTimeout(r, 50));
+    const max1 = (unit.stats as any).attr_health.max;
+    // Force extra syncs (e.g. a slot reselect) — must NOT re-apply the +40%.
+    (server as any)._syncCurrentItemAndBroadcast(unit.id, unit);
+    (server as any)._syncCurrentItemAndBroadcast(unit.id, unit);
+    expect((unit.stats as any).attr_health.max).toBeCloseTo(max1, 5);
+  });
 
-    // This is the assertion that should pass if armor "works"
-    expect(afterMax, 'wearing Wolf Helmet should increase max health by +40').toBeGreaterThan(beforeMax);
+  it('two Wolf Helmets stack multiplicatively then unwind cleanly', async () => {
+    const unit = await init();
+    server.engine.events.emit('inventory:giveItem', [unit.id, WOLF_HELMET, 1]);
+    server.engine.events.emit('inventory:giveItem', [unit.id, WOLF_HELMET, 1]);
+    await new Promise(r => setTimeout(r, 50));
+    // 100 * 1.4 * 1.4 = 196
+    expect((unit.stats as any).attr_health.max).toBeCloseTo(196, 4);
+
+    const inv = (unit.stats as any).inventory as any[];
+    const first = inv.findIndex((it: any) => it?.type === WOLF_HELMET);
+    server.engine.events.emit('inventory:dropSlot', [unit.id, first]);
+    await new Promise(r => setTimeout(r, 50));
+    expect((unit.stats as any).attr_health.max).toBeCloseTo(140, 4);
+
+    const inv2 = (unit.stats as any).inventory as any[];
+    const second = inv2.findIndex((it: any) => it?.type === WOLF_HELMET);
+    server.engine.events.emit('inventory:dropSlot', [unit.id, second]);
+    await new Promise(r => setTimeout(r, 50));
+    expect((unit.stats as any).attr_health.max).toBeCloseTo(100, 4);
   });
 });

@@ -289,7 +289,15 @@ export class ActionRunner {
         return undefined;
       }
 
-      case 'startUsingItem':
+      case 'startUsingItem': {
+        // Press-and-hold: register the item for continuous, fireRate-throttled
+        // re-use until `stopUsingItem`. Mirrors taro's `Item.startUsing()` which
+        // sets `isBeingUsed = true` so `Item._behaviour()` calls `use()` every
+        // tick while held. Distinct from `useItemOnce` (a single shot).
+        this._engine.events.emit('item:startUse', [this._resolveValue(action.entity, vars)]);
+        return undefined;
+      }
+
       case 'useItemOnce': {
         const resolved = this._resolveValue(action.entity, vars);
         this._engine.events.emit('item:use', [resolved]);

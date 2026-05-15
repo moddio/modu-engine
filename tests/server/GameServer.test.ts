@@ -591,6 +591,107 @@ describe('GameServer', () => {
     expect(body).toBeTruthy();
   });
 
+  // Holding LMB to keep using an item. Taro's `Item._behaviour()` calls `use()`
+  // every server tick while `isBeingUsed` is true (set by the `startUsingItem`
+  // action on button1-keyDown, cleared by `stopUsingItem` on keyUp), throttled
+  // by the item type's `fireRate`. Modu collapsed `startUsingItem` into a single
+  // `item:use` emit with no persistent state, so holding the button fired exactly
+  // once. `startUsingItem` must register the held item for continuous,
+  // fireRate-throttled re-use until `stopUsingItem`.
+  it('startUsingItem keeps firing while held, throttled by fireRate, stops on stopUsingItem', async () => {
+    const data = JSON.parse(JSON.stringify(TEST_GAME_DATA));
+    data.entities.itemTypes = {
+      pistol: { name: 'Pistol', isGun: true, projectileType: 'bullet', fireRate: 100 },
+    };
+    data.entities.projectileTypes = {
+      bullet: { name: 'Bullet', speed: 10, lifeSpan: 1000,
+        bodies: { default: { type: 'dynamic', width: 1, height: 1,
+          fixtures: [{ shape: { type: 'circle' }, isSensor: true, density: 1 }] } } },
+    };
+    data.entities.unitTypes.soldier.defaultItems = [{ itemTypeId: 'pistol', quantity: 1 }];
+    await server.init(data);
+    server.start();
+    transport.client.onMessage(() => {});
+    await transport.client.connect();
+    transport.client.send({ type: MessageType.JoinGame, data: { playerName: 'P', isMobile: false } });
+    const unit = [...(server as any)._entities.values()].find((e: any) => e.category === 'unit');
+    const itemId = (unit as any).stats.currentItemId;
+    expect(itemId).toBeTruthy();
+
+    let uses = 0;
+    server.engine.events.on('item:use', () => { uses++; });
+
+    // A single one-shot use (what `useItemOnce` emits) must NOT start a loop.
+    server.engine.events.emit('item:use', [itemId]);
+    expect(uses).toBe(1);
+    for (let i = 0; i < 6; i++) (server as any)._tick(50);
+    expect(uses).toBe(1);
+
+    // Press-and-hold: startUsingItem fires once immediately (taro fires on the
+    // press frame), then re-fires every fireRate (100ms) of ticks (50ms each).
+    server.engine.events.emit('item:startUse', [itemId]);
+    expect(uses).toBe(2);
+    (server as any)._tick(50);
+    (server as any)._tick(50);
+    expect(uses).toBe(3); // 100ms elapsed → one more shot
+    (server as any)._tick(50);
+    (server as any)._tick(50);
+    expect(uses).toBe(4); // another 100ms → another shot
+
+    // Release: stopUsingItem ends the loop — no further shots.
+    server.engine.events.emit('item:stopUse', [itemId]);
+    for (let i = 0; i < 8; i++) (server as any)._tick(50);
+    expect(uses).toBe(4);
+  });
+
+  // Rapid LMB tapping must NOT bypass fireRate. A quick click is sent by the
+  // client as `startUsingItem` (→item:startUse) on mousedown and `stopUsingItem`
+  // (→item:stopUse) on mouseup. The fireRate throttle previously lived only in
+  // `_itemsBeingUsed`, which `item:stopUse` deletes — so every tap re-fired
+  // immediately and a player could shoot as fast as they could click, ignoring
+  // fireRate entirely. Taro gates on a persistent `_stats.lastUsed + fireRate`
+  // that `stopUsing()` never clears, so tapping is throttled exactly like
+  // holding. We measure real shots (spawned projectiles), not raw `item:use`
+  // emissions, since the throttle suppresses the shot, not the event.
+  it('rapid tap (startUse/stopUse) is throttled by fireRate, not just held use', async () => {
+    const data = JSON.parse(JSON.stringify(TEST_GAME_DATA));
+    data.entities.itemTypes = {
+      pistol: { name: 'Pistol', isGun: true, projectileType: 'bullet', fireRate: 100 },
+    };
+    data.entities.projectileTypes = {
+      bullet: { name: 'Bullet', speed: 10, lifeSpan: 100000,
+        bodies: { default: { type: 'dynamic', width: 1, height: 1,
+          fixtures: [{ shape: { type: 'circle' }, isSensor: true, density: 1 }] } } },
+    };
+    data.entities.unitTypes.soldier.defaultItems = [{ itemTypeId: 'pistol', quantity: 1 }];
+    await server.init(data);
+    server.start();
+    transport.client.onMessage(() => {});
+    await transport.client.connect();
+    transport.client.send({ type: MessageType.JoinGame, data: { playerName: 'P', isMobile: false } });
+    const unit = [...(server as any)._entities.values()].find((e: any) => e.category === 'unit');
+    const itemId = (unit as any).stats.currentItemId;
+    expect(itemId).toBeTruthy();
+
+    const projectileCount = () =>
+      [...(server as any)._entities.values()].filter((e: any) => e.category === 'projectile').length;
+
+    // 5 rapid taps within one fireRate window (100ms): press + release, 10ms apart.
+    for (let i = 0; i < 5; i++) {
+      server.engine.events.emit('item:startUse', [itemId]);
+      server.engine.events.emit('item:stopUse', [itemId]);
+      (server as any)._tick(10);
+    }
+    // Only the first tap should have fired — the other four are within fireRate.
+    expect(projectileCount()).toBe(1);
+
+    // Let fireRate fully elapse, then tap once more — now it may fire again.
+    for (let i = 0; i < 12; i++) (server as any)._tick(10);
+    server.engine.events.emit('item:startUse', [itemId]);
+    server.engine.events.emit('item:stopUse', [itemId]);
+    expect(projectileCount()).toBe(2);
+  });
+
   // The melee hitbox (2-tile wide sensor) spawns at `bulletStartPosition` ahead of the
   // firing unit but its radius overlaps the firing unit's own body. Without the self-
   // collision filter in `fireUnitProjectilePair`, rapier's `collisionStart` event fires

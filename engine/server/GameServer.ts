@@ -26,6 +26,11 @@ export class GameServer {
   private _entities = new Map<string, any>();
   private _players = new Map<string, { player: Player; clientId: string; unitId: string; placeholderUnitId?: string }>();
   private _tickCount = 0;
+  /** Monotonic in-game elapsed time (ms), accumulated from each `_tick(dt)`.
+   *  Taro's `taro.now` analog and the clock the fireRate domain runs on (the
+   *  held-use loop / AI fire loop are dt-driven, not wall-clock). Used to gate
+   *  per-item re-use against a persistent `lastUsed` timestamp. */
+  private _gameTimeMs = 0;
   private _physics: PhysicsWorld | null = null;
   private _entityBodies = new Map<string, RigidBody>(); // entityId → physics body
   private _bodyToEntity = new Map<number, string>();    // rapier body handle → entityId
@@ -42,6 +47,11 @@ export class GameServer {
    *  that units moving below the speed threshold hold their prior heading
    *  instead of snapping to 0 after _syncPhysicsToEntities zeroes body.angle. */
   private _aiUnitFacingRotation = new Map<string, number>();
+  /** Items currently held-down for continuous use (button1 / `startUsingItem`),
+   *  keyed by item id → ms remaining until the next fireRate-throttled re-use.
+   *  Taro equivalent: `Item._stats.isBeingUsed` driving `Item._behaviour()`.
+   *  Cleared by `stopUsingItem`, weapon switch, or the unit going away. */
+  private _itemsBeingUsed = new Map<string, number>();
 
   constructor(transport: ServerTransport) {
     this._transport = transport;
@@ -391,7 +401,7 @@ export class GameServer {
     this.engine.events.on('physics:applyForce', physicsApply('force'));
 
     // spawnItem — free-standing item drop at a pixel-coord position.
-    this.engine.events.on('item:spawn', (rawTypeId: unknown, rawPos: unknown) => {
+    this.engine.events.on('item:spawn', (rawTypeId: unknown, rawPos: unknown, rawQty?: unknown) => {
       const typeId = rawTypeId as string;
       const pos = rawPos as { x?: number; y?: number } | null;
       if (!typeId || !pos) return;
@@ -399,17 +409,21 @@ export class GameServer {
       if (!typeDef) return;
       const px = (pos.x ?? 0) / this._tilePx;
       const pz = (pos.y ?? 0) / this._tilePx;
+      // Carry the stack count when supplied (drop paths pass the slot's quantity)
+      // so a dropped stack of N is one world item of N — not N=1, which lost the
+      // rest of the stack on every drop and let only one be picked back up.
+      const quantity = Number(rawQty) || 1;
       const entityId = `itm_${Math.random().toString(36).slice(2, 10)}`;
       this._transport.broadcast({
         type: MessageType.EntityCreate,
-        data: buildEntityCreatePayload('item', entityId, px, pz, 0, { ...typeDef, type: typeId }),
+        data: buildEntityCreatePayload('item', entityId, px, pz, 0, { ...typeDef, type: typeId, quantity }),
       });
       // Track the newly-spawned item in the engine tree so ActionRunner resolvers
       // (getLastCreatedItem, getOwnerOfItem, etc.) can find it.
       const item = this.engine.spawn(entityId);
       item.category = 'item';
       item.position.x = px; item.position.z = pz;
-      (item as any).stats = { ...(typeDef as Record<string, unknown>), type: typeId, quantity: 1 };
+      (item as any).stats = { ...(typeDef as Record<string, unknown>), type: typeId, quantity };
       this._entities.set(entityId, item);
       // Seed entity-scope variables from typeDef.variables defaults — same reason
       // as the unit path in spawnUnit. Without this, scripts that gate behaviour on
@@ -788,7 +802,7 @@ export class GameServer {
       const unit = this._entities.get(uid);
       if (!unit?.stats) return;
       const slotIdx = Number(rawSlot) || 0;
-      const inv = (unit.stats.inventory ?? []) as Array<{ id?: string; type?: string } | null>;
+      const inv = (unit.stats.inventory ?? []) as Array<{ id?: string; type?: string; quantity?: number } | null>;
       const item = inv[slotIdx];
       if (!item?.type) return;
       // Leave the slot empty (null) rather than splicing — splice would shift every
@@ -800,8 +814,9 @@ export class GameServer {
         this._entities.delete(item.id);
       }
       inv[slotIdx] = null;
-      // Spawn world item at unit's position via the same path as item:spawn.
-      this.engine.events.emit('item:spawn', [item.type, { x: unit.position.x * this._tilePx, y: unit.position.z * this._tilePx }]);
+      // Spawn world item at unit's position via the same path as item:spawn,
+      // preserving the slot's stack quantity.
+      this.engine.events.emit('item:spawn', [item.type, { x: unit.position.x * this._tilePx, y: unit.position.z * this._tilePx }, Number(item.quantity) || 1]);
       this._syncCurrentItemAndBroadcast(uid, unit);
     });
     this.engine.events.on('inventory:dropAt', (rawIid: unknown, rawPos: unknown) => {
@@ -813,36 +828,43 @@ export class GameServer {
       // Detach from owner, spawn at the position.
       const typeId = item.stats.type as string;
       const ownerId = item.stats.ownerId as string;
-      this.engine.events.emit('item:spawn', [typeId, pos]);
+      // The inventory slot *record* is the source of truth for stack count: a
+      // stack-pickup bumps `record.quantity` but never the backing carried-item
+      // entity's `stats.quantity`, so the entity's value is stale (still 1 for a
+      // stack the player grew to N via pickups). Read the owner's slot record
+      // and drop that quantity; fall back to the entity only when there's no
+      // owner/slot (a free item dropped at a position).
+      const owner = ownerId ? this._entities.get(ownerId) : null;
+      const ownerInv = (owner?.stats?.inventory ?? null) as Array<{ id?: string; quantity?: number } | null> | null;
+      const slotIdx = ownerInv ? ownerInv.findIndex(it => it?.id === iid) : -1;
+      const dropQty = slotIdx !== -1
+        ? Number(ownerInv![slotIdx]!.quantity) || 1
+        : Number(item.stats.quantity) || 1;
+      this.engine.events.emit('item:spawn', [typeId, pos, dropQty]);
       // Remove from owner's inventory and destroy the carried-item entity. Without
       // destroying it, `_entities.get(iid)` keeps resolving and a stale
       // `currentItemId` pointing at this id (the "press G to drop" script reads
       // `getItemCurrentlyHeldByUnit` which returns `currentItemId` directly) lets
       // the same id be dropped repeatedly — each press spawning a fresh world item.
-      if (ownerId) {
-        const owner = this._entities.get(ownerId);
-        if (owner?.stats?.inventory) {
-          // Null the matching slot in place rather than filtering — `filter`
-          // shifts every trailing slot one position forward, which moves the
-          // player's other items out from under their slot indices.
-          const ownerInv = owner.stats.inventory as Array<{ id?: string } | null>;
-          const slotIdx = ownerInv.findIndex(it => it?.id === iid);
-          if (slotIdx !== -1) ownerInv[slotIdx] = null;
-          item.destroy?.();
-          this._entities.delete(iid);
-          this._syncCurrentItemAndBroadcast(ownerId, owner);
-        }
+      if (owner?.stats?.inventory) {
+        // Null the matching slot in place rather than filtering — `filter`
+        // shifts every trailing slot one position forward, which moves the
+        // player's other items out from under their slot indices.
+        if (slotIdx !== -1) (owner.stats.inventory as Array<unknown | null>)[slotIdx] = null;
+        item.destroy?.();
+        this._entities.delete(iid);
+        this._syncCurrentItemAndBroadcast(ownerId, owner);
       }
     });
     this.engine.events.on('inventory:dropAll', (rawUid: unknown) => {
       const uid = rawUid as string;
       const unit = this._entities.get(uid);
       if (!unit?.stats) return;
-      const inv = (unit.stats.inventory ?? []) as Array<{ type?: string } | null>;
+      const inv = (unit.stats.inventory ?? []) as Array<{ type?: string; quantity?: number } | null>;
       const px = unit.position.x * this._tilePx;
       const py = unit.position.z * this._tilePx;
       for (const it of inv) {
-        if (it?.type) this.engine.events.emit('item:spawn', [it.type, { x: px, y: py }]);
+        if (it?.type) this.engine.events.emit('item:spawn', [it.type, { x: px, y: py }, Number(it.quantity) || 1]);
       }
       unit.stats.inventory = [];
       this._transport.broadcast({
@@ -1115,13 +1137,39 @@ export class GameServer {
       writeStat(rawIid as string, { ammo: Number(ammo) || 0 });
     });
     this.engine.events.on('item:stopUse', forwardCmd('stopUsingItem'));
+    // Release: end the continuous-use loop started by `item:startUse`. Separate
+    // listener so the existing `stopUsingItem` client forward above is untouched.
+    this.engine.events.on('item:stopUse', (rawIid: unknown) => {
+      const itemId = rawIid as string;
+      if (itemId) this._itemsBeingUsed.delete(itemId);
+    });
     this.engine.events.on('item:changeImage', forwardCmd('changeItemImage'));
+
+    // Press-and-hold use (button1 → `startUsingItem`). Taro's `Item.startUsing()`
+    // sets `isBeingUsed = true` and fires once that frame; `Item._behaviour()`
+    // then calls `use()` every tick while held, self-throttled by `fireRate`.
+    // Modu's analog: fire once now, then register the held item so
+    // `_processItemUse` re-emits `item:use` every `fireRate` ms until
+    // `item:stopUse`. `useItemOnce` keeps emitting a bare one-shot `item:use`.
+    this.engine.events.on('item:startUse', (rawIid: unknown) => {
+      const itemId = rawIid as string;
+      if (!itemId) return;
+      // Taro's `Item.startUsing()` no-ops when already being used. Without this
+      // a script re-calling `startUsingItem` while held would fire every call,
+      // bypassing fireRate.
+      if (this._itemsBeingUsed.has(itemId)) return;
+      const holder = this._resolveItemHolder(itemId);
+      if (!holder) return;
+      this.engine.events.emit('item:use', [itemId]);
+      this._itemsBeingUsed.set(itemId, this._itemFireRateMs(holder.invEntry));
+    });
 
     // Item use → fire `itemIsUsed` (and `thisUnitUsesItem` per the unit's type scripts),
     // plus the built-in gun behaviour when the held item type is `isGun: true`.
-    // ActionRunner emits `item:use` for both `useItemOnce` and `startUsingItem`; the only
-    // signal we have is the item entity. Held items live in unit.stats.inventory as bare
-    // `{id,type,quantity}` records — they aren't real entities — so we have to scan units'
+    // `item:use` is the single-shot signal (emitted directly by `useItemOnce`, by
+    // the AI fire loop, and once per fireRate tick by the held-use loop). Held
+    // items live in unit.stats.inventory as bare `{id,type,quantity}` records —
+    // they aren't real entities — so we have to scan units'
     // inventories to resolve the firing unit.
     this.engine.events.on('item:use', (rawEid: unknown) => {
       const itemId = rawEid as string;
@@ -1139,8 +1187,32 @@ export class GameServer {
         if (found) { firingUnit = ent; invEntry = found; break; }
       }
       // World-item fallback: dropped/equipped items that *are* in `_entities` carry ownerId.
-      const worldItem = this._entities.get(itemId) as { stats?: { ownerId?: string; type?: string } } | undefined;
+      const worldItem = this._entities.get(itemId) as { stats?: { ownerId?: string; type?: string; lastUsed?: number } } | undefined;
       const unitId = firingUnit?.id ?? worldItem?.stats?.ownerId;
+
+      const itemTypeKey = invEntry?.type ?? worldItem?.stats?.type;
+      const itemType = itemTypeKey
+        ? (this.types.get('itemTypes', itemTypeKey) as Record<string, any> | null)
+        : null;
+
+      // FireRate gate — taro's `Item.use()`: a shot only happens when
+      // `_stats.lastUsed + fireRate < taro.now`, and `stopUsing()` never clears
+      // `lastUsed`. Modu previously kept the throttle only in `_itemsBeingUsed`,
+      // which `item:stopUse` deletes — so a quick LMB click (mousedown→
+      // `startUsingItem`, mouseup→`stopUsingItem`) wiped the cooldown and the
+      // next press fired instantly, letting players shoot as fast as they could
+      // click. Persist `lastUsed` on the item's own record (the inventory
+      // entry, or the world entity's stats) so it survives release and is GC'd
+      // with the item — exactly taro's `_stats.lastUsed`. Bail before any side
+      // effect (trigger/projectile/consume/tween) when still within fireRate.
+      const fireRateRecord = (invEntry ?? worldItem?.stats) as { lastUsed?: number } | undefined;
+      if (fireRateRecord) {
+        const fireRate = Number(itemType?.fireRate) || 1000;
+        const lastUsed = fireRateRecord.lastUsed;
+        if (lastUsed !== undefined && this._gameTimeMs - lastUsed < fireRate) return;
+        fireRateRecord.lastUsed = this._gameTimeMs;
+      }
+
       this.scripts.trigger('itemIsUsed', { itemId, unitId });
       if (unitId) this.scripts.trigger('thisUnitUsesItem', { itemId, unitId });
 
@@ -1149,10 +1221,6 @@ export class GameServer {
       // projectile from the gun's tip in the unit's facing direction. Without this,
       // games that bind `button1` → `startUsingItem` produce no bullets unless they
       // also wire an explicit `itemIsUsed` script that calls `createProjectileAtPosition`.
-      const itemTypeKey = invEntry?.type ?? worldItem?.stats?.type;
-      const itemType = itemTypeKey
-        ? (this.types.get('itemTypes', itemTypeKey) as Record<string, any> | null)
-        : null;
       if (firingUnit && invEntry?.type) {
         if (itemType?.isGun && itemType?.projectileType) {
           this._fireGunProjectile(firingUnit, itemType, invEntry.id);
@@ -1659,6 +1727,121 @@ export class GameServer {
       type: MessageType.EntityStatsUpdate,
       data: { [unitId]: update },
     });
+    // Inventory just changed shape — re-derive item passive bonuses (armor).
+    this._reconcilePassiveBonuses(unitId, unit);
+  }
+
+  /** Apply / remove item `bonus.passive` attribute modifiers as items enter and
+   *  leave a unit's inventory — taro's Unit.updateStats() (moddio2
+   *  engine/core/TaroEntity.js:4096). Armor (helmets, chest pieces, shields) in
+   *  Karmaslayers is modelled purely as items whose `bonus.passive.unitAttribute`
+   *  raises the wearer's max HP while the item is carried; without this the
+   *  items sit inert in the inventory and "wearing armor" does nothing.
+   *
+   *  Idempotent reconcile: the set of currently-credited bonuses is recorded on
+   *  `unit.stats._passiveBonusApplied` ({ [invRecId]: itemTypeId }). Every
+   *  inventory mutation routes through `_syncCurrentItemAndBroadcast`, which
+   *  calls this; we diff desired-vs-applied and apply/remove only the delta, so
+   *  pickup, give, drop, dropAll, slot-swap and backpack moves are all covered
+   *  by one path. Keying by the inventory record's stable `id` (not slot index)
+   *  keeps a drag-swap from double-counting or dropping a still-held bonus. */
+  private _reconcilePassiveBonuses(unitId: string, unit: any): void {
+    if (!unit?.stats) return;
+    const inv = (unit.stats.inventory ?? []) as Array<{ id?: string; type?: string } | null>;
+    const invSize = Number(unit.stats.inventorySize) || inv.length;
+    const unitTypeId = unit.stats.type as string | undefined;
+    const ownerId = unit.stats.ownerId as string | undefined;
+    const player = ownerId ? this._entities.get(ownerId) : null;
+
+    // desired: invRecId -> itemTypeId for every inventory item whose passive
+    // bonus is currently in force. Gate mirrors taro: a backpack slot
+    // (index >= inventorySize) only counts when the bonus is NOT
+    // `isDisabledInBackpack`, and the unit type must be able to use the item.
+    const desired = new Map<string, string>();
+    inv.forEach((rec, slotIdx) => {
+      if (!rec?.id || !rec.type) return;
+      const itemType = this.types.get('itemTypes', rec.type) as Record<string, any> | null;
+      const passive = itemType?.bonus?.passive;
+      if (!passive) return;
+      if (slotIdx >= invSize && passive.isDisabledInBackpack === true) return;
+      const canBeUsedBy = itemType?.canBeUsedBy as string[] | undefined;
+      const canUse = !canBeUsedBy || canBeUsedBy.length === 0 ||
+        (unitTypeId != null && canBeUsedBy.indexOf(unitTypeId) > -1);
+      if (!canUse) return;
+      desired.set(rec.id, rec.type);
+    });
+
+    const applied = (unit.stats._passiveBonusApplied ?? {}) as Record<string, string>;
+    const unitChanged = new Set<string>();
+    const playerChanged = new Set<string>();
+
+    // Remove bonuses for records that left the inventory (or changed type).
+    for (const [recId, typeId] of Object.entries(applied)) {
+      if (desired.get(recId) === typeId) continue;
+      this._applyPassiveBonus(unit, player, typeId, true, unitChanged, playerChanged);
+      delete applied[recId];
+    }
+    // Apply bonuses for records that newly qualify.
+    for (const [recId, typeId] of desired) {
+      if (applied[recId] === typeId) continue;
+      this._applyPassiveBonus(unit, player, typeId, false, unitChanged, playerChanged);
+      applied[recId] = typeId;
+    }
+    unit.stats._passiveBonusApplied = applied;
+
+    if (unitChanged.size) {
+      const patch: Record<string, unknown> = {};
+      for (const slot of unitChanged) patch[slot] = unit.stats[slot];
+      this._transport.broadcast({ type: MessageType.EntityStatsUpdate, data: { [unitId]: patch } });
+    }
+    if (player && ownerId && playerChanged.size) {
+      const patch: Record<string, unknown> = {};
+      for (const slot of playerChanged) patch[slot] = player.stats[slot];
+      this._transport.broadcast({ type: MessageType.EntityStatsUpdate, data: { [ownerId]: patch } });
+    }
+  }
+
+  /** One item type's passive attribute math, applied (`remove=false`) or undone
+   *  (`remove=true`). Mirrors taro Unit.updateStats exactly:
+   *    percentage  apply  v*=1+p/100  max*=1+p/100      remove  v/=…  max/=…
+   *    flat        apply  max+=v  v=clamp(value,min,newMax)   remove  max-=v  …
+   *  taro uses `parseFloat(value) || 1` for the working value, so a downed
+   *  (0-HP) wearer still scales off 1 rather than collapsing the attribute. */
+  private _applyPassiveBonus(
+    unit: any, player: any, itemTypeId: string, remove: boolean,
+    unitChanged: Set<string>, playerChanged: Set<string>,
+  ): void {
+    const itemType = this.types.get('itemTypes', itemTypeId) as Record<string, any> | null;
+    const passive = itemType?.bonus?.passive;
+    if (!passive) return;
+    const target = (entity: any, attrs: Record<string, any> | undefined, changed: Set<string>) => {
+      if (!entity?.stats || !attrs) return;
+      for (const [attrId, bonus] of Object.entries(attrs)) {
+        const slot = `attr_${attrId}`;
+        const cur = entity.stats[slot];
+        if (!cur || !bonus) continue;
+        const min = Number(cur.min) || 0;
+        const value = parseFloat(cur.value) || 1;
+        const max = parseFloat(cur.max);
+        const amt = parseFloat((bonus as { value: unknown }).value as string);
+        if (!Number.isFinite(amt) || !Number.isFinite(max)) continue;
+        let newValue: number;
+        let newMax: number;
+        if ((bonus as { type?: string }).type === 'percentage') {
+          const f = 1 + amt / 100;
+          if (f === 0) continue;
+          newValue = remove ? value / f : value * f;
+          newMax = remove ? max / f : max * f;
+        } else {
+          newMax = remove ? max - amt : max + amt;
+          newValue = Math.min(newMax, Math.max(min, value));
+        }
+        entity.stats[slot] = { ...cur, value: newValue, max: newMax };
+        changed.add(slot);
+      }
+    };
+    target(unit, passive.unitAttribute, unitChanged);
+    target(player, passive.playerAttribute, playerChanged);
   }
 
   /** Spawn one projectile from a unit's currently-held gun item type. Mirrors taro's
@@ -1909,11 +2092,14 @@ export class GameServer {
 
   private _tick(dt: number): void {
     this._tickCount++;
+    this._gameTimeMs += dt;
 
     // Process input → apply forces to physics bodies
     this._processMovement(dt);
     // Drive AI behaviors for NPC units (wandering, etc.)
     this._processAI(dt);
+    // Re-fire held items (button1 held down) at their fireRate cadence.
+    this._processItemUse(dt);
 
     // Step physics with FIXED timestep (prevents jitter from variable dt)
     if (this._physics) {
@@ -2193,6 +2379,55 @@ export class GameServer {
    *    item's `fireRate`. The item-use handler fires the projectile that actually
    *    damages the player.
    */
+  /** Scan unit inventories for the bare `{id,type,quantity}` record matching
+   *  `itemId` and return it with its holding unit. Held items aren't real
+   *  entities, so resolution is by inventory scan (same as the `item:use`
+   *  handler). Returns null if no unit holds it. */
+  private _resolveItemHolder(
+    itemId: string,
+  ): { unit: any; invEntry: { id?: string; type?: string; quantity?: number } } | null {
+    for (const ent of this._entities.values()) {
+      if (ent.category !== 'unit') continue;
+      const inv = (ent.stats?.inventory ?? []) as Array<{ id?: string; type?: string; quantity?: number } | null>;
+      const found = inv.find((i) => i?.id === itemId) ?? undefined;
+      if (found) return { unit: ent, invEntry: found };
+    }
+    return null;
+  }
+
+  /** ms between uses for an inventory entry's item type. Taro's `Item._stats.fireRate`;
+   *  defaults to 1000 when unset — same default the AI fire loop uses. */
+  private _itemFireRateMs(invEntry: { type?: string } | undefined): number {
+    const itemType = invEntry?.type
+      ? (this.types.get('itemTypes', invEntry.type) as Record<string, any> | null)
+      : null;
+    return Number(itemType?.fireRate) || 1000;
+  }
+
+  /** Continuous held-item use. For every item registered via `item:startUse`
+   *  (button1 held / `startUsingItem`), count down its fireRate timer and
+   *  re-emit `item:use` when it elapses — taro's `Item._behaviour()` calling
+   *  `use()` each tick while `isBeingUsed`. Drops the entry (taro calls the
+   *  previous item's `stopUsing`) when the holder is gone or has switched away
+   *  from the item, so a holstered/dropped weapon can't keep firing. */
+  private _processItemUse(dt: number): void {
+    if (this._itemsBeingUsed.size === 0) return;
+    for (const [itemId, cd] of this._itemsBeingUsed) {
+      const holder = this._resolveItemHolder(itemId);
+      if (!holder || (holder.unit.stats as any)?.currentItemId !== itemId) {
+        this._itemsBeingUsed.delete(itemId);
+        continue;
+      }
+      const next = cd - dt;
+      if (next > 0) {
+        this._itemsBeingUsed.set(itemId, next);
+        continue;
+      }
+      this.engine.events.emit('item:use', [itemId]);
+      this._itemsBeingUsed.set(itemId, this._itemFireRateMs(holder.invEntry));
+    }
+  }
+
   private _processAI(dt: number): void {
     // Collect the set of units currently controlled by a connected player so we skip them.
     const playerUnitIds = new Set<string>();
@@ -2821,8 +3056,21 @@ export class GameServer {
     ownerId?: string,
     spawn?: { x?: number; z?: number; rotation?: number },
   ): Unit {
+    // Taro's overhead name label is the *owner player's* name, and is hidden
+    // entirely when a unit has no owner player (Unit.js `updateNameLabel`:
+    // `playerTypeData ? playerTypeData.showNameLabel === false : true` — no
+    // owner player → ternary is `true` → label hidden). `typeDef.name` is the
+    // editor-facing unitType label and is NEVER a unit's in-game name in taro.
+    // Seeding it here is what drew "Invisible Body - 64x64" (and every AI mob's
+    // type name) above otherwise-invisible/ownerless units. Resolve the owner
+    // player and use its name; ownerless units get '' so no label is drawn.
+    const ownerPlayer = ownerId ? this._entities.get(ownerId) : undefined;
+    const ownerName =
+      ownerPlayer && ownerPlayer.category === 'player'
+        ? String((ownerPlayer.stats as Record<string, unknown>)?.name ?? '')
+        : '';
     const unit = new Unit(undefined, {
-      name: (typeDef.name as string) || typeId,
+      name: ownerName,
       type: typeId,
       health: (typeDef.attributes as any)?.health?.value ?? 100,
       maxHealth: (typeDef.attributes as any)?.health?.max ?? 100,
@@ -2921,7 +3169,13 @@ export class GameServer {
       type: MessageType.EntityCreate,
       data: buildEntityCreatePayload(
         'unit', unit.id, unit.position.x, unit.position.z, (unit as any).rotation || 0,
-        { ...unit.stats, ...typeDef },
+        // typeDef is spread for the client's rendering fields (cellSheet, bodies,
+        // animations, …) but its `name` is the unitType's *editor* label — taro's
+        // overhead label is the owner player's name, never the type name. Letting
+        // typeDef.name win here is what put "Invisible Body - 64x64" over the
+        // ownerless sensor bodies. The unit's runtime name (owner player's name,
+        // or '' when ownerless) must take precedence.
+        { ...unit.stats, ...typeDef, name: (unit.stats as Record<string, unknown>).name ?? '' },
       ),
     });
 
@@ -3175,10 +3429,12 @@ export class GameServer {
           this._entities.delete(itemRec.id);
         }
         this._syncCurrentItemAndBroadcast(unitId, unit);
-        // Spawn a fresh world item at the unit's position.
+        // Spawn a fresh world item at the unit's position, preserving the
+        // dropped stack's quantity so picking it back up restores the full stack.
         this.engine.events.emit('item:spawn', [
           itemRec.type,
           { x: unit.position.x * this._tilePx, y: unit.position.z * this._tilePx },
+          Number(itemRec.quantity) || 1,
         ]);
         this.scripts.trigger('unitDroppedAnItem', { unitId, itemId: itemRec.id });
         return;
