@@ -313,4 +313,23 @@ describe.skipIf(!URI)('Single-player dev sandbox', () => {
     await new Promise(r => setTimeout(r, 50));
     expect(lastSystemChat()).toMatch(/list units/i);
   });
+
+  it('/dev qtp toggles quick-teleport and emits a devQuickTeleport UICommand', async () => {
+    await init({ singlePlayer: true });
+    const [clientId, playerData] = firstPlayer();
+    const pid = playerData.player.id;
+    const qt = (server as any)._quickTeleport as Set<string>;
+
+    transport.client.send({ type: MessageType.PlayerChat, data: { text: '/dev qtp' } });
+    await new Promise(r => setTimeout(r, 40));
+    expect(qt.has(pid)).toBe(true);
+    let cmd = lastUICommand('devQuickTeleport');
+    expect(cmd?.args?.[0]).toBe(true);
+
+    transport.client.send({ type: MessageType.PlayerChat, data: { text: '/dev qtp' } });
+    await new Promise(r => setTimeout(r, 40));
+    expect(qt.has(pid)).toBe(false);
+    cmd = lastUICommand('devQuickTeleport');
+    expect(cmd?.args?.[0]).toBe(false);
+  });
 });

@@ -3108,6 +3108,20 @@ export class GameServer {
           this._devReply(clientId, `spawned ${n}× unit "${typeId}"`);
           return;
         }
+        case 'qtp': {
+          const pid = playerData.player.id;
+          const enabled = !this._quickTeleport.has(pid);
+          if (enabled) this._quickTeleport.add(pid);
+          else this._quickTeleport.delete(pid);
+          this._transport.send(clientId, {
+            type: MessageType.UICommand,
+            data: { command: 'devQuickTeleport', args: [enabled] },
+          });
+          this._devReply(clientId, enabled
+            ? 'Quick-teleport ON — press T to teleport to cursor'
+            : 'Quick-teleport OFF');
+          return;
+        }
         default:
           this._devReply(clientId, `Unknown dev command "/dev ${sub}".\n${GameServer.DEV_HELP}`);
           return;
