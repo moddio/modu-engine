@@ -1,8 +1,8 @@
 // packages/engine/tests/differential/selfcheck.test.ts
 import { describe, it, expect } from 'vitest';
-import { diffTraces } from './oracle';
+import { diffTraces, assertTracesEqual } from './oracle';
 import { runTsCase } from './tsHarness';
-import { taroAvailable } from './taroHarness';
+import { taroAvailable, runTaroCase } from './taroHarness';
 import type { Trace } from './types';
 
 describe('harness self-check', () => {
@@ -24,5 +24,19 @@ describe('harness self-check', () => {
   it('taroAvailable() is a clean boolean (skip path never throws)', () => {
     expect(() => taroAvailable()).not.toThrow();
     expect(typeof taroAvailable()).toBe('boolean');
+  });
+
+  it('the gate would CATCH a real divergence end-to-end (doctored TS trace)', () => {
+    if (!taroAvailable()) return; // skip cleanly when taro source absent
+    const c = {
+      name: 'sensitivity',
+      initialVars: { x: { value: 1, type: 'number' } },
+      actions: [{ type: 'setVariable', variableName: 'x', value: 2 }],
+    };
+    const taroTrace = runTaroCase(c);
+    const doctored = { ...runTsCase(c), vars: { x: 999 } };
+    expect(() =>
+      assertTracesEqual('sensitivity', taroTrace, doctored, c),
+    ).toThrow();
   });
 });

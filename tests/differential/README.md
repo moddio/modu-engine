@@ -35,6 +35,15 @@ functions (getVariable, calculate, concat, comparisons). Nondeterministic
 functions (random/time/playerCount) and all entity/physics/network actions are
 deliberately OUT of scope.
 
+The `for` action and `return` nested inside a loop are NOT differentially
+covered: taro's `for` is inclusive and mutates a named global variable while
+the TS engine's is exclusive with a local counter, and taro throws on `return`
+inside `repeat`/`while` while the TS engine bubbles it. The fuzz generator
+never emits these, and `for` actions delegate to each engine's real
+implementation (no per-iteration flow markers). Adding faithful differential
+coverage for them is future work and would surface a genuine, expected
+divergence requiring an explicit decision.
+
 ## Condition encoding
 
 Conditions MUST use taro's native array form:

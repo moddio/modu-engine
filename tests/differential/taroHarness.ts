@@ -154,18 +154,11 @@ export function runTaroCase(rawCase: Case): Trace {
         }
         continue;
       }
-      if (type === 'for') {
-        const start = scriptStub.param.getValue(a.start, vars);
-        const stop = scriptStub.param.getValue(a.stop, vars);
-        flow.push('enter:for');
-        for (let i = start; i < stop; i++) {
-          flow.push(`iter:for#${i}`);
-          const sig = exec(a.actions ?? [], vars);
-          if (sig === 'break' || vars.break) { vars.break = false; break; }
-          if (sig === 'return') return 'return';
-        }
-        continue;
-      }
+      // 'for' is intentionally NOT re-walked: it delegates to each engine's real
+      // for-loop via the fallthrough below, so taro's (inclusive, named-var) and
+      // the TS engine's (exclusive, local) real semantics are compared faithfully.
+      // Consequence: per-iteration flow markers are not recorded for 'for'.
+
       // Leaf action: delegate to taro's real run for one action.
       taroRun([a], vars, 'p', scriptStub.currentActionLineNumber);
     }

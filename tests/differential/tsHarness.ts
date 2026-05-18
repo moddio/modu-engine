@@ -81,18 +81,10 @@ export function runTsCase(rawCase: Case): Trace {
         }
         continue;
       }
-      if (type === 'for') {
-        const start = Number(resolve(action.start, vars)) || 0;
-        const stop = Number(resolve(action.stop, vars)) || 0;
-        flow.push('enter:for');
-        for (let i = start; i < stop; i++) {
-          flow.push(`iter:for#${i}`);
-          const sig = exec((action.actions as any[]) ?? [], { ...vars, i });
-          if (sig === 'break') break;
-          if (sig === 'return') return 'return';
-        }
-        continue;
-      }
+      // 'for' is intentionally NOT re-walked: it delegates to each engine's real
+      // for-loop via the fallthrough below, so taro's (inclusive, named-var) and
+      // the TS engine's (exclusive, local) real semantics are compared faithfully.
+      // Consequence: per-iteration flow markers are not recorded for 'for'.
 
       // Leaf action (setVariable / increase / decrease / calculate): delegate
       // to the real engine so its exact semantics are exercised.
