@@ -243,8 +243,7 @@ describe.skipIf(!URI)('Single-player dev sandbox', () => {
     sent = [];
     transport.client.send({ type: MessageType.PlayerChat, data: { text: '/dev shop' } });
     await new Promise(r => setTimeout(r, 50));
-    const shops = Object.keys((server as any)._rawGameData.shops ?? {});
-    expect(lastSystemChat()).toContain(shops[0]);
+    expect(lastSystemChat()).toContain(`${(server as any)._rawGameData.shops[Object.keys((server as any)._rawGameData.shops)[0]].name}(1)`);
   });
 
   it('/dev shop <id> sends an openShop UICommand', async () => {
@@ -375,5 +374,47 @@ describe.skipIf(!URI)('Single-player dev sandbox', () => {
     await new Promise(r => setTimeout(r, 50));
     expect(scriptSaw).toBe(true);
     expect(lastSystemChat()).toBeNull();
+  });
+
+  it('/dev shop lists shops by name with 1-based index', async () => {
+    await init({ singlePlayer: true });
+    const shops = (server as any)._rawGameData.shops as Record<string, any>;
+    const ids = Object.keys(shops);
+    const firstName = shops[ids[0]].name as string;
+    sent = [];
+    transport.client.send({ type: MessageType.PlayerChat, data: { text: '/dev shop' } });
+    await new Promise(r => setTimeout(r, 50));
+    expect(lastSystemChat()).toContain(`${firstName}(1)`);
+  });
+
+  it('/dev shop <number> opens the shop at that 1-based index', async () => {
+    await init({ singlePlayer: true });
+    const ids = Object.keys((server as any)._rawGameData.shops);
+    sent = [];
+    transport.client.send({ type: MessageType.PlayerChat, data: { text: '/dev shop 2' } });
+    await new Promise(r => setTimeout(r, 50));
+    const cmd = lastUICommand('openShop');
+    expect(cmd).not.toBeNull();
+    expect(cmd.args[1]).toBe(ids[1]);
+  });
+
+  it('/dev shop still accepts a raw shop id', async () => {
+    await init({ singlePlayer: true });
+    const ids = Object.keys((server as any)._rawGameData.shops);
+    sent = [];
+    transport.client.send({ type: MessageType.PlayerChat, data: { text: `/dev shop ${ids[0]}` } });
+    await new Promise(r => setTimeout(r, 50));
+    const cmd = lastUICommand('openShop');
+    expect(cmd?.args?.[1]).toBe(ids[0]);
+  });
+
+  it('/dev shop with an out-of-range number replies with the shop list', async () => {
+    await init({ singlePlayer: true });
+    const shops = (server as any)._rawGameData.shops as Record<string, any>;
+    const firstName = shops[Object.keys(shops)[0]].name as string;
+    sent = [];
+    transport.client.send({ type: MessageType.PlayerChat, data: { text: '/dev shop 999' } });
+    await new Promise(r => setTimeout(r, 50));
+    expect(lastSystemChat()).toContain(`${firstName}(1)`);
   });
 });

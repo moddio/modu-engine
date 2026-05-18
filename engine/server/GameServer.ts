@@ -2972,7 +2972,7 @@ export class GameServer {
     '/dev tp <x> <y>                      teleport to tile coords',
     '/dev tp <regionName>                 teleport to region center',
     '/dev qtp                             toggle press-T-to-cursor teleport',
-    '/dev shop [shopId]                   list shops / open a shop (free buy)',
+    '/dev shop [number]                   list shops by name / open by number (free buy)',
     '/dev spawn unit <typeId> [n]         spawn unit(s) at your position',
     '/dev spawn item <typeId> [qty]       give item to controlled unit',
     '/dev list units | /dev list items    list valid type ids',
@@ -3059,17 +3059,26 @@ export class GameServer {
         case 'shop': {
           const shops = (this._rawGameData?.shops ?? {}) as Record<string, any>;
           const ids = Object.keys(shops);
-          const shopId = parts[2];
-          if (!shopId) {
-            this._devReply(clientId, `Shops: ${ids.join(', ') || '(none)'}\n/dev shop <id> to open (free buy in single-player)`);
+          const list =
+            ids.map((id, i) => `${(shops[id]?.name as string) || id}(${i + 1})`).join(', ') || '(none)';
+          const arg = parts[2];
+          if (!arg) {
+            this._devReply(clientId, `Shops: ${list}\nUse /dev shop <number> to open (free buy in single-player)`);
             return;
           }
-          if (!shops[shopId]) {
-            this._devReply(clientId, `Unknown shop "${shopId}". Shops: ${ids.join(', ') || '(none)'}`);
+          let shopId: string | undefined;
+          const idx = Number(arg);
+          if (Number.isInteger(idx) && idx >= 1 && idx <= ids.length) {
+            shopId = ids[idx - 1];
+          } else if (shops[arg]) {
+            shopId = arg;
+          }
+          if (!shopId) {
+            this._devReply(clientId, `Unknown shop "${arg}". Shops: ${list}`);
             return;
           }
           this.engine.events.emit('ui:openShop', [playerData.player.id, shopId]);
-          this._devReply(clientId, `opened shop "${shopId}" (purchases are free)`);
+          this._devReply(clientId, `opened "${(shops[shopId]?.name as string) || shopId}" (purchases are free)`);
           return;
         }
         case 'list': {
