@@ -106,4 +106,48 @@ describe.skipIf(!URI)('Single-player dev sandbox', () => {
     const after = ((unit.stats as any).inventory ?? []).filter((s: any) => s?.type === itemTypeId).length;
     expect(after).toBe(before);
   });
+
+  function lastSystemChat(): string | null {
+    for (let i = sent.length - 1; i >= 0; i--) {
+      const m = sent[i];
+      if (m?.type === MessageType.ChatMessage && m.data?.system) return String(m.data.text ?? '');
+    }
+    return null;
+  }
+
+  it('single-player: /dev help replies with a system chat message and is not echoed', async () => {
+    await init({ singlePlayer: true });
+    let scriptSawIt = false;
+    (server as any).scripts.trigger = ((orig: any) =>
+      function (this: any, name: string, ctx: any) {
+        if (name === 'playerSendsChatMessage' && /\/dev/.test(ctx?.message ?? '')) scriptSawIt = true;
+        return orig.call(this, name, ctx);
+      })((server as any).scripts.trigger);
+
+    sent = [];
+    transport.client.send({ type: MessageType.PlayerChat, data: { text: '/dev help' } });
+    await new Promise(r => setTimeout(r, 50));
+
+    expect(lastSystemChat()).toMatch(/\/dev set/);
+    expect(scriptSawIt).toBe(false);
+    const echoed = sent.some(m => m?.type === MessageType.ChatMessage && !m.data?.system && /\/dev help/.test(m.data?.text ?? ''));
+    expect(echoed).toBe(false);
+  });
+
+  it('multiplayer: /dev help is treated as ordinary chat', async () => {
+    await init({ singlePlayer: false });
+    let scriptSawIt = false;
+    (server as any).scripts.trigger = ((orig: any) =>
+      function (this: any, name: string, ctx: any) {
+        if (name === 'playerSendsChatMessage' && /\/dev help/.test(ctx?.message ?? '')) scriptSawIt = true;
+        return orig.call(this, name, ctx);
+      })((server as any).scripts.trigger);
+
+    sent = [];
+    transport.client.send({ type: MessageType.PlayerChat, data: { text: '/dev help' } });
+    await new Promise(r => setTimeout(r, 50));
+
+    expect(scriptSawIt).toBe(true);
+    expect(lastSystemChat()).toBeNull();
+  });
 });

@@ -2799,6 +2799,12 @@ export class GameServer {
         const text = String(data?.text ?? '').slice(0, 500);
         const playerData = this._players.get(clientId);
         if (!playerData || !text) break;
+        // Single-player dev sandbox: consume `/dev …` before normal chat so it is
+        // never echoed and game scripts never see it.
+        if (this._singlePlayer && text.trim().toLowerCase().startsWith('/dev')) {
+          this._handleDevChat(text.trim(), clientId, playerData);
+          break;
+        }
         const playerId = playerData.player.id;
         // Update the per-player last-message store the resolver reads.
         this.scripts.actions.setLastChatForPlayer(playerId, text);
@@ -2945,6 +2951,47 @@ export class GameServer {
     }
     if (slot.event === 'stopCasting') {
       this.engine.events.emit('ability:stop', [playerData.unitId]);
+    }
+  }
+
+  /** Send a single-player dev-sandbox feedback line to one client. */
+  private _devReply(clientId: string, text: string): void {
+    this._transport.send(clientId, {
+      type: MessageType.ChatMessage,
+      data: { text, fromPlayerId: '', system: true },
+    });
+  }
+
+  private static readonly DEV_HELP = [
+    'Dev sandbox (single-player only):',
+    '/dev set <attrId> <value>            set controlled-unit attribute',
+    '/dev set player <attrId> <value>     set player attribute',
+    '/dev tp <x> <y>                      teleport to tile coords',
+    '/dev tp <regionName>                 teleport to region center',
+    '/dev qtp                             toggle press-T-to-cursor teleport',
+    '/dev shop [shopId]                   list shops / open a shop (free buy)',
+    '/dev spawn unit <typeId> [n]         spawn unit(s) at your position',
+    '/dev spawn item <typeId> [qty]       give item to controlled unit',
+    '/dev list units | /dev list items    list valid type ids',
+  ].join('\n');
+
+  /** Parse and execute a `/dev …` command. Never throws; always replies to the
+   *  caller. `text` is already trimmed and starts (case-insensitively) with /dev. */
+  private _handleDevChat(text: string, clientId: string, playerData: { player: Player; clientId: string; unitId: string }): void {
+    const parts = text.split(/\s+/);
+    const sub = (parts[1] ?? '').toLowerCase();
+    try {
+      switch (sub) {
+        case '':
+        case 'help':
+          this._devReply(clientId, GameServer.DEV_HELP);
+          return;
+        default:
+          this._devReply(clientId, `Unknown dev command "/dev ${sub}".\n${GameServer.DEV_HELP}`);
+          return;
+      }
+    } catch (err) {
+      this._devReply(clientId, `Dev command error: ${(err as Error)?.message ?? String(err)}`);
     }
   }
 
