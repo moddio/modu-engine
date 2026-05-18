@@ -268,4 +268,49 @@ describe.skipIf(!URI)('Single-player dev sandbox', () => {
     await new Promise(r => setTimeout(r, 50));
     expect(lastSystemChat()).toMatch(/shop/i);
   });
+
+  it('/dev list units and items list valid type ids', async () => {
+    await init({ singlePlayer: true });
+    sent = [];
+    transport.client.send({ type: MessageType.PlayerChat, data: { text: '/dev list units' } });
+    await new Promise(r => setTimeout(r, 30));
+    const unitIds = [...(server as any).types.getAll('unitTypes').keys()];
+    expect(lastSystemChat()).toContain(unitIds[0]);
+  });
+
+  it('/dev spawn item gives the item to the controlled unit', async () => {
+    await init({ singlePlayer: true });
+    const [clientId, playerData] = firstPlayer();
+    const unit = (server as any)._entities.get(playerData.unitId);
+    const itemTypeId = [...(server as any).types.getAll('itemTypes').keys()][0] as string;
+    const before = ((unit.stats as any).inventory ?? []).filter((s: any) => s?.type === itemTypeId).length;
+
+    transport.client.send({ type: MessageType.PlayerChat, data: { text: `/dev spawn item ${itemTypeId} 3` } });
+    await new Promise(r => setTimeout(r, 50));
+
+    const after = ((unit.stats as any).inventory ?? []).filter((s: any) => s?.type === itemTypeId).length;
+    expect(after).toBeGreaterThan(before);
+  });
+
+  it('/dev spawn unit creates units of that type', async () => {
+    await init({ singlePlayer: true });
+    const unitTypeId = [...(server as any).types.getAll('unitTypes').keys()][0] as string;
+    const countOf = () =>
+      [...((server as any)._entities as Map<string, any>).values()]
+        .filter((e) => e?.category === 'unit' && (e.stats as any)?.type === unitTypeId).length;
+    const before = countOf();
+
+    transport.client.send({ type: MessageType.PlayerChat, data: { text: `/dev spawn unit ${unitTypeId} 2` } });
+    await new Promise(r => setTimeout(r, 50));
+
+    expect(countOf()).toBe(before + 2);
+  });
+
+  it('/dev spawn unit with an unknown type hints at /dev list units', async () => {
+    await init({ singlePlayer: true });
+    sent = [];
+    transport.client.send({ type: MessageType.PlayerChat, data: { text: '/dev spawn unit __nope__' } });
+    await new Promise(r => setTimeout(r, 50));
+    expect(lastSystemChat()).toMatch(/list units/i);
+  });
 });

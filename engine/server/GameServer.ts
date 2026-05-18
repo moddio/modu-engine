@@ -3069,6 +3069,45 @@ export class GameServer {
           this._devReply(clientId, `opened shop "${shopId}" (purchases are free)`);
           return;
         }
+        case 'list': {
+          const what = (parts[2] ?? '').toLowerCase();
+          const cat = what === 'units' ? 'unitTypes' : what === 'items' ? 'itemTypes' : null;
+          if (!cat) { this._devReply(clientId, 'usage: /dev list units | /dev list items'); return; }
+          const ids = [...this.types.getAll(cat).keys()];
+          this._devReply(clientId, `${what}: ${ids.join(', ') || '(none)'}`);
+          return;
+        }
+        case 'spawn': {
+          const what = (parts[2] ?? '').toLowerCase();
+          const typeId = parts[3];
+          const n = Math.max(1, Math.floor(Number(parts[4]) || 1));
+          if (!typeId || (what !== 'unit' && what !== 'item')) {
+            this._devReply(clientId, 'usage: /dev spawn unit <typeId> [n]  |  /dev spawn item <typeId> [qty]');
+            return;
+          }
+          if (what === 'item') {
+            if (!this.types.get('itemTypes', typeId)) {
+              this._devReply(clientId, `Unknown item type "${typeId}". Try /dev list items`);
+              return;
+            }
+            this.engine.events.emit('inventory:giveItem', [playerData.unitId, typeId, n]);
+            this._devReply(clientId, `gave ${n}× item "${typeId}"`);
+            return;
+          }
+          const typeDef = this.types.get('unitTypes', typeId);
+          if (!typeDef) {
+            this._devReply(clientId, `Unknown unit type "${typeId}". Try /dev list units`);
+            return;
+          }
+          const here = this._entities.get(playerData.unitId);
+          const sx = here?.position?.x ?? 0;
+          const sz = here?.position?.z ?? 0;
+          for (let i = 0; i < n; i++) {
+            this.spawnUnit(typeId, typeDef, playerData.player.id, { x: sx, z: sz });
+          }
+          this._devReply(clientId, `spawned ${n}× unit "${typeId}"`);
+          return;
+        }
         default:
           this._devReply(clientId, `Unknown dev command "/dev ${sub}".\n${GameServer.DEV_HELP}`);
           return;
