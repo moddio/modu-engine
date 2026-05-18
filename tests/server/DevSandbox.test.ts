@@ -332,4 +332,48 @@ describe.skipIf(!URI)('Single-player dev sandbox', () => {
     cmd = lastUICommand('devQuickTeleport');
     expect(cmd?.args?.[0]).toBe(false);
   });
+
+  it('single-player: bare /help replies with the dev command list', async () => {
+    await init({ singlePlayer: true });
+    let scriptSaw = false;
+    (server as any).scripts.trigger = ((orig: any) =>
+      function (this: any, name: string, ctx: any) {
+        if (name === 'playerSendsChatMessage' && /^\/help$/.test((ctx?.message ?? '').trim())) scriptSaw = true;
+        return orig.call(this, name, ctx);
+      })((server as any).scripts.trigger);
+    sent = [];
+    transport.client.send({ type: MessageType.PlayerChat, data: { text: '/help' } });
+    await new Promise(r => setTimeout(r, 50));
+    expect(lastSystemChat()).toMatch(/\/dev set/);
+    expect(scriptSaw).toBe(false);
+  });
+
+  it('single-player: /help with an argument is NOT intercepted (passes to game chat)', async () => {
+    await init({ singlePlayer: true });
+    let scriptSaw = false;
+    (server as any).scripts.trigger = ((orig: any) =>
+      function (this: any, name: string, ctx: any) {
+        if (name === 'playerSendsChatMessage' && /\/help build/.test(ctx?.message ?? '')) scriptSaw = true;
+        return orig.call(this, name, ctx);
+      })((server as any).scripts.trigger);
+    sent = [];
+    transport.client.send({ type: MessageType.PlayerChat, data: { text: '/help build' } });
+    await new Promise(r => setTimeout(r, 50));
+    expect(scriptSaw).toBe(true);
+  });
+
+  it('multiplayer: bare /help is ordinary chat (not intercepted)', async () => {
+    await init({ singlePlayer: false });
+    let scriptSaw = false;
+    (server as any).scripts.trigger = ((orig: any) =>
+      function (this: any, name: string, ctx: any) {
+        if (name === 'playerSendsChatMessage' && /^\/help$/.test((ctx?.message ?? '').trim())) scriptSaw = true;
+        return orig.call(this, name, ctx);
+      })((server as any).scripts.trigger);
+    sent = [];
+    transport.client.send({ type: MessageType.PlayerChat, data: { text: '/help' } });
+    await new Promise(r => setTimeout(r, 50));
+    expect(scriptSaw).toBe(true);
+    expect(lastSystemChat()).toBeNull();
+  });
 });

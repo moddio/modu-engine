@@ -2801,8 +2801,10 @@ export class GameServer {
         if (!playerData || !text) break;
         // Single-player dev sandbox: consume `/dev …` before normal chat so it is
         // never echoed and game scripts never see it.
-        if (this._singlePlayer && text.trim().toLowerCase().startsWith('/dev')) {
-          this._handleDevChat(text.trim(), clientId, playerData);
+        const _devTrim = text.trim();
+        const _devLower = _devTrim.toLowerCase();
+        if (this._singlePlayer && (_devLower.startsWith('/dev') || _devLower === '/help')) {
+          this._handleDevChat(_devTrim, clientId, playerData);
           break;
         }
         const playerId = playerData.player.id;
@@ -2964,6 +2966,7 @@ export class GameServer {
 
   private static readonly DEV_HELP = [
     'Dev sandbox (single-player only):',
+    '/help  or  /dev help               show this list',
     '/dev set <attrId> <value>            set controlled-unit attribute',
     '/dev set player <attrId> <value>     set player attribute',
     '/dev tp <x> <y>                      teleport to tile coords',
