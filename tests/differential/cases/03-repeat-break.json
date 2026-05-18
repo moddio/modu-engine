@@ -1,0 +1,12 @@
+{
+  "name": "repeat with break",
+  "initialVars": { "n": { "value": 0, "type": "number" } },
+  "actions": [
+    { "type": "repeat", "count": 10, "actions": [
+      { "type": "increaseVariableByNumber", "variableName": "n", "number": 1 },
+      { "type": "log", "value": { "function": "getVariable", "variableName": "n" } },
+      { "type": "condition",
+        "conditions": { "operator": ">=", "operandA": { "function": "getVariable", "variableName": "n" }, "operandB": 3 },
+        "then": [ { "type": "break" } ], "else": [] } ] }
+  ]
+}
