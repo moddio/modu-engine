@@ -2978,6 +2978,14 @@ export class GameServer {
     const entry = shop.itemTypes?.[itemTypeId];
     if (!entry || entry.isPurchasable === false) return;
 
+    // Single-player dev sandbox: skip all affordability checks and cost
+    // deductions, grant the item directly. Multiplayer path below is unchanged.
+    if (this._singlePlayer) {
+      const grantQty = Number(entry.quantity) || 1;
+      this.engine.events.emit('inventory:giveItem', [playerData.unitId, itemTypeId, grantQty]);
+      return;
+    }
+
     const price = entry.price ?? {};
     const playerAttrCosts: Record<string, number> = price.playerAttributes ?? {};
     const requiredItems: Record<string, number> = price.requiredItemTypes ?? {};

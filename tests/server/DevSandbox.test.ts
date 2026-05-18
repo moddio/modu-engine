@@ -61,4 +61,49 @@ describe.skipIf(!URI)('Single-player dev sandbox', () => {
     await init({ singlePlayer: true });
     expect((server as any)._singlePlayer).toBe(true);
   });
+
+  // Pick any shop entry that has a non-empty price, so the only way a zero-resource
+  // unit can receive it is the single-player free-buy bypass.
+  function firstPricedShopEntry(): { shopId: string; itemTypeId: string } {
+    const shops = (server as any)._rawGameData.shops as Record<string, any>;
+    for (const [shopId, shop] of Object.entries<any>(shops)) {
+      for (const [itemTypeId, entry] of Object.entries<any>(shop.itemTypes ?? {})) {
+        const p = entry?.price ?? {};
+        const priced =
+          (Number(p.coins) || 0) > 0 ||
+          Object.keys(p.playerAttributes ?? {}).length > 0 ||
+          Object.keys(p.requiredItemTypes ?? {}).length > 0;
+        if (priced && entry.isPurchasable !== false) return { shopId, itemTypeId };
+      }
+    }
+    throw new Error('no priced shop entry in fixture');
+  }
+
+  it('single-player: buying a priced item with zero resources still grants it', async () => {
+    await init({ singlePlayer: true });
+    const [clientId, playerData] = firstPlayer();
+    const unit = (server as any)._entities.get(playerData.unitId);
+    const { shopId, itemTypeId } = firstPricedShopEntry();
+    const before = ((unit.stats as any).inventory ?? []).filter((s: any) => s?.type === itemTypeId).length;
+
+    transport.client.send({ type: MessageType.ShopBuyItem, data: { shopId, itemTypeId } });
+    await new Promise(r => setTimeout(r, 50));
+
+    const after = ((unit.stats as any).inventory ?? []).filter((s: any) => s?.type === itemTypeId).length;
+    expect(after).toBeGreaterThan(before);
+  });
+
+  it('multiplayer: buying a priced item with zero resources is rejected', async () => {
+    await init({ singlePlayer: false });
+    const [clientId, playerData] = firstPlayer();
+    const unit = (server as any)._entities.get(playerData.unitId);
+    const { shopId, itemTypeId } = firstPricedShopEntry();
+    const before = ((unit.stats as any).inventory ?? []).filter((s: any) => s?.type === itemTypeId).length;
+
+    transport.client.send({ type: MessageType.ShopBuyItem, data: { shopId, itemTypeId } });
+    await new Promise(r => setTimeout(r, 50));
+
+    const after = ((unit.stats as any).inventory ?? []).filter((s: any) => s?.type === itemTypeId).length;
+    expect(after).toBe(before);
+  });
 });
