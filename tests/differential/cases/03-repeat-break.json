@@ -6,7 +6,7 @@
       { "type": "increaseVariableByNumber", "variableName": "n", "number": 1 },
       { "type": "log", "value": { "function": "getVariable", "variableName": "n" } },
       { "type": "condition",
-        "conditions": { "operator": ">=", "operandA": { "function": "getVariable", "variableName": "n" }, "operandB": 3 },
+        "conditions": [ { "operator": ">=" }, { "function": "getVariable", "variableName": "n" }, 3 ],
         "then": [ { "type": "break" } ], "else": [] } ] }
   ]
 }

@@ -3,7 +3,7 @@
   "initialVars": { "x": { "value": 5, "type": "number" }, "out": { "value": "", "type": "string" } },
   "actions": [
     { "type": "condition",
-      "conditions": { "operator": ">", "operandA": { "function": "getVariable", "variableName": "x" }, "operandB": 3 },
+      "conditions": [ { "operator": ">" }, { "function": "getVariable", "variableName": "x" }, 3 ],
       "then": [ { "type": "setVariable", "variableName": "out", "value": "big" } ],
       "else": [ { "type": "setVariable", "variableName": "out", "value": "small" } ] },
     { "type": "log", "value": { "function": "getVariable", "variableName": "out" } }
