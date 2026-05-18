@@ -2986,6 +2986,37 @@ export class GameServer {
         case 'help':
           this._devReply(clientId, GameServer.DEV_HELP);
           return;
+        case 'set': {
+          const isPlayer = (parts[2] ?? '').toLowerCase() === 'player';
+          const attrId = isPlayer ? parts[3] : parts[2];
+          const rawValue = isPlayer ? parts[4] : parts[3];
+          const value = Number(rawValue);
+          if (!attrId || rawValue === undefined || !Number.isFinite(value)) {
+            this._devReply(clientId, 'usage: /dev set <attrId> <value>  |  /dev set player <attrId> <value>');
+            return;
+          }
+          if (isPlayer) {
+            const playerId = playerData.player.id;
+            this.engine.events.emit('player:setAttributeMax', [playerId, attrId, value]);
+            this.engine.events.emit('player:setAttribute', [playerId, attrId, value]);
+            this._devReply(clientId, `player.${attrId} = ${value}`);
+            return;
+          }
+          const unit = this._entities.get(playerData.unitId);
+          if (!unit?.stats) { this._devReply(clientId, 'No controlled unit.'); return; }
+          const cur = (unit.stats as any)[`attr_${attrId}`];
+          if (cur === undefined) {
+            const ids = Object.keys(unit.stats).filter((s) => s.startsWith('attr_')).map((s) => s.slice(5));
+            this._devReply(clientId, `Unknown unit attribute "${attrId}". Available: ${ids.join(', ') || '(none)'}`);
+            return;
+          }
+          if (value > (Number(cur.max) || 0)) {
+            this.engine.events.emit('setEntityAttributeMax', [playerData.unitId, attrId, value]);
+          }
+          this.engine.events.emit('setEntityAttribute', [playerData.unitId, attrId, value]);
+          this._devReply(clientId, `unit.${attrId} = ${value}`);
+          return;
+        }
         default:
           this._devReply(clientId, `Unknown dev command "/dev ${sub}".\n${GameServer.DEV_HELP}`);
           return;

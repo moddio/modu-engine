@@ -150,4 +150,45 @@ describe.skipIf(!URI)('Single-player dev sandbox', () => {
     expect(scriptSawIt).toBe(true);
     expect(lastSystemChat()).toBeNull();
   });
+
+  function firstUnitAttrId(unit: any): string {
+    const k = Object.keys(unit.stats).find((s) => s.startsWith('attr_'));
+    if (!k) throw new Error('unit has no attr_* stat');
+    return k.slice('attr_'.length);
+  }
+
+  it('/dev set raises a unit attribute (and its max if needed)', async () => {
+    await init({ singlePlayer: true });
+    const [clientId, playerData] = firstPlayer();
+    const unit = (server as any)._entities.get(playerData.unitId);
+    const attrId = firstUnitAttrId(unit);
+
+    sent = [];
+    transport.client.send({ type: MessageType.PlayerChat, data: { text: `/dev set ${attrId} 99999` } });
+    await new Promise(r => setTimeout(r, 50));
+
+    expect(Number(unit.stats[`attr_${attrId}`].value)).toBe(99999);
+    expect(Number(unit.stats[`attr_${attrId}`].max)).toBeGreaterThanOrEqual(99999);
+  });
+
+  it('/dev set player updates a player attribute', async () => {
+    await init({ singlePlayer: true });
+    const [clientId, playerData] = firstPlayer();
+    const playerId = playerData.player.id;
+
+    sent = [];
+    transport.client.send({ type: MessageType.PlayerChat, data: { text: '/dev set player devTestAttr 1234' } });
+    await new Promise(r => setTimeout(r, 50));
+
+    const p = (server as any)._entities.get(playerId);
+    expect(Number(p.stats['attr_devTestAttr'].value)).toBe(1234);
+  });
+
+  it('/dev set with a bad number replies with usage and does not throw', async () => {
+    await init({ singlePlayer: true });
+    sent = [];
+    transport.client.send({ type: MessageType.PlayerChat, data: { text: '/dev set hp abc' } });
+    await new Promise(r => setTimeout(r, 50));
+    expect(lastSystemChat()).toMatch(/usage|number/i);
+  });
 });
