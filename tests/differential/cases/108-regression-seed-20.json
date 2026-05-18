@@ -1,0 +1,66 @@
+{
+  "name": "fuzz-20",
+  "initialVars": {
+    "a": {
+      "value": "x",
+      "type": "any"
+    },
+    "b": {
+      "value": 1,
+      "type": "any"
+    },
+    "c": {
+      "value": "",
+      "type": "any"
+    },
+    "d": {
+      "value": 1,
+      "type": "any"
+    }
+  },
+  "actions": [
+    {
+      "type": "increaseVariableByNumber",
+      "variableName": "c",
+      "number": {
+        "function": "concat",
+        "textA": {
+          "function": "getVariable",
+          "variableName": "d"
+        },
+        "textB": ""
+      }
+    },
+    {
+      "type": "increaseVariableByNumber",
+      "variableName": "c",
+      "number": "x"
+    },
+    {
+      "type": "repeat",
+      "count": 0,
+      "actions": [
+        {
+          "type": "setVariable",
+          "variableName": "b",
+          "value": "hello"
+        }
+      ]
+    },
+    {
+      "type": "repeat",
+      "count": 4,
+      "actions": [
+        {
+          "type": "increaseVariableByNumber",
+          "variableName": "b",
+          "number": "x"
+        }
+      ]
+    },
+    {
+      "type": "log",
+      "value": 0
+    }
+  ]
+}

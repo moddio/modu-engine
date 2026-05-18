@@ -1,0 +1,130 @@
+{
+  "name": "fuzz-27",
+  "initialVars": {
+    "a": {
+      "value": "",
+      "type": "any"
+    },
+    "b": {
+      "value": 0,
+      "type": "any"
+    },
+    "c": {
+      "value": 0,
+      "type": "any"
+    },
+    "d": {
+      "value": 0,
+      "type": "any"
+    }
+  },
+  "actions": [
+    {
+      "type": "increaseVariableByNumber",
+      "variableName": "b",
+      "number": 3
+    },
+    {
+      "type": "log",
+      "value": {
+        "function": "getVariable",
+        "variableName": "b"
+      }
+    },
+    {
+      "type": "decreaseVariableByNumber",
+      "variableName": "a",
+      "number": 5
+    },
+    {
+      "type": "decreaseVariableByNumber",
+      "variableName": "c",
+      "number": {
+        "function": "concat",
+        "textA": {
+          "function": "calculate",
+          "items": [
+            {
+              "operator": "*"
+            },
+            {
+              "function": "concat",
+              "textA": -2.5,
+              "textB": -1
+            },
+            1
+          ]
+        },
+        "textB": 10
+      }
+    },
+    {
+      "type": "log",
+      "value": {
+        "function": "concat",
+        "textA": -2.5,
+        "textB": {
+          "function": "calculate",
+          "items": [
+            {
+              "operator": "-"
+            },
+            {
+              "function": "getVariable",
+              "variableName": "c"
+            },
+            "x"
+          ]
+        }
+      }
+    },
+    {
+      "type": "setVariable",
+      "variableName": "c",
+      "value": {
+        "function": "calculate",
+        "items": [
+          {
+            "operator": "-"
+          },
+          {
+            "function": "getVariable",
+            "variableName": "c"
+          },
+          "5"
+        ]
+      }
+    },
+    {
+      "type": "setVariable",
+      "variableName": "a",
+      "value": {
+        "function": "calculate",
+        "items": [
+          {
+            "operator": "+"
+          },
+          {
+            "function": "concat",
+            "textA": "x",
+            "textB": {
+              "function": "calculate",
+              "items": [
+                {
+                  "operator": "-"
+                },
+                2,
+                0.5
+              ]
+            }
+          },
+          {
+            "function": "concat",
+            "textA": "x",
+            "textB": 1
+          }
+        ]
+      }
+    }
+  ]
+}

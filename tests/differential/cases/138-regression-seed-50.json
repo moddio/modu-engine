@@ -1,0 +1,220 @@
+{
+  "name": "fuzz-50",
+  "initialVars": {
+    "a": {
+      "value": "",
+      "type": "any"
+    },
+    "b": {
+      "value": 0,
+      "type": "any"
+    },
+    "c": {
+      "value": 1,
+      "type": "any"
+    },
+    "d": {
+      "value": 0,
+      "type": "any"
+    }
+  },
+  "actions": [
+    {
+      "type": "repeat",
+      "count": 1,
+      "actions": [
+        {
+          "type": "increaseVariableByNumber",
+          "variableName": "a",
+          "number": 1
+        },
+        {
+          "type": "repeat",
+          "count": 3,
+          "actions": [
+            {
+              "type": "setVariable",
+              "variableName": "c",
+              "value": "5"
+            },
+            {
+              "type": "decreaseVariableByNumber",
+              "variableName": "d",
+              "number": {
+                "function": "concat",
+                "textA": {
+                  "function": "getVariable",
+                  "variableName": "b"
+                },
+                "textB": ""
+              }
+            }
+          ]
+        },
+        {
+          "type": "decreaseVariableByNumber",
+          "variableName": "b",
+          "number": "hello"
+        }
+      ]
+    },
+    {
+      "type": "condition",
+      "conditions": {
+        "operator": "!=",
+        "operandA": {
+          "function": "calculate",
+          "items": [
+            {
+              "operator": "*"
+            },
+            -1,
+            {
+              "function": "concat",
+              "textA": {
+                "function": "getVariable",
+                "variableName": "d"
+              },
+              "textB": {
+                "function": "getVariable",
+                "variableName": "a"
+              }
+            }
+          ]
+        },
+        "operandB": {
+          "function": "calculate",
+          "items": [
+            {
+              "operator": "/"
+            },
+            "5",
+            0
+          ]
+        }
+      },
+      "then": [
+        {
+          "type": "decreaseVariableByNumber",
+          "variableName": "d",
+          "number": 10
+        }
+      ],
+      "else": [
+        {
+          "type": "increaseVariableByNumber",
+          "variableName": "a",
+          "number": {
+            "function": "getVariable",
+            "variableName": "a"
+          }
+        },
+        {
+          "type": "increaseVariableByNumber",
+          "variableName": "c",
+          "number": "hello"
+        }
+      ]
+    },
+    {
+      "type": "condition",
+      "conditions": {
+        "operator": ">=",
+        "operandA": {
+          "function": "concat",
+          "textA": {
+            "function": "concat",
+            "textA": 10,
+            "textB": "5abc"
+          },
+          "textB": {
+            "function": "calculate",
+            "items": [
+              {
+                "operator": "*"
+              },
+              5,
+              {
+                "function": "getVariable",
+                "variableName": "c"
+              }
+            ]
+          }
+        },
+        "operandB": "x"
+      },
+      "then": [
+        {
+          "type": "repeat",
+          "count": 1,
+          "actions": [
+            {
+              "type": "log",
+              "value": "5abc"
+            },
+            {
+              "type": "decreaseVariableByNumber",
+              "variableName": "a",
+              "number": {
+                "function": "calculate",
+                "items": [
+                  {
+                    "operator": "-"
+                  },
+                  "",
+                  {
+                    "function": "getVariable",
+                    "variableName": "b"
+                  }
+                ]
+              }
+            },
+            {
+              "type": "increaseVariableByNumber",
+              "variableName": "c",
+              "number": {
+                "function": "getVariable",
+                "variableName": "b"
+              }
+            }
+          ]
+        }
+      ],
+      "else": [
+        {
+          "type": "repeat",
+          "count": 3,
+          "actions": [
+            {
+              "type": "log",
+              "value": {
+                "function": "concat",
+                "textA": "5",
+                "textB": 2
+              }
+            },
+            {
+              "type": "log",
+              "value": "5abc"
+            },
+            {
+              "type": "log",
+              "value": {
+                "function": "getVariable",
+                "variableName": "d"
+              }
+            }
+          ]
+        },
+        {
+          "type": "increaseVariableByNumber",
+          "variableName": "d",
+          "number": {
+            "function": "getVariable",
+            "variableName": "a"
+          }
+        }
+      ]
+    }
+  ]
+}

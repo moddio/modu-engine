@@ -1,0 +1,76 @@
+{
+  "name": "fuzz-22",
+  "initialVars": {
+    "a": {
+      "value": "x",
+      "type": "any"
+    },
+    "b": {
+      "value": 1,
+      "type": "any"
+    },
+    "c": {
+      "value": 1,
+      "type": "any"
+    },
+    "d": {
+      "value": 1,
+      "type": "any"
+    }
+  },
+  "actions": [
+    {
+      "type": "repeat",
+      "count": 3,
+      "actions": [
+        {
+          "type": "setVariable",
+          "variableName": "a",
+          "value": 1
+        },
+        {
+          "type": "decreaseVariableByNumber",
+          "variableName": "a",
+          "number": {
+            "function": "getVariable",
+            "variableName": "a"
+          }
+        },
+        {
+          "type": "log",
+          "value": {
+            "function": "calculate",
+            "items": [
+              {
+                "operator": "/"
+              },
+              10,
+              {
+                "function": "getVariable",
+                "variableName": "a"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "type": "setVariable",
+      "variableName": "c",
+      "value": {
+        "function": "getVariable",
+        "variableName": "a"
+      }
+    },
+    {
+      "type": "increaseVariableByNumber",
+      "variableName": "d",
+      "number": 2
+    },
+    {
+      "type": "setVariable",
+      "variableName": "b",
+      "value": ""
+    }
+  ]
+}

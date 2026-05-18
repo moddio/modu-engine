@@ -1,0 +1,64 @@
+{
+  "name": "fuzz-28",
+  "initialVars": {
+    "a": {
+      "value": "",
+      "type": "any"
+    },
+    "b": {
+      "value": "x",
+      "type": "any"
+    },
+    "c": {
+      "value": "x",
+      "type": "any"
+    },
+    "d": {
+      "value": "x",
+      "type": "any"
+    }
+  },
+  "actions": [
+    {
+      "type": "increaseVariableByNumber",
+      "variableName": "b",
+      "number": 100
+    },
+    {
+      "type": "decreaseVariableByNumber",
+      "variableName": "d",
+      "number": {
+        "function": "concat",
+        "textA": {
+          "function": "concat",
+          "textA": -1,
+          "textB": {
+            "function": "concat",
+            "textA": {
+              "function": "getVariable",
+              "variableName": "a"
+            },
+            "textB": 100
+          }
+        },
+        "textB": -1
+      }
+    },
+    {
+      "type": "increaseVariableByNumber",
+      "variableName": "b",
+      "number": {
+        "function": "concat",
+        "textA": "hello",
+        "textB": "5abc"
+      }
+    },
+    {
+      "type": "log",
+      "value": {
+        "function": "getVariable",
+        "variableName": "c"
+      }
+    }
+  ]
+}

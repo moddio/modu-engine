@@ -1,0 +1,100 @@
+{
+  "name": "fuzz-1",
+  "initialVars": {
+    "a": {
+      "value": "x",
+      "type": "any"
+    },
+    "b": {
+      "value": 0,
+      "type": "any"
+    },
+    "c": {
+      "value": "",
+      "type": "any"
+    },
+    "d": {
+      "value": 10,
+      "type": "any"
+    }
+  },
+  "actions": [
+    {
+      "type": "increaseVariableByNumber",
+      "variableName": "c",
+      "number": {
+        "function": "calculate",
+        "items": [
+          {
+            "operator": "*"
+          },
+          {
+            "function": "concat",
+            "textA": {
+              "function": "getVariable",
+              "variableName": "b"
+            },
+            "textB": 3
+          },
+          ""
+        ]
+      }
+    },
+    {
+      "type": "decreaseVariableByNumber",
+      "variableName": "a",
+      "number": "5abc"
+    },
+    {
+      "type": "increaseVariableByNumber",
+      "variableName": "a",
+      "number": 3
+    },
+    {
+      "type": "log",
+      "value": "x"
+    },
+    {
+      "type": "log",
+      "value": {
+        "function": "calculate",
+        "items": [
+          {
+            "operator": "+"
+          },
+          {
+            "function": "calculate",
+            "items": [
+              {
+                "operator": "*"
+              },
+              {
+                "function": "calculate",
+                "items": [
+                  {
+                    "operator": "%"
+                  },
+                  0.5,
+                  -1
+                ]
+              },
+              {
+                "function": "getVariable",
+                "variableName": "a"
+              }
+            ]
+          },
+          0.5
+        ]
+      }
+    },
+    {
+      "type": "log",
+      "value": ""
+    },
+    {
+      "type": "log",
+      "value": "hello"
+    }
+  ]
+}
