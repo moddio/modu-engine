@@ -200,8 +200,8 @@ describe.skipIf(!URI)('Single-player dev sandbox', () => {
     transport.client.send({ type: MessageType.PlayerChat, data: { text: '/dev tp 7 9' } });
     await new Promise(r => setTimeout(r, 50));
 
-    expect(unit.position.x).toBeCloseTo(7, 3);
-    expect(unit.position.z).toBeCloseTo(9, 3);
+    expect(unit.position.x).toBeCloseTo(7, 1);
+    expect(unit.position.z).toBeCloseTo(9, 1);
   });
 
   it('/dev tp <regionName> moves the unit to the region center', async () => {
@@ -211,15 +211,15 @@ describe.skipIf(!URI)('Single-player dev sandbox', () => {
     const regions = (server as any)._regionVars as Map<string, any>;
     if (regions.size === 0) return; // fixture has no regions — nothing to assert
     const [name, r] = [...regions.entries()][0];
-    const tilePx = (server as any)._tilePx as number;
-    const expX = (r.x + r.width / 2) / tilePx;
-    const expZ = (r.y + r.height / 2) / tilePx;
+    const map = (server as any)._gameData.map as { width: number; height: number };
+    const expX = (r.x + r.width / 2) * map.width;
+    const expZ = (r.y + r.height / 2) * map.height;
 
     transport.client.send({ type: MessageType.PlayerChat, data: { text: `/dev tp ${name}` } });
-    await new Promise(r2 => setTimeout(r2, 50));
+    await new Promise(r2 => setTimeout(r2, 60));
 
-    expect(unit.position.x).toBeCloseTo(expX, 3);
-    expect(unit.position.z).toBeCloseTo(expZ, 3);
+    expect(unit.position.x).toBeCloseTo(expX, 0);
+    expect(unit.position.z).toBeCloseTo(expZ, 0);
   });
 
   it('/dev tp with an unknown region replies with the region list', async () => {

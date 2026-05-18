@@ -3030,16 +3030,24 @@ export class GameServer {
             return;
           }
           if (a !== undefined) {
-            const region = this._regionVars.get(a);
+            // Region names may contain spaces; join all remaining parts.
+            const regionName = parts.slice(2).join(' ');
+            const region = this._regionVars.get(regionName);
             if (region) {
-              const cx = region.x + region.width / 2;
-              const cy = region.y + region.height / 2;
+              // _regionVars holds normalized fractions (0..1) of the map's tile
+              // dimensions. tileCenter = (frac + size/2) * mapTiles; teleportEntity
+              // divides position by _tilePx, so emit pixels = tileCenter * _tilePx.
+              const map = (this._gameData?.map ?? {}) as { width?: number; height?: number };
+              const mapW = Number(map.width) || 0;
+              const mapH = Number(map.height) || 0;
+              const cx = (region.x + region.width / 2) * mapW * this._tilePx;
+              const cy = (region.y + region.height / 2) * mapH * this._tilePx;
               this.engine.events.emit('scriptAction', ['teleportEntity', { entity: unitId, position: { x: cx, y: cy } }, {}]);
-              this._devReply(clientId, `teleported to region "${a}"`);
+              this._devReply(clientId, `teleported to region "${regionName}"`);
               return;
             }
             const names = [...this._regionVars.keys()];
-            this._devReply(clientId, `Unknown region "${a}". Regions: ${names.join(', ') || '(none)'}`);
+            this._devReply(clientId, `Unknown region "${regionName}". Regions: ${names.join(', ') || '(none)'}`);
             return;
           }
           this._devReply(clientId, 'usage: /dev tp <x> <y>  |  /dev tp <regionName>');
