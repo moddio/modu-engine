@@ -3017,6 +3017,34 @@ export class GameServer {
           this._devReply(clientId, `unit.${attrId} = ${value}`);
           return;
         }
+        case 'tp': {
+          const unitId = playerData.unitId;
+          if (!unitId) { this._devReply(clientId, 'No controlled unit.'); return; }
+          const a = parts[2];
+          const b = parts[3];
+          if (a !== undefined && b !== undefined && Number.isFinite(Number(a)) && Number.isFinite(Number(b))) {
+            const px = Number(a) * this._tilePx;
+            const py = Number(b) * this._tilePx;
+            this.engine.events.emit('scriptAction', ['teleportEntity', { entity: unitId, position: { x: px, y: py } }, {}]);
+            this._devReply(clientId, `teleported to (${a}, ${b})`);
+            return;
+          }
+          if (a !== undefined) {
+            const region = this._regionVars.get(a);
+            if (region) {
+              const cx = region.x + region.width / 2;
+              const cy = region.y + region.height / 2;
+              this.engine.events.emit('scriptAction', ['teleportEntity', { entity: unitId, position: { x: cx, y: cy } }, {}]);
+              this._devReply(clientId, `teleported to region "${a}"`);
+              return;
+            }
+            const names = [...this._regionVars.keys()];
+            this._devReply(clientId, `Unknown region "${a}". Regions: ${names.join(', ') || '(none)'}`);
+            return;
+          }
+          this._devReply(clientId, 'usage: /dev tp <x> <y>  |  /dev tp <regionName>');
+          return;
+        }
         default:
           this._devReply(clientId, `Unknown dev command "/dev ${sub}".\n${GameServer.DEV_HELP}`);
           return;
