@@ -229,4 +229,43 @@ describe.skipIf(!URI)('Single-player dev sandbox', () => {
     await new Promise(r => setTimeout(r, 50));
     expect(lastSystemChat()).toMatch(/region|usage/i);
   });
+
+  function lastUICommand(command: string): any | null {
+    for (let i = sent.length - 1; i >= 0; i--) {
+      const m = sent[i];
+      if (m?.type === MessageType.UICommand && m.data?.command === command) return m.data;
+    }
+    return null;
+  }
+
+  it('/dev shop lists shop ids', async () => {
+    await init({ singlePlayer: true });
+    sent = [];
+    transport.client.send({ type: MessageType.PlayerChat, data: { text: '/dev shop' } });
+    await new Promise(r => setTimeout(r, 50));
+    const shops = Object.keys((server as any)._rawGameData.shops ?? {});
+    expect(lastSystemChat()).toContain(shops[0]);
+  });
+
+  it('/dev shop <id> sends an openShop UICommand', async () => {
+    await init({ singlePlayer: true });
+    const [clientId, playerData] = firstPlayer();
+    const shopId = Object.keys((server as any)._rawGameData.shops ?? {})[0];
+
+    sent = [];
+    transport.client.send({ type: MessageType.PlayerChat, data: { text: `/dev shop ${shopId}` } });
+    await new Promise(r => setTimeout(r, 50));
+
+    const cmd = lastUICommand('openShop');
+    expect(cmd).not.toBeNull();
+    expect(cmd.args[1]).toBe(shopId);
+  });
+
+  it('/dev shop <bad id> replies with the shop list', async () => {
+    await init({ singlePlayer: true });
+    sent = [];
+    transport.client.send({ type: MessageType.PlayerChat, data: { text: '/dev shop __nope__' } });
+    await new Promise(r => setTimeout(r, 50));
+    expect(lastSystemChat()).toMatch(/shop/i);
+  });
 });

@@ -3053,6 +3053,22 @@ export class GameServer {
           this._devReply(clientId, 'usage: /dev tp <x> <y>  |  /dev tp <regionName>');
           return;
         }
+        case 'shop': {
+          const shops = (this._rawGameData?.shops ?? {}) as Record<string, any>;
+          const ids = Object.keys(shops);
+          const shopId = parts[2];
+          if (!shopId) {
+            this._devReply(clientId, `Shops: ${ids.join(', ') || '(none)'}\n/dev shop <id> to open (free buy in single-player)`);
+            return;
+          }
+          if (!shops[shopId]) {
+            this._devReply(clientId, `Unknown shop "${shopId}". Shops: ${ids.join(', ') || '(none)'}`);
+            return;
+          }
+          this.engine.events.emit('ui:openShop', [playerData.player.id, shopId]);
+          this._devReply(clientId, `opened shop "${shopId}" (purchases are free)`);
+          return;
+        }
         default:
           this._devReply(clientId, `Unknown dev command "/dev ${sub}".\n${GameServer.DEV_HELP}`);
           return;
