@@ -52,9 +52,16 @@ export class GameServer {
    *  Taro equivalent: `Item._stats.isBeingUsed` driving `Item._behaviour()`.
    *  Cleared by `stopUsingItem`, weapon switch, or the unit going away. */
   private _itemsBeingUsed = new Map<string, number>();
+  /** True only for the in-memory single-player server (GameClient.startSinglePlayer).
+   *  Gates the built-in `/dev …` sandbox and free shop purchases. Defaults false so
+   *  the multiplayer Server.ts and every engine test are unaffected. */
+  private _singlePlayer = false;
+  /** Per-playerId quick-teleport (`/dev qtp`) toggle state. */
+  private _quickTeleport = new Set<string>();
 
-  constructor(transport: ServerTransport) {
+  constructor(transport: ServerTransport, options?: { singlePlayer?: boolean }) {
     this._transport = transport;
+    this._singlePlayer = !!options?.singlePlayer;
     this.engine = Engine.instance();
     this.scripts = new ScriptEngine(this.engine);
     this.types = new EntityTypeRegistry();
