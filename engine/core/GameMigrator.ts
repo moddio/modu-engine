@@ -40,6 +40,10 @@ export interface MigratedGameData {
     itemTypes: Record<string, unknown>;
     projectileTypes: Record<string, unknown>;
     playerTypes: Record<string, unknown>;
+    /** 3D maps are mostly props. Dropping them here left `types.get('propTypes', …)`
+     *  permanently empty, so every script action that spawns or resolves a prop
+     *  (`createEntityAtPositionWithDimensions`, `destroyEntity`, …) bailed out. */
+    propTypes: Record<string, unknown>;
   };
   scripts: Record<string, { name: string; triggers: string[]; actions: Array<Record<string, unknown>> }>;
   variables: Record<string, { value: unknown; type: string }>;
@@ -65,6 +69,7 @@ export class GameMigrator {
         itemTypes: (data.itemTypes as Record<string, unknown>) ?? {},
         projectileTypes: (data.projectileTypes as Record<string, unknown>) ?? {},
         playerTypes: (data.playerTypes as Record<string, unknown>) ?? {},
+        propTypes: (data.propTypes as Record<string, unknown>) ?? {},
       },
       scripts: GameMigrator._migrateScripts(data.scripts ?? {}),
       variables: GameMigrator._migrateVariables(data.variables ?? {}),

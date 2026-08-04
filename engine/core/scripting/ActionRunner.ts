@@ -1690,12 +1690,17 @@ export class ActionRunner {
 
     const obj = text as Record<string, unknown>;
 
-    // Point {x, y}
+    // Point {x, y} — and {x, y, z} for 3D literals. Dropping the Z here silently
+    // discarded it from every vector a script writes inline, which is how Braains3D's
+    // jump lost its whole effect: the impulse is authored as {x: 0, y: 0, z: 300} and
+    // reached the physics layer as {x: 0, y: 0}, so the action ran and did nothing.
     if ('x' in obj && 'y' in obj && !('function' in obj)) {
-      return {
+      const point: Record<string, unknown> = {
         x: this._resolveValue(obj.x, vars),
         y: this._resolveValue(obj.y, vars),
       };
+      if ('z' in obj) point.z = this._resolveValue(obj.z, vars);
+      return point;
     }
 
     // Function reference
@@ -1924,6 +1929,56 @@ export class ActionRunner {
       // taro filters by `entityCategories` (ParameterComponent.js, entitiesInRegion);
       // without that filter players surface here in addition to their controlled
       // units, double-counting under forAllEntities damage scripts.
+      // 3D position of an entity. The engine's plane is XZ with Y up, while taro's
+      // script space is XY with Z up — so world Z becomes script Y, and the entity's
+      // height becomes script Z. Positions are reported in pixels like the 2D
+      // `getEntityPosition`, except Z, which is a height in tile units (0 on the
+      // ground) because nothing in the 2D pixel space corresponds to it.
+      case 'getEntityPosition3d': {
+        const eid = this._resolveValue(obj.entity, vars) as string;
+        const ent = this._engine.findById(eid);
+        if (!ent) return { x: 0, y: 0, z: 0 };
+        const p = (ent as any).position ?? {};
+        const px = this.mapTilePx;
+        return { x: (Number(p.x) || 0) * px, y: (Number(p.z) || 0) * px, z: Number(p.y) || 0 };
+      }
+
+      case 'getPositionZ':
+        return (this._resolveValue(obj.position, vars) as any)?.z ?? 0;
+
+      // Entities whose position falls inside the box spanned by two points. Used by
+      // grounded checks — Braains3D's jump asks for everything between the unit and
+      // 0.2 below it before applying an upward impulse. X/Y are pixels (taro script
+      // space); Z is a height in tile units and is only filtered when both endpoints
+      // actually carry one, since most callers pass plain 2D positions.
+      case 'entitiesBetweenTwoPositions': {
+        const a = this._resolveValue(obj.positionA, vars) as { x?: number; y?: number; z?: number } | null;
+        const b = this._resolveValue(obj.positionB, vars) as { x?: number; y?: number; z?: number } | null;
+        if (!a || !b) return [];
+        const px = this.mapTilePx;
+        const lo = (m: number, n: number) => Math.min(m, n);
+        const hi = (m: number, n: number) => Math.max(m, n);
+        const x0 = lo(Number(a.x) || 0, Number(b.x) || 0) / px;
+        const x1 = hi(Number(a.x) || 0, Number(b.x) || 0) / px;
+        const z0 = lo(Number(a.y) || 0, Number(b.y) || 0) / px;
+        const z1 = hi(Number(a.y) || 0, Number(b.y) || 0) / px;
+        const hasHeights = Number.isFinite(Number(a.z)) && Number.isFinite(Number(b.z));
+        const y0 = hasHeights ? lo(Number(a.z), Number(b.z)) : 0;
+        const y1 = hasHeights ? hi(Number(a.z), Number(b.z)) : 0;
+        return this._engine.root.children
+          .filter(e => SCRIPT_ENTITY_CATEGORIES.has(e.category))
+          .filter(e => !((e as any).stats?.isHidden))
+          .filter(e => {
+            const p = (e as any).position;
+            if (!p) return false;
+            if (p.x < x0 || p.x > x1 || p.z < z0 || p.z > z1) return false;
+            if (!hasHeights) return true;
+            const h = Number(p.y) || 0;
+            return h >= y0 && h <= y1;
+          })
+          .map(e => e.id);
+      }
+
       case 'entitiesInRegion': {
         const region = this._resolveValue(obj.region, vars) as { x?: number; y?: number; width?: number; height?: number } | null;
         if (!region) return [];
