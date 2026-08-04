@@ -1,8 +1,15 @@
 {
   "name": "modu-engine",
   "version": "0.1.0",
-  "description": "Modu Engine — a modern multiplayer game engine",
+  "description": "Modu Engine \u2014 a modern multiplayer game engine",
   "type": "module",
+  "types": "./engine/client/index.ts",
+  "exports": {
+    ".": "./engine/client/index.ts",
+    "./dist/*": "./dist/*",
+    "./*": "./engine/*.ts",
+    "./package.json": "./package.json"
+  },
   "scripts": {
     "dev": "vite",
     "dev:multi": "concurrently \"vite\" \"tsx watch engine/server/Server.ts\"",
