@@ -19,8 +19,26 @@ export interface ColliderDef {
   friction?: number;
   restitution?: number;
   density?: number;
+  /** Explicit collider mass, from taro's `fixture.overrideMass` + `fixture.mass`.
+   *  Wins over `density`: a 3D `bodies.*` fixture routinely ships `density: 0`
+   *  alongside `overrideMass: true, mass: 20`, and honouring only the density leaves
+   *  a dynamic body with zero mass, which the contact solver cannot stop — units
+   *  walked straight through walls. */
+  mass?: number;
   category?: number;
   mask?: number;
+}
+
+/**
+ * One-time backend initialisation. The rapier build is WASM and has to be compiled
+ * before any world can exist; other backends may need nothing at all. Callers await
+ * this and stay ignorant of which is true — keeping the `@dimforge/*` import inside
+ * this folder is what makes a backend swap a local change.
+ */
+let _initPromise: Promise<void> | null = null;
+export function initPhysics(): Promise<void> {
+  if (!_initPromise) _initPromise = RAPIER.init();
+  return _initPromise;
 }
 
 export class PhysicsWorld {
@@ -78,7 +96,7 @@ export class PhysicsWorld {
       case 'applyTorque': {
         const body = action.data?.body as RigidBody | undefined;
         const torque = action.data?.torque as number | undefined;
-        if (body && torque !== undefined) body.raw.addTorque(torque, true);
+        if (body && torque !== undefined) body.applyTorque(torque);
         break;
       }
       case 'translateTo': {
