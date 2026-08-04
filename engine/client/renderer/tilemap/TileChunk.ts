@@ -3,6 +3,9 @@ export interface TileUV {
   v: number;
   uSize: number;
   vSize: number;
+  /** Half-texel inset; see TilesetLoader.TileUV. Optional so hand-built UVs still work. */
+  uInset?: number;
+  vInset?: number;
   tilesetIndex: number;
 }
 
@@ -39,8 +42,20 @@ export function buildChunkGeometry(
       const gid = tiles[y * width + x];
       if (gid === 0) continue;
 
-      const uv = getUV(gid);
-      if (!uv) continue;
+      const rect = getUV(gid);
+      if (!rect) continue;
+      // Shrink the sampled rect by half a texel per side so no face can sample its
+      // neighbour in a gutterless atlas. Without this every tile edge draws a
+      // one-pixel seam and the tilemap looks wireframed.
+      const du = rect.uInset ?? 0;
+      const dv = rect.vInset ?? 0;
+      const uv = {
+        ...rect,
+        u: rect.u + du,
+        v: rect.v + dv,
+        uSize: rect.uSize - du * 2,
+        vSize: rect.vSize - dv * 2,
+      };
 
       const x0 = x * tileW;
       const z0 = y * tileH;

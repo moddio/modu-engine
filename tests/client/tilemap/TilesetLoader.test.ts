@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll } from 'vitest';
-import { TilesetLookup } from '../../../engine/client/renderer/tilemap/TilesetLoader';
+import { TilesetLookup, isTileBlank } from '../../../engine/client/renderer/tilemap/TilesetLoader';
 
 describe('TilesetLookup', () => {
   const tilesets = [
@@ -72,5 +72,33 @@ describe('TilesetLookup', () => {
     // Tile 1 (col=0): pixelX = 3 + 0*(16+0) = 3
     const uv = marginLookup.getUV(1);
     expect(uv!.u).toBeCloseTo(3 / 70, 4);
+  });
+
+  it('reports a half-texel inset for gutterless atlases', () => {
+    const uv = lookup.getUV(1);
+    // The rect itself stays the true tile bounds; the inset is advisory and applied
+    // by geometry builders so no face samples its neighbour across a shared edge.
+    expect(uv!.uInset).toBeCloseTo(0.5 / 288, 6);
+    expect(uv!.vInset).toBeCloseTo(0.5 / 288, 6);
+    expect(uv!.u).toBeCloseTo(0, 4);
+    expect(uv!.uSize).toBeCloseTo(16 / 288, 4);
+  });
+
+  describe('isTileBlank', () => {
+    const tile = (alpha: number[]) => alpha.flatMap((a) => [255, 0, 0, a]);
+
+    it('treats a fully transparent tile as blank', () => {
+      expect(isTileBlank(tile([0, 0, 0, 0]))).toBe(true);
+    });
+
+    it('treats a tile the alphaTest would keep as not blank', () => {
+      expect(isTileBlank(tile([0, 0, 128, 0]))).toBe(false);
+    });
+
+    it('treats alpha entirely below the 0.5 cut-off as blank, matching alphaTest', () => {
+      // These texels would all be discarded by `alphaTest: 0.5`, so the tile can
+      // never draw anything and must not become geometry.
+      expect(isTileBlank(tile([1, 60, 127, 12]))).toBe(true);
+    });
   });
 });

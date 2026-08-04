@@ -7,12 +7,17 @@ import { Vec2 } from '../../engine/core/math/Vec2';
 
 /**
  * Game data with two unit types:
- *  - `mob`: AI-enabled, idleBehaviour = 'stay' so _processAI is a no-op and tests
- *    can set body.linearVelocity directly.
+ *  - `mob`: AI-enabled, idleBehaviour = 'stay' so it never wanders off on its own and
+ *    each case controls the direction it faces.
  *  - `player`: not AI, used to drive the player join flow.
  *  - `mobAI`: AI-enabled WITH idleBehaviour = 'stay', joined as the player's unit
  *    in the "player skip" test (defensive: even if a player's unit type happens
  *    to have ai.enabled, the new loop must skip the player).
+ *
+ * Note `idleBehaviour: 'stay'` does NOT make `_processAI` a no-op — it only stops the
+ * unit picking a wander target. `_processAI` still zeroes the velocity of every
+ * targetless non-player unit each tick, so these cases steer via `_aiState.target`
+ * rather than by writing `body.linearVelocity`; see `driveToward`.
  */
 const GAME_DATA = {
   version: '2.0',
@@ -77,50 +82,82 @@ describe('GameServer AI face-movement-direction', () => {
     return unit;
   };
 
-  const setVelAndTick = (unit: any, vx: number, vy: number) => {
+  /**
+   * Point a unit at a spot `(dx, dy)` physics units away and tick.
+   *
+   * Writing `body.linearVelocity` directly does not work: `_processAI` runs before the
+   * facing loop and, for every non-player unit with no target, clears the velocity so
+   * idle units cannot drift ("5. If we still have no target…"). It does that whatever
+   * `idleBehaviour` says — `stay` only suppresses *picking* a wander target — so a
+   * velocity written from the outside is always zero again by the time the facing loop
+   * samples it, and every direction below would read as rotation 0.
+   *
+   * `_aiState.target` is the input the engine itself drives units with (the
+   * `ai:moveToPosition` script action writes exactly these fields), and step 6 honours
+   * it for any non-player unit. So this exercises the real path — AI target → velocity
+   * → facing — instead of a velocity the engine never sees.
+   */
+  const driveToward = (unit: any, dx: number, dy: number) => {
     const body = (server as any)._entityBodies.get(unit.id);
-    body.linearVelocity = new Vec2(vx, vy);
+    unit._aiState = {
+      target: { x: body.position.x + dx, y: body.position.y + dy },
+      targetUnitId: null,
+      pickCooldownMs: 5000, // don't let a wander re-pick steal the target mid-test
+      attackCooldownMs: 0,
+    };
+    (server as any)._tick(50);
+  };
+
+  /** Drop the target so `_processAI` zeroes the velocity, leaving the unit idle. */
+  const goIdleAndTick = (unit: any) => {
+    unit._aiState.target = null;
+    unit._aiState.targetUnitId = null;
     (server as any)._tick(50);
   };
 
   it('AI unit moving east (+x) → rotation = -π/2', async () => {
     const unit = await spawnMobAndSettle();
-    setVelAndTick(unit, 5, 0);
+    driveToward(unit, 5, 0);
     expect(unit.rotation).toBeCloseTo(-Math.PI / 2, 3);
   });
 
   it('AI unit moving north (engine -y) → rotation = 0', async () => {
     const unit = await spawnMobAndSettle();
-    setVelAndTick(unit, 0, -5);
+    driveToward(unit, 0, -5);
     expect(unit.rotation).toBeCloseTo(0, 3);
   });
 
   it('AI unit moving west (-x) → rotation = π/2', async () => {
     const unit = await spawnMobAndSettle();
-    setVelAndTick(unit, -5, 0);
+    driveToward(unit, -5, 0);
     expect(unit.rotation).toBeCloseTo(Math.PI / 2, 3);
   });
 
   it('AI unit moving south (engine +y) → rotation = ±π', async () => {
     const unit = await spawnMobAndSettle();
-    setVelAndTick(unit, 0, 5);
+    driveToward(unit, 0, 5);
     expect(Math.abs(unit.rotation)).toBeCloseTo(Math.PI, 3);
   });
 
   it('AI unit nearly stationary (|v|² < threshold) keeps prior rotation', async () => {
     const unit = await spawnMobAndSettle();
-    // First, rotate the unit by moving it east.
-    setVelAndTick(unit, 5, 0);
+    // First, rotate the unit by driving it east.
+    driveToward(unit, 5, 0);
     expect(unit.rotation).toBeCloseTo(-Math.PI / 2, 3);
-    // Now drop velocity below threshold (mag = 0.05, mag² = 0.0025 < 0.01).
-    // The rotation should NOT snap to atan2(0, 0) = 0; it should stay where it was.
-    setVelAndTick(unit, 0.05, 0);
+    // Now let it go idle, which drops the velocity below the threshold. The rotation
+    // must NOT snap to atan2(0, 0) = 0 — the cached heading should hold it.
+    goIdleAndTick(unit);
     expect(unit.rotation).toBeCloseTo(-Math.PI / 2, 3);
   });
 
   it('non-AI unit (typeDef.ai missing) is not rotated by the new loop', async () => {
     const unit = await spawnMobAndSettle('nonAi');
-    setVelAndTick(unit, 5, 0);
+    // Drive it for real: step 6 of _processAI honours `_aiState.target` whatever
+    // `ai.enabled` says, so this unit is genuinely moving when the facing loop runs.
+    // Asserting against a unit the engine had already frozen would prove nothing.
+    driveToward(unit, 5, 0);
+    const body = (server as any)._entityBodies.get(unit.id);
+    expect(body.linearVelocity.x).toBeGreaterThan(0);
     // _syncPhysicsToEntities writes body.angle (=0) to entity.rotation, and
     // the new loop skips this unit because ai.enabled is not set.
     expect(unit.rotation).toBe(0);
@@ -144,7 +181,11 @@ describe('GameServer AI face-movement-direction', () => {
       .find((e: any) => e.stats?.type === 'mob' && e.stats?.ownerId);
     expect(unit).toBeTruthy();
     (server as any)._tick(50);
-    setVelAndTick(unit, 5, 0);
+    // _processAI skips player-controlled units entirely, so a velocity written here
+    // survives into the facing loop — the unit really is moving when it is skipped.
+    const pBody = (server as any)._entityBodies.get(unit.id);
+    pBody.linearVelocity = new Vec2(5, 0);
+    (server as any)._tick(50);
     // Player has no _mousePosition set, so the player face-mouse loop leaves rotation alone.
     // The new AI loop must skip players, so rotation stays at body.angle = 0.
     expect(unit.rotation).toBe(0);

@@ -17,6 +17,13 @@ export interface TileUV {
   v: number;
   uSize: number;
   vSize: number;
+  /** Half a texel in UV space. Tile atlases are routinely exported with no gutter
+   *  between tiles (spacing = margin = 0), so a quad textured with the exact rect
+   *  lets the sampler pick up the neighbouring tile along every shared edge — which
+   *  reads as a thin wireframe grid over the whole tilemap. Geometry builders inset
+   *  by this much on each side. `u`/`v`/`uSize`/`vSize` stay the true tile bounds. */
+  uInset: number;
+  vInset: number;
   tilesetIndex: number;
 }
 
@@ -63,7 +70,24 @@ export class TilesetLookup {
       v,
       uSize,
       vSize,
+      uInset: 0.5 / ts.imagewidth,
+      vInset: 0.5 / ts.imageheight,
       tilesetIndex: this._tilesets.indexOf(ts),
     };
   }
+}
+
+/**
+ * Is every texel of this tile below the alpha cut-off?
+ *
+ * 128 matches the chunk material's `alphaTest: 0.5`: a tile the shader would discard
+ * entirely can never contribute a pixel, so emitting voxel geometry for it is pure
+ * cost — and pure risk, because the quads still rasterize and at grazing angles UV
+ * interpolation can drift off the tile and sample a neighbouring one.
+ */
+export function isTileBlank(rgba: ArrayLike<number>, alphaCutoff = 128): boolean {
+  for (let i = 3; i < rgba.length; i += 4) {
+    if (rgba[i] >= alphaCutoff) return false;
+  }
+  return true;
 }

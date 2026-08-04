@@ -2,7 +2,17 @@ export { Client } from './Client';
 export { Renderer } from './renderer/Renderer';
 export type { RendererOptions } from './renderer/Renderer';
 export { CameraController } from './renderer/CameraController';
+export {
+  cameraDistance, taroVisibleHeight, visibleWorldSpan, tilePxOf, gameDataZoomOf,
+  CAMERA_DISTANCE_MULTIPLIER,
+} from './renderer/cameraFraming';
 export type { CameraConfig } from './renderer/CameraController';
+export { GameRenderer } from './renderer/GameRenderer';
+export type { EntityRenderData } from './renderer/GameRenderer';
+export { RegionLayer } from './renderer/RegionLayer';
+export { RegionGizmo } from './renderer/RegionGizmo';
+export type { GizmoMode } from './renderer/RegionGizmo';
+export { LocomotionTracker, START_MOVING, STOP_MOVING } from './renderer/locomotion';
 export { AssetManager } from './renderer/AssetManager';
 export type { AssetSource } from './renderer/AssetManager';
 export { Camera, ObjectPool, SpatialIndex, EntityManager } from './renderer/index';
@@ -27,6 +37,7 @@ export { GameLoader } from '../core/GameLoader';
 export type { GameData, ScriptDef } from '../core/GameLoader';
 export { GameMigrator } from '../core/GameMigrator';
 export type { MigratedGameData } from '../core/GameMigrator';
+export { denormalize3DGameData } from '../core/GameDenormalizer';
 export { CoordinateUtils } from '../core/CoordinateUtils';
 export { LocalGameSession } from '../core/LocalGameSession';
 export type { LocalGameConfig } from '../core/LocalGameSession';
