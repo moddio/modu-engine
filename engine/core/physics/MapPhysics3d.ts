@@ -58,3 +58,42 @@ export function createWallBodiesFromMap3d(
 
   return bodies;
 }
+
+/**
+ * A static floor spanning the whole map, with its top face at y = 0.
+ *
+ * The 2D world needed no such thing: it had no gravity and no vertical axis, so nothing
+ * could fall. The moment gravity is real, every entity drops out of the world unless
+ * something holds it up — and a unit falling past a crate never collides with it, which
+ * looks exactly like the collider being missing.
+ *
+ * One slab rather than a body per floor tile: the floor is flat and unbroken, and 1,995
+ * tile-sized boxes would be 1,995 broad-phase entries plus a seam between every pair for
+ * a capsule to catch on.
+ */
+export function createGroundBody(
+  physics: PhysicsWorld3d,
+  mapWidth: number,
+  mapHeight: number,
+  tileWidth: number,
+  scaleRatio = 30,
+  thickness = 1,
+): RigidBody3d {
+  const tile = tileWidth / scaleRatio;
+  const w = (mapWidth * tile) / 2;
+  const d = (mapHeight * tile) / 2;
+  const body = physics.createBody({
+    type: 'static',
+    // Sunk by half its thickness so the top face lands exactly on y = 0.
+    position: new Vec3(w, -thickness / 2, d),
+  });
+  body.addCollider({
+    shape: 'box',
+    halfExtents: new Vec3(w, thickness / 2, d),
+    friction: 0.6,
+    restitution: 0,
+    category: CollisionCategory.WALL,
+    mask: DefaultCollisionMask[CollisionCategory.WALL],
+  });
+  return body;
+}

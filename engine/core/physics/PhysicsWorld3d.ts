@@ -21,6 +21,22 @@ export interface ColliderDef3d {
   friction?: number;
   restitution?: number;
   density?: number;
+  /** Explicit collider mass, from taro's `fixture.overrideMass` + `fixture.mass`.
+   *  Wins over `density`: a 3D fixture routinely ships `density: 0` alongside
+   *  `overrideMass: true, mass: 20`, and honouring only the density leaves a massless
+   *  dynamic body that no contact can stop. */
+  mass?: number;
+}
+
+let _initPromise: Promise<void> | null = null;
+
+/**
+ * One-time backend initialisation. The rapier build is WASM and has to be compiled
+ * before any world can exist. Mirrors `initPhysics` on the 2D path.
+ */
+export function initPhysics3d(): Promise<void> {
+  if (!_initPromise) _initPromise = RAPIER.init();
+  return _initPromise;
 }
 
 export class PhysicsWorld3d {
@@ -38,6 +54,17 @@ export class PhysicsWorld3d {
   step(dt: number): void {
     this.world.timestep = dt / 1000;
     this.world.step(this._eventQueue);
+
+    // Rapier's `addForce` is persistent — it keeps applying the force every step until
+    // `resetForces` is called. Box2D's `applyForce`, which taro and the scripting action
+    // `applyForceOnEntityAngle` were calibrated against, is one-shot per step: the force
+    // accumulates within a frame, integrates, then clears. Without this reset a script
+    // that applies force once accelerates the body toward terminal velocity F/(m·damping)
+    // instead of decaying — the 2D world has always done it, and the 3D world inherited
+    // the same scripts without the same guarantee.
+    for (const body of this._bodies.values()) {
+      body.raw.resetForces(false);
+    }
 
     // Process collision events
     this._eventQueue.drainCollisionEvents((handle1, handle2, started) => {

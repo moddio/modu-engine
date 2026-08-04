@@ -144,7 +144,8 @@ describe('Props from the initialize script', () => {
 
     // Park the unit to the left of the crate on the same row, then hold 'd' (+x).
     const tileToPhysics = (t: number) => (t * tilePx) / 30;
-    body.position = { x: tileToPhysics(6), y: tileToPhysics(5) } as any;
+    // Ground plane is (x, z) now; y is height, so keep whatever the body rests at.
+    body.position = { x: tileToPhysics(6), y: body.position.y, z: tileToPhysics(5) } as any;
     (server as any)._onPlayerInput(playerData.clientId ?? [...players.keys()][0], { device: 'keyboard', key: 'd' }, true);
 
     for (let i = 0; i < 200; i++) (server as any)._tick(50);
@@ -190,7 +191,8 @@ describe('Props from the initialize script', () => {
     const unit = (server as any)._entities.get(playerData.unitId);
     const body = (server as any)._entityBodies.get(playerData.unitId);
     const tileToPhysics = (t: number) => (t * tilePx) / 30;
-    body.position = { x: tileToPhysics(6), y: tileToPhysics(5) } as any;
+    // Ground plane is (x, z) now; y is height, so keep whatever the body rests at.
+    body.position = { x: tileToPhysics(6), y: body.position.y, z: tileToPhysics(5) } as any;
     (server as any)._onPlayerInput(clientId, { device: 'keyboard', key: 'd' }, true);
     for (let i = 0; i < 200; i++) (server as any)._tick(50);
 
@@ -234,10 +236,12 @@ describe('Props from the initialize script', () => {
     const players = (server as any)._players as Map<string, any>;
     const [, playerData] = [...players.entries()][0];
     const body = (server as any)._entityBodies.get(playerData.unitId);
-    const he = body.raw.collider(0).halfExtents();
+    // Units are capsules, so there are no half-extents to read: a capsule is a radius
+    // plus the half-length of its cylindrical section. The footprint still governs the
+    // radius — the narrower of the two sides, so the unit fits wherever a box would.
+    const col = body.raw.collider(0);
     const toTiles = (phys: number) => (phys * 30) / tilePx;
-    expect(toTiles(he.x * 2)).toBeCloseTo(0.5, 3);
-    expect(toTiles(he.y * 2)).toBeCloseTo(0.75, 3);
+    expect(toTiles(col.radius() * 2)).toBeCloseTo(0.5, 3);
   });
 
   it('keeps using width/height when the fixture scale is unset', async () => {
@@ -247,8 +251,10 @@ describe('Props from the initialize script', () => {
     const [propId] = [...entities.entries()].find(([, e]) => e.category === 'prop')!;
     const he = bodies.get(propId).raw.collider(0).halfExtents();
     const toTiles = (phys: number) => (phys * 30) / tilePx;
-    // The crate declares a 2x2 tile body with scale (1,1,1).
+    // The crate declares a 2x2 tile body with scale (1,1,1). The footprint is now x by
+    // z — y is height, which a 2D box had no way to express.
     expect(toTiles(he.x * 2)).toBeCloseTo(2, 3);
-    expect(toTiles(he.y * 2)).toBeCloseTo(2, 3);
+    expect(toTiles(he.z * 2)).toBeCloseTo(2, 3);
+    expect(toTiles(he.y * 2)).toBeGreaterThan(0);
   });
 });

@@ -83,17 +83,25 @@ describe('Poop dropped-body: one-shot applyForce semantics', () => {
     // Single force pulse, mirroring the Poop Helmet script.
     server.engine.events.emit('physics:applyForce', [eid, 375, 0]);
 
-    // After the next tick, body has integrated one step of force: Δv = F·dt/m = 15.
+    // After the next tick, the body has integrated one step of force: Δv = F·dt/m.
+    // Derived from the body's own mass rather than hard-coded: mass comes from density
+    // times the collider's extent, and in a 3D world that extent includes depth, so any
+    // literal here would be pinning the 2D volume rather than the force semantics.
     (server as any)._tick(50);
     const v1 = body.linearVelocity;
-    expect(v1.x).toBeCloseTo(15, 1);
+    // linearDamping=5 over a 50ms step scales velocity by 1/(1+5*0.05) = 0.8, and rapier
+    // applies it inside the same step the force lands in, so the first sample is already
+    // decayed once.
+    const DAMPING_STEP = 1 / (1 + 5 * 0.05);
+    const expectedDv = ((375 * 0.05) / body.mass) * DAMPING_STEP;
+    expect(v1.x).toBeCloseTo(expectedDv, 1);
 
     // Subsequent ticks have NO further force — velocity should DECAY via damping=5
-    // (factor ≈ 0.8 per 50ms step). With the buggy persistent force, velocity
-    // instead INCREASES toward 75. Tick 2: buggy=27, correct=12.
+    // (factor ≈ 0.8 per 50ms step). With the buggy persistent force it would instead
+    // INCREASE toward terminal velocity, so the direction of change is the real check.
     (server as any)._tick(50);
     expect(body.linearVelocity.x).toBeLessThan(v1.x);
-    expect(body.linearVelocity.x).toBeCloseTo(12, 1);
+    expect(body.linearVelocity.x).toBeCloseTo(v1.x * DAMPING_STEP, 1);
 
     // After 1 second (20 more ticks), velocity should be effectively zero.
     // With the bug, velocity would be ≥75 (terminal). Correct decay leaves <1.

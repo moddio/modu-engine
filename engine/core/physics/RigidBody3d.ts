@@ -16,6 +16,13 @@ export class RigidBody3d {
   }
 
   set position(v: Vec3) {
+    // Reject a partial vector rather than letting it through. A `{x, y}` literal left
+    // over from the 2D API yields z = undefined, rapier stores NaN, and the entity
+    // silently disappears — it renders at (NaN, NaN, NaN) and every distance test
+    // against it returns false. Failing here names the caller instead.
+    if (!Number.isFinite(v?.x) || !Number.isFinite(v?.y) || !Number.isFinite(v?.z)) {
+      throw new TypeError(`RigidBody3d.position needs finite x, y and z; got ${JSON.stringify(v)}`);
+    }
     this.raw.setTranslation(new RAPIER.Vector3(v.x, v.y, v.z), true);
   }
 
@@ -109,6 +116,10 @@ export class RigidBody3d {
     if (def.friction !== undefined) shape.setFriction(def.friction);
     if (def.restitution !== undefined) shape.setRestitution(def.restitution);
     if (def.density !== undefined) shape.setDensity(def.density);
+    // An explicit mass wins over density, or a `density: 0` fixture yields a massless
+    // dynamic body that the contact solver cannot stop. Rapier derives the angular
+    // inertia from the shape, so it does not need supplying alongside.
+    if (def.mass !== undefined && def.mass > 0) shape.setMass(def.mass);
     shape.setActiveEvents(RAPIER.ActiveEvents.COLLISION_EVENTS);
 
     return this._world.world.createCollider(shape, this.raw);

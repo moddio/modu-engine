@@ -4,8 +4,8 @@ import { EntityTypeRegistry } from '../core/game/EntityTypeRegistry';
 import { Unit } from '../core/game/Unit';
 import { Item } from '../core/game/Item';
 import { Player } from '../core/game/Player';
-import { PhysicsWorld, initPhysics } from '../core/physics/PhysicsWorld';
-import { Vec2 } from '../core/math/Vec2';
+import { PhysicsWorld3d, initPhysics3d } from '../core/physics/PhysicsWorld3d';
+import { Vec3 } from '../core/math/Vec3';
 import { CollisionCategory, DefaultCollisionMask, categoryForEntityType } from '../core/physics/CollisionFilter';
 import { GameLoop } from './GameLoop';
 import { MessageType, encodeTransform } from '../core/protocol/Messages';
@@ -13,7 +13,8 @@ import { buildEntityCreatePayload } from '../core/protocol/EntityStream';
 import type { ServerTransport } from './transport/ServerTransport';
 import type { GameMessage } from '../core/protocol/Messages';
 import type { GameData, ScriptDef } from '../core/GameLoader';
-import type { RigidBody } from '../core/physics/RigidBody';
+import type { RigidBody3d } from '../core/physics/RigidBody3d';
+import { createWallBodiesFromMap3d, createGroundBody } from '../core/physics/MapPhysics3d';
 
 export class GameServer {
   readonly engine: Engine;
@@ -31,8 +32,8 @@ export class GameServer {
    *  held-use loop / AI fire loop are dt-driven, not wall-clock). Used to gate
    *  per-item re-use against a persistent `lastUsed` timestamp. */
   private _gameTimeMs = 0;
-  private _physics: PhysicsWorld | null = null;
-  private _entityBodies = new Map<string, RigidBody>(); // entityId → physics body
+  private _physics: PhysicsWorld3d | null = null;
+  private _entityBodies = new Map<string, RigidBody3d>(); // entityId → physics body
   private _bodyToEntity = new Map<number, string>();    // rapier body handle → entityId
   private _wallBodyHandles = new Set<number>();         // rapier body handles of static wall tiles
   private _secondTickAccumMs = 0;
@@ -47,9 +48,6 @@ export class GameServer {
    *  that units moving below the speed threshold hold their prior heading
    *  instead of snapping to 0 after _syncPhysicsToEntities zeroes body.angle. */
   private _aiUnitFacingRotation = new Map<string, number>();
-  /** Coulomb ground-friction parameters per prop body (see `_applyGroundFriction`): the
-   *  coefficient, plus the contact radius that turns it into an angular deceleration. */
-  private _groundFriction = new Map<string, { mu: number; radius: number }>();
   /** Items currently held-down for continuous use (button1 / `startUsingItem`),
    *  keyed by item id → ms remaining until the next fireRate-throttled re-use.
    *  Taro equivalent: `Item._stats.isBeingUsed` driving `Item._behaviour()`.
@@ -93,9 +91,10 @@ export class GameServer {
 
     // Initialize the physics backend (rapier is WASM and needs an async compile step).
     try {
-      await initPhysics();
-      const gravity = new Vec2(0, 0); // Top-down game: no gravity
-      this._physics = new PhysicsWorld(gravity);
+      await initPhysics3d();
+      // Y is up and gravity is real now. The old world was flat and gravity-free, which
+      // is why jumping had to be faked by the renderer.
+      this._physics = new PhysicsWorld3d(new Vec3(0, -9.81, 0));
 
       // Create wall bodies from tilemap
       this._createWallBodies();
@@ -199,7 +198,6 @@ export class GameServer {
               this._bodyToEntity.delete(body.handle);
               this._physics.destroyBody(body);
               this._entityBodies.delete(placeholder);
-              this._groundFriction.delete(placeholder);
             }
             ghost.destroy?.();
             this._entities.delete(placeholder);
@@ -382,7 +380,9 @@ export class GameServer {
       if (!eid) return;
       const body = this._entityBodies.get(eid);
       if (!body) return;
-      body.linearVelocity = new Vec2(Number(vx) || 0, Number(vy) || 0);
+      // Horizontal only: y carries gravity and the jump arc, and this runs on a script's
+      // schedule, not the physics'. Overwriting it would cancel a jump mid-flight.
+      body.linearVelocity = new Vec3(Number(vx) || 0, body.linearVelocity.y, Number(vy) || 0);
     });
 
     // physics:applyImpulse and physics:applyForce — translate the angular form
@@ -403,7 +403,7 @@ export class GameServer {
         vy = Math.sin(ang) * mag;
       }
       // Taro applies impulse/force values raw — same SCALE_RATIO=30, no extra scaling.
-      const v = new Vec2(vx, vy);
+      const v = new Vec3(vx, 0, vy);
       if (kind === 'impulse') body.applyImpulse(v);
       else body.applyForce(v);
 
@@ -1367,7 +1367,9 @@ export class GameServer {
       const body = this._entityBodies.get(eid);
       if (!body) return null;
       const v = body.linearVelocity;
-      return { x: v.x, y: v.y };
+      // Scripts author movement on the ground plane, where `y` means depth. That is
+      // world z in a Y-up world; `v.y` is the vertical axis and would report the jump.
+      return { x: v.x, y: v.z };
     };
     // Expose game-owner userId for `playerIsCreator`. Taro path: `defaultData.owner`.
     const ownerId =
@@ -1610,7 +1612,6 @@ export class GameServer {
     this._entityBodies.clear();
     this._players.clear();
     this._aiUnitFacingRotation.clear();
-    this._groundFriction.clear();
     if (this._physics) {
       this._physics.destroy();
       this._physics = null;
@@ -1646,35 +1647,24 @@ export class GameServer {
   private _createWallBodies(): void {
     if (!this._physics || !this._rawGameData?.map) return;
     const map = this._rawGameData.map;
-    const layers = map.layers || [];
-    const tileHW = this._tilePx / 2 / GameServer.SCALE_RATIO; // half-extent in physics
+    // Every `walls*` layer is one storey of the same footprint, so the column builder
+    // needs all of them — the old code read only the layer literally named `walls` and
+    // threw the height away.
+    // The floor first: with real gravity, anything without ground under it falls out of
+    // the world, and a unit that has fallen past a crate never collides with it.
+    this._wallBodyHandles.add(
+      createGroundBody(this._physics, map.width, map.height, this._tilePx, GameServer.SCALE_RATIO).handle,
+    );
 
-    for (const layer of layers) {
-      if (layer.name !== 'walls' || !layer.data) continue;
-      for (let y = 0; y < map.height; y++) {
-        for (let x = 0; x < map.width; x++) {
-          if (layer.data[y * map.width + x] === 0) continue;
-          // Tile center in tile units, then tile→physics via the same scale units use.
-          const px = this._tileToPhysics(x + 0.5);
-          const py = this._tileToPhysics(y + 0.5);
-          const body = this._physics!.createBody({
-            type: 'static',
-            position: new Vec2(px, py),
-          });
-          body.addCollider({
-            shape: 'box',
-            width: tileHW,
-            height: tileHW,
-            friction: 0,
-            restitution: 0,
-            category: CollisionCategory.WALL,
-            mask: DefaultCollisionMask[CollisionCategory.WALL],
-          });
-          // Track wall body handles so collision events can identify
-          // which side of a UNIT↔WALL pair is the wall.
-          this._wallBodyHandles.add(body.handle);
-        }
-      }
+    const layers = (map.layers || [])
+      .filter((l: any) => /^walls\d*$/i.test(String(l.name ?? '')) && Array.isArray(l.data))
+      .map((l: any) => l.data as number[]);
+    if (layers.length === 0) return;
+    for (const body of createWallBodiesFromMap3d(
+      this._physics, layers, map.width, map.height, this._tilePx, GameServer.SCALE_RATIO,
+    )) {
+      // Collision resolution asks "is this handle a wall?" — see `_wallBodyHandles`.
+      this._wallBodyHandles.add(body.handle);
     }
   }
 
@@ -1990,7 +1980,7 @@ export class GameServer {
           // which maps 1:1 to rapier's setLinearVelocity (same as how unit movement
           // velocities are passed through, see line 335 comment); dividing by
           // SCALE_RATIO again would produce a 30× too-slow bullet.
-          body.linearVelocity = new Vec2(-Math.sin(rot) * speed, -Math.cos(rot) * speed);
+          body.linearVelocity = new Vec3(-Math.sin(rot) * speed, 0, -Math.cos(rot) * speed);
         }
       }
       const life = Number(projTypeDef.lifeSpan) || 0;
@@ -2011,7 +2001,6 @@ export class GameServer {
             this._physics.destroyBody(body);
           }
           this._entityBodies.delete(entityId);
-          this._groundFriction.delete(entityId);
           e.destroy?.();
           this._entities.delete(entityId);
           this._aiUnitFacingRotation.delete(entityId);
@@ -2042,10 +2031,23 @@ export class GameServer {
     // (that is what `entity.rotation` holds), so it is negated into the physics frame —
     // see the handedness note in `_syncPhysicsToEntities`, which negates it back out.
     // Without this an angled prop's collider sat mirrored against its own model.
+    // Height of the entity in tiles. The 3D fixture is a box with Z up, so
+    // `shape.depth × scale.z` is how tall it stands; props get theirs baked from the
+    // model's own bounding box (tools/bake-prop-heights.mjs in the game repo).
+    const heightFixture = bodyDef.fixtures?.[0] ?? {};
+    const heightTiles = (Number(heightFixture.shape?.depth ?? 1) || 1) * (Number(heightFixture.scale?.z ?? 1) || 1);
+    const halfHeightPhys = this._tileToPhysics(heightTiles) / 2;
+
+    // `angle` is a three.js yaw and the physics frame is now the same Y-up frame, so it
+    // goes in as a plain rotation about Y. The 2D path had to negate it: a scalar angle
+    // in an (x, y)→(x, z) world winds the opposite way, which is what mirrored every
+    // physics-driven turn until it was fixed. A quaternion carries the frame itself, so
+    // that correction disappears rather than moving.
     const body = this._physics.createBody({
       type: (bodyDef.type === 'static' ? 'static' : bodyDef.type === 'kinematic' ? 'kinematic' : 'dynamic') as any,
-      position: new Vec2(this._tileToPhysics(x), this._tileToPhysics(z)),
-      angle: angle === 0 ? 0 : -angle,
+      // Rest the body on the ground plane: its centre sits half its height up.
+      position: new Vec3(this._tileToPhysics(x), halfHeightPhys, this._tileToPhysics(z)),
+      rotation: { x: 0, y: Math.sin(angle / 2), z: 0, w: Math.cos(angle / 2) },
     });
 
     // Damping. 3D body schema stores damping as {x,y,z} per-axis objects; legacy
@@ -2151,10 +2153,16 @@ export class GameServer {
       mask |= CollisionCategory.PROP;
     }
 
+    // Units are capsules so they ride over ledges and doorway lips instead of catching
+    // a corner on them; everything else is a cuboid.
+    const isUnit = category === 'unit';
+    const capsuleRadius = Math.min(hw, hh);
     body.addCollider({
-      shape: 'box',
-      width: hw,
-      height: hh,
+      shape: isUnit ? 'capsule' : 'box',
+      halfExtents: new Vec3(hw, halfHeightPhys, hh),
+      radius: capsuleRadius,
+      // The cylindrical section excludes the two hemispherical caps.
+      halfHeight: Math.max(0.01, halfHeightPhys - capsuleRadius),
       density: fixture.density ?? 0,
       // taro's fixture schema carries an explicit mass override; the 3D editor writes
       // `overrideMass: true, mass: N` next to `density: 0`.
@@ -2177,80 +2185,26 @@ export class GameServer {
     // could never turn, which is both wrong and the single strongest "sliding on ice"
     // cue. They spin from off-centre contacts like any other rigid body, starting from
     // the angle the initialize script placed them at.
-    body.lockRotation(category !== 'prop');
+    // Scenery keeps yaw free but pitch and roll pinned, or a shoved table tips onto its
+    // side instead of spinning on the floor. Everything else has its facing written by
+    // game logic every tick, so physics spin would only fight those writes.
+    if (category === 'prop') body.lockRotationAxes(false, true, false);
+    else body.lockRotation(true);
 
-    // Coulomb ground friction coefficient (see `_applyGroundFriction`). Resolved once
-    // here rather than per tick: per-body override first, then the game's global
-    // setting, then the engine default.
-    if (category === 'prop' && bodyDef.type !== 'static' && bodyDef.type !== 'kinematic') {
-      this._groundFriction.set(entityId, {
-        mu: this._resolveGroundFriction(bodyDef),
-        radius: this._resolveContactRadius(bodyDef),
-      });
-    }
 
     this._entityBodies.set(entityId, body);
     // Reverse map for collision-event → entityId resolution.
     this._bodyToEntity.set(body.handle, entityId);
   }
 
-  /**
-   * Notional gravity used to turn a friction *coefficient* into a deceleration, in
-   * tiles/s². A unit's collider stands `scale.z = 1.88` tiles tall and represents an
-   * adult human, so one tile is very close to one metre and earth gravity is the
-   * natural choice.
-   */
-  private static readonly GROUND_GRAVITY_TILES = 9.81;
-  /**
-   * Default coefficient between a prop and the map floor. 0.6 is the textbook
-   * wood/fabric-on-hard-floor figure. Overridable per body (`bodyDef.groundFriction`)
-   * or per game (`settings.physics.groundFriction`).
-   */
-  private static readonly DEFAULT_GROUND_FRICTION = 0.6;
-  /**
-   * Contact radius used when a body declares no footprint, in tiles.
-   */
-  private static readonly DEFAULT_CONTACT_RADIUS_TILES = 0.5;
-  /**
-   * How much of the textbook spin friction to actually apply.
-   *
-   * Strict Coulomb over a contact patch gives an angular deceleration of order μ·g/r,
-   * which for a metre-scale prop is ~12 rad/s². That is *correct* and unplayable: a
-   * body-check imparts only ~0.5 rad/s, so the spin is gone within a tick or two and
-   * every shoved prop reads as rotation-locked — the exact behaviour props had when
-   * their bodies were still created with rotations locked. Real furniture also gets
-   * kicked far harder than a walking collision can push it, so matching the textbook
-   * here buys physical fidelity nobody can see at the cost of the one behaviour the
-   * feature exists for.
-   *
-   * 0.15 is the widest setting that still satisfies both ends of the contract: a
-   * shove-strength 0.5 rad/s spin turns ~7° before settling (visible), and a hard
-   * 3 rad/s spin still comes to rest in under 3s (not a spinning top). Both bounds
-   * are pinned by the ground-friction cases in PhysicsConformance.
-   */
-  private static readonly SPIN_FRICTION_SCALE = 0.15;
+
 
   /**
    * Radius of gyration of the body's footprint, in physics units — the lever the
    * rotational half of ground friction acts through. `bodyDef.width/height` are in
    * source pixels, the same units `_createEntityBody` sizes colliders from.
    */
-  private _resolveContactRadius(bodyDef: Record<string, any>): number {
-    const w = Number(bodyDef?.width) / this._tilePx;
-    const h = Number(bodyDef?.height) / this._tilePx;
-    const tiles = w > 0 && h > 0 && Number.isFinite(w) && Number.isFinite(h)
-      ? Math.sqrt((w * w + h * h) / 12)
-      : GameServer.DEFAULT_CONTACT_RADIUS_TILES;
-    return Math.max(this._tileToPhysics(tiles), 1e-6);
-  }
 
-  private _resolveGroundFriction(bodyDef: Record<string, any>): number {
-    const perBody = Number(bodyDef?.groundFriction);
-    if (Number.isFinite(perBody) && perBody >= 0) return perBody;
-    const global = Number((this._gameData as any)?.settings?.physics?.groundFriction);
-    if (Number.isFinite(global) && global >= 0) return global;
-    return GameServer.DEFAULT_GROUND_FRICTION;
-  }
 
   /**
    * Coulomb friction between a prop and the floor it is resting on.
@@ -2273,51 +2227,6 @@ export class GameServer {
    * `linearDamping: 0` deliberately; projectiles are in flight, not on the floor; items
    * coast on damping alone so that loot scatter keeps its authored distance.
    */
-  private _applyGroundFriction(dtMs: number): void {
-    if (this._groundFriction.size === 0) return;
-    const dt = dtMs / 1000;
-    // μ·g is in tiles/s²; velocities are in physics units/s (tiles × tilePx / 30).
-    const gPhysics = GameServer.GROUND_GRAVITY_TILES * this._tileToPhysics(1);
-    for (const [entityId, { mu, radius }] of this._groundFriction) {
-      if (!(mu > 0)) continue;
-      const body = this._entityBodies.get(entityId);
-      if (!body) continue;
-
-      const v = body.linearVelocity;
-      const speed = Math.hypot(v.x, v.y);
-      const w = body.angularVelocity;
-
-      // One contact patch, one friction budget. Deducting the full μ·g from the slide
-      // *and* the full μ·g/r from the spin in the same tick spends it twice, and the
-      // rotational half loses: μ·g/r is `r`-times larger, so a shove that skates a prop
-      // two tiles had its spin zeroed on the first tick. Split the budget the way the
-      // contact does, in proportion to each part's share of the slip velocity, so a
-      // sliding prop keeps turning while it travels and both reach zero together.
-      const slipSpin = Math.abs(w) * radius;
-      const slip = speed + slipSpin;
-      if (slip <= 0) continue;
-      const budget = mu * gPhysics * dt;
-
-      if (speed > 0) {
-        const dv = budget * (speed / slip);
-        // Clamp at zero rather than letting the subtraction overshoot — friction stops
-        // a body, it never reverses it.
-        if (speed <= dv) body.linearVelocity = new Vec2(0, 0);
-        else {
-          const k = (speed - dv) / speed;
-          body.linearVelocity = new Vec2(v.x * k, v.y * k);
-        }
-      }
-
-      // Rotational counterpart, so a spun prop settles instead of turning forever.
-      // Divided by the body's own contact radius (not a fixed one), so a wardrobe does
-      // not settle as abruptly as a stool.
-      if (w !== 0) {
-        const dw = (budget * (slipSpin / slip) * GameServer.SPIN_FRICTION_SCALE) / radius;
-        body.angularVelocity = Math.abs(w) <= dw ? 0 : w - Math.sign(w) * dw;
-      }
-    }
-  }
 
   // --- Tick ---
 
@@ -2337,7 +2246,6 @@ export class GameServer {
       const fixedDt = 1000 / this._loop.tickRate; // e.g., 50ms for 20Hz
       // Dry friction against the map floor, which the 2D world has no other way to
       // model. Applied before the step so the contact solver sees the reduced velocity.
-      this._applyGroundFriction(fixedDt);
       this._physics.step(fixedDt);
     }
 
@@ -2376,8 +2284,8 @@ export class GameServer {
       const body = this._entityBodies.get(id);
       if (!body) continue;
       const v = body.linearVelocity;
-      if (v.x * v.x + v.y * v.y >= FACING_MIN_SPEED_SQ) {
-        const r = Math.atan2(-v.x, -v.y);
+      if (v.x * v.x + v.z * v.z >= FACING_MIN_SPEED_SQ) {
+        const r = Math.atan2(-v.x, -v.z);
         this._aiUnitFacingRotation.set(id, r);
         unit.rotation = r;
       } else {
@@ -2582,10 +2490,10 @@ export class GameServer {
       switch (movementMethod) {
         case 'impulse':
           // taro: body.applyImpulse({ x: vectorX, y: vectorY }, true)
-          if (vectorX !== 0 || vectorY !== 0) body.applyImpulse(new Vec2(vectorX, vectorY));
+          if (vectorX !== 0 || vectorY !== 0) body.applyImpulse(new Vec3(vectorX, 0, vectorY));
           break;
         case 'force':
-          if (vectorX !== 0 || vectorY !== 0) body.applyForce(new Vec2(vectorX, vectorY));
+          if (vectorX !== 0 || vectorY !== 0) body.applyForce(new Vec3(vectorX, 0, vectorY));
           break;
         case 'velocity':
         default:
@@ -2597,7 +2505,7 @@ export class GameServer {
           // units do), and with nothing to bleed the velocity off the unit coasted for
           // as long as no key was held. `impulse`/`force` accumulate by nature and are
           // still only applied when there is input to apply.
-          body.linearVelocity = new Vec2(vectorX, vectorY);
+          body.linearVelocity = new Vec3(vectorX, body.linearVelocity.y, vectorY);
           break;
       }
     }
@@ -2714,7 +2622,7 @@ export class GameServer {
             const pBody = this._entityBodies.get(pid);
             if (!pBody) continue;
             const ddx = pBody.position.x - body.position.x;
-            const ddy = pBody.position.y - body.position.y;
+            const ddy = pBody.position.z - body.position.z;
             const dSq = ddx * ddx + ddy * ddy;
             if (dSq <= bestDistSq) {
               bestDistSq = dSq;
@@ -2740,7 +2648,7 @@ export class GameServer {
           const letGoPhys = Number(ai.letGoDistance) / GameServer.SCALE_RATIO;
           if (Number.isFinite(letGoPhys) && letGoPhys > 0) {
             const ddx = tBody.position.x - body.position.x;
-            const ddy = tBody.position.y - body.position.y;
+            const ddy = tBody.position.z - body.position.z;
             if (ddx * ddx + ddy * ddy > letGoPhys * letGoPhys) {
               state.targetUnitId = null;
               state.target = null;
@@ -2770,13 +2678,13 @@ export class GameServer {
         const maxTravelPhys = (Number(ai.maxTravelDistance) || 200) / GameServer.SCALE_RATIO;
         const reached =
           state.target &&
-          Math.hypot((state.target as any).x - body.position.x, (state.target as any).y - body.position.y) < 0.4;
+          Math.hypot((state.target as any).x - body.position.x, (state.target as any).y - body.position.z) < 0.4;
         if (!state.target || reached || state.pickCooldownMs <= 0) {
           const angle = Math.random() * Math.PI * 2;
           const dist = Math.random() * maxTravelPhys;
           state.target = {
             x: body.position.x + Math.cos(angle) * dist,
-            y: body.position.y + Math.sin(angle) * dist,
+            y: body.position.z + Math.sin(angle) * dist,
           };
           state.pickCooldownMs = 2000 + Math.random() * 3000;
         }
@@ -2785,7 +2693,7 @@ export class GameServer {
       // 5. If we still have no target, this unit is idle — clear velocity so it doesn't
       //    drift from a previous push.
       if (!state.target) {
-        body.linearVelocity = new Vec2(0, 0);
+        body.linearVelocity = new Vec3(0, body.linearVelocity.y, 0);
         continue;
       }
 
@@ -2793,7 +2701,7 @@ export class GameServer {
       //    `maxAttackRange` is in tile units in modu data; the wander branch uses a small
       //    physics-unit threshold so the unit visibly arrives at its random destination.
       const dx = state.target.x - body.position.x;
-      const dy = state.target.y - body.position.y;
+      const dy = state.target.y - body.position.z;
       const mag = Math.hypot(dx, dy);
       const speed = (typeDef?.attributes?.speed?.value as number) || (unit.stats?.speed as number) || 10;
       const attackRangePhys = state.targetUnitId
@@ -2803,9 +2711,9 @@ export class GameServer {
         // Same convention as the player branch: raw `direction * speed` in physics units.
         const vx = (dx / mag) * speed;
         const vy = (dy / mag) * speed;
-        body.linearVelocity = new Vec2(vx, vy);
+        body.linearVelocity = new Vec3(vx, body.linearVelocity.y, vy);
       } else {
-        body.linearVelocity = new Vec2(0, 0);
+        body.linearVelocity = new Vec3(0, body.linearVelocity.y, 0);
         if (state.targetUnitId) {
           // In range — face the target. The post-physics facing loop drives rotation off
           // `body.linearVelocity`, which is zero now, so it would restore the cached
@@ -2859,7 +2767,8 @@ export class GameServer {
       if (!entity) continue;
       const pos = body.position;
       let x = this._physicsToTile(pos.x);
-      let z = this._physicsToTile(pos.y); // Physics Y → Three.js Z
+      const height = this._physicsToTile(pos.y); // Y is up
+      let z = this._physicsToTile(pos.z);
 
       if (canClamp) {
         const cat = entity.category as string | undefined;
@@ -2880,13 +2789,14 @@ export class GameServer {
               // step starts inside the map. Without this, a unit pressed against
               // the boundary would re-leave on every tick and the clamp would
               // run forever, also poisoning collision response with the wall layer.
-              body.position = new Vec2(this._tileToPhysics(x), this._tileToPhysics(z));
+              body.position = new Vec3(this._tileToPhysics(x), body.position.y, this._tileToPhysics(z));
             }
           }
         }
       }
 
       entity.position.x = x;
+      entity.position.y = height;
       entity.position.z = z;
       // `body.angle` is the single source of truth for every category now. Units, items
       // and projectiles keep rotation locked, so this reads back the 0 they were created
@@ -2904,8 +2814,11 @@ export class GameServer {
       // left every angled prop's collider sitting at the opposite angle to its model.
       // `_createEntityBody` applies the same negation on the way in, so an authored
       // angle still round-trips unchanged.
-      const angle = body.angle;
-      entity.rotation = angle === 0 ? 0 : -angle; // `-0` would fail an Object.is check
+      // Yaw straight out of the quaternion. No negation: the physics frame and the
+      // render frame are the same Y-up frame now, so there is no handedness gap left to
+      // bridge — see `_createEntityBody`, which puts the yaw in the same way.
+      const q = body.rotation;
+      entity.rotation = Math.atan2(2 * (q.w * q.y + q.x * q.z), 1 - 2 * (q.y * q.y + q.x * q.x));
     }
   }
 
@@ -3672,7 +3585,6 @@ export class GameServer {
           this._bodyToEntity.delete(body.handle);
           this._physics.destroyBody(body);
           this._entityBodies.delete(entityId);
-          this._groundFriction.delete(entityId);
         }
         // Items live in two places: the `_entities` map (their backing entity) and
         // the holding unit's `stats.inventory` slot record (`{id, type, quantity}`).
@@ -3719,7 +3631,7 @@ export class GameServer {
         ent.position.x = px;
         ent.position.z = pz;
         const body = this._entityBodies.get(entityId);
-        if (body) body.position = new Vec2(this._tileToPhysics(px), this._tileToPhysics(pz));
+        if (body) body.position = new Vec3(this._tileToPhysics(px), body.position.y, this._tileToPhysics(pz));
         // Streamed via _streamTransforms next tick; no need for a special broadcast.
         return;
       }
@@ -3845,7 +3757,6 @@ export class GameServer {
           this._bodyToEntity.delete(itemBody.handle);
           this._physics.destroyBody(itemBody);
           this._entityBodies.delete(itemId);
-          this._groundFriction.delete(itemId);
         }
         if (item?.stats) item.stats.isHidden = true;
         this._transport.broadcast({ type: MessageType.EntityDestroy, data: { entityId: itemId, timestamp: Date.now() } });
@@ -4007,7 +3918,7 @@ export class GameServer {
                 // taro convention: angle 0 = up; project forward = (sin(a), -cos(a)). Velocity in
                 // physics units = pixels/SCALE_RATIO/sec.
                 const v = speed / GameServer.SCALE_RATIO;
-                body.linearVelocity = new Vec2(Math.sin(angle) * v, -Math.cos(angle) * v);
+                body.linearVelocity = new Vec3(Math.sin(angle) * v, 0, -Math.cos(angle) * v);
               }
             }
             // Despawn after lifeSpan ms (taro projectileTypes.lifeSpan).
@@ -4019,7 +3930,6 @@ export class GameServer {
                   e.destroy?.();
                   this._entities.delete(entityId);
                   this._entityBodies.delete(entityId);
-                  this._groundFriction.delete(entityId);
                   this._aiUnitFacingRotation.delete(entityId);
                   this._transport.broadcast({ type: MessageType.EntityDestroy, data: { entityId, timestamp: Date.now() } });
                 }
