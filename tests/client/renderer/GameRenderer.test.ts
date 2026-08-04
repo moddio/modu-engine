@@ -63,6 +63,15 @@ class ControlledTextureLoader {
   }
 }
 
+/** GLB loader whose callback the test fires by hand, mirroring ControlledTextureLoader. */
+type GltfEntry = { url: string; onLoad: (gltf: any) => void; onErr?: (e: any) => void };
+class ControlledGLTFLoader {
+  static pending: GltfEntry[] = [];
+  load(url: string, onLoad: (g: any) => void, _onProgress: any, onErr?: (e: any) => void) {
+    ControlledGLTFLoader.pending.push({ url, onLoad, onErr });
+  }
+}
+
 const fakeTHREE: any = {
   Vector3: FakeVector3,
   Vector2: class { x = 0; y = 0; set(a: number, b: number) { this.x = a; this.y = b; } },
@@ -103,7 +112,15 @@ const fakeTHREE: any = {
   Cache: { enabled: false },
   Box3: class { setFromObject() { return this; } getSize(v: FakeVector3) { v.set(1, 1, 1); return v; } },
   Fog: class { constructor() {} },
-  AnimationMixer: class { clipAction() { return { play() {}, fadeOut() {}, fadeIn() {}, reset() { return this; } }; } update() {} existingAction() { return null; } },
+  AnimationMixer: class {
+    /** Every mixer the renderer builds, so a test can assert the render loop advances them. */
+    static instances: any[] = [];
+    updates: number[] = [];
+    constructor(public root: any) { (fakeTHREE.AnimationMixer as any).instances.push(this); }
+    clipAction() { return { play() {}, fadeOut() {}, fadeIn() {}, reset() { return this; } }; }
+    update(dt: number) { this.updates.push(dt); }
+    existingAction() { return null; }
+  },
   CanvasTexture: class { dispose() {} },
   SpriteMaterial: class { constructor(opts: any) { Object.assign(this, opts); } },
   Sprite: class extends FakeObject3D {
@@ -133,7 +150,7 @@ function makeRenderer(gameDataOverride?: Record<string, any>): GameRenderer {
   const engine = {
     THREE: fakeTHREE,
     CameraController: FakeCamera,
-    GLTFLoader: class { load() {} },
+    GLTFLoader: ControlledGLTFLoader,
     VoxelTileMap: class {},
   };
   // Container with a no-op appendChild so the WebGLRenderer's domElement attach is harmless.
@@ -174,6 +191,59 @@ describe('GameRenderer asset cache', () => {
     fakeTHREE.Cache.enabled = false;
     makeRenderer();
     expect(fakeTHREE.Cache.enabled).toBe(true);
+  });
+});
+
+describe('GameRenderer animation playback', () => {
+  beforeEach(() => {
+    ControlledGLTFLoader.pending = [];
+    (fakeTHREE.AnimationMixer as any).instances = [];
+  });
+
+  /**
+   * Regression: a clip only animates if something advances its mixer. `playAnimation`
+   * and the idle clip started at spawn merely select and weight actions — three.js
+   * moves the skeleton in `AnimationMixer.update(dt)`, and nothing else. The 3D-physics
+   * rewrite deleted the renderer's fake jump arc from `_renderLoop` and took the
+   * adjacent mixer-update loop with it, so every GLB unit froze on frame 0 of its idle
+   * clip: animation "not playing at all" while the rest of the scene ran fine.
+   */
+  it('advances every animation mixer by the frame delta on each render frame', () => {
+    const renderer = makeRenderer();
+
+    renderer.createEntity({
+      classId: 'unit',
+      entityId: 'unit_glb',
+      x: 1, y: 2, rotation: 0,
+      stats: { cellSheet: { url: 'https://example.com/unit.glb' }, name: 'Hero' },
+    });
+    expect(ControlledGLTFLoader.pending).toHaveLength(1);
+
+    // GLB arrives with an idle clip — createEntity builds the mixer and plays it.
+    const model = new FakeObject3D();
+    ControlledGLTFLoader.pending[0].onLoad({ scene: model, animations: [{ name: 'idle' }] });
+    const mixers = (fakeTHREE.AnimationMixer as any).instances;
+    expect(mixers, 'GLB with clips must get a mixer').toHaveLength(1);
+
+    // Drive exactly one frame: rAF is stubbed to a no-op so the loop doesn't recurse,
+    // and the clock is stepped by a known 16ms so the delta is checkable.
+    const realRaf = (globalThis as any).requestAnimationFrame;
+    const realNow = performance.now;
+    let clock = 1000;
+    (globalThis as any).requestAnimationFrame = () => 1;
+    performance.now = () => clock;
+    try {
+      renderer.startRenderLoop(); // stamps _lastTime = 1000, then runs frame 1 (dt 0)
+      clock += 16;
+      (renderer as any)._renderLoop();
+    } finally {
+      performance.now = realNow;
+      (globalThis as any).requestAnimationFrame = realRaf;
+      (renderer as any)._running = false;
+    }
+
+    expect(mixers[0].updates.length, 'mixer must be updated once per frame').toBe(2);
+    expect(mixers[0].updates[1]).toBeCloseTo(0.016, 5);
   });
 });
 

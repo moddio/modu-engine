@@ -1467,6 +1467,14 @@ export class GameRenderer {
       }
     }
 
+    // Advance skeletal animation. Selecting a clip (spawn idle, `playAnimation`, the
+    // locomotion switch above) only weights actions — three.js does not move a single
+    // bone until its mixer is stepped, so without this every GLB unit stands frozen on
+    // frame 0. This loop sat next to the renderer-side jump arc and was deleted with it
+    // when vertical motion moved server-side; it is unrelated to physics.
+    for (const mixer of this._animationMixers) {
+      mixer.update(dt);
+    }
 
     this._camera.update(dt * 1000);
     this._renderer.render(this._scene, this._camera.threeCamera);
