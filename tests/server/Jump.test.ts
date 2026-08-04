@@ -55,7 +55,7 @@ const jumpGameData = () => ({
   variables: {},
 });
 
-describe('Jump (vertical impulse on a 2D physics world)', () => {
+describe('Jump (vertical impulse)', () => {
   let server: GameServer;
   let transport: ReturnType<typeof createInMemoryPair>;
   let commands: Array<{ command: string; args: unknown[] }>;
@@ -90,14 +90,34 @@ describe('Jump (vertical impulse on a 2D physics world)', () => {
     Engine.reset();
   });
 
-  it('forwards a vertical impulse to the client as a jumpEntity command', () => {
-    const clientId = [...((server as any)._players as Map<string, any>).keys()][0];
+  it('lifts the unit off the floor instead of faking the arc on the client', () => {
+    // This used to broadcast a `jumpEntity` UI command for the renderer to animate,
+    // because the world had no vertical axis to act on. It is a real impulse now, so
+    // the assertion is the body actually leaving the ground.
+    const players = (server as any)._players as Map<string, any>;
+    const [, playerData] = [...players.entries()][0];
+    const body = (server as any)._entityBodies.get(playerData.unitId);
+    const restY = body.position.y;
+
+    const clientId = [...players.keys()][0];
     (server as any)._onPlayerInput(clientId, { device: 'keyboard', key: 'space' }, true);
     (server as any)._tick(50);
 
-    const jump = commands.find((c) => c.command === 'jumpEntity');
-    expect(jump).toBeDefined();
-    expect(jump!.args[1]).toBe(300);
+    expect(body.position.y).toBeGreaterThan(restY);
+    expect(body.linearVelocity.y).toBeGreaterThan(0);
+    expect(commands.find((c) => c.command === 'jumpEntity')).toBeUndefined();
+  });
+
+  it('comes back down', () => {
+    const players = (server as any)._players as Map<string, any>;
+    const [, playerData] = [...players.entries()][0];
+    const body = (server as any)._entityBodies.get(playerData.unitId);
+    const restY = body.position.y;
+    const clientId = [...players.keys()][0];
+    (server as any)._onPlayerInput(clientId, { device: 'keyboard', key: 'space' }, true);
+    // Long enough for the whole arc: up, over, and settled back on the floor.
+    for (let i = 0; i < 400; i++) (server as any)._tick(50);
+    expect(body.position.y).toBeCloseTo(restY, 1);
   });
 
   it('does not emit a jump for a purely horizontal impulse', () => {

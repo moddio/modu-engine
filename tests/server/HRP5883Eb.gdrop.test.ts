@@ -182,9 +182,13 @@ describe.skipIf(!URI)('HRP5883Eb press G drops item', () => {
     // masquerade as the bug we're trying to catch.
     const tilePx = (server as any)._tilePx;
     const targetTile = { x: 30, z: 30 };
-    const RAPIER = await import('@dimforge/rapier2d-compat');
-    unitBody.raw.setTranslation(new RAPIER.Vector2((server as any)._tileToPhysics(targetTile.x), (server as any)._tileToPhysics(targetTile.z)), true);
-    unitBody.raw.setLinvel(new RAPIER.Vector2(0, 0), true);
+    // Ground plane is (x, z); keep the body's height so it stays resting on the floor.
+    unitBody.position = {
+      x: (server as any)._tileToPhysics(targetTile.x),
+      y: unitBody.position.y,
+      z: (server as any)._tileToPhysics(targetTile.z),
+    };
+    unitBody.linearVelocity = { x: 0, y: 0, z: 0 };
     unit.position.x = targetTile.x;
     unit.position.z = targetTile.z;
 
@@ -227,8 +231,12 @@ describe.skipIf(!URI)('HRP5883Eb press G drops item', () => {
     const unitBody = (server as any)._entityBodies.get(playerData.unitId);
     const tilePx = (server as any)._tilePx;
     const targetTile = { x: 30, z: 30 };
-    const RAPIER = await import('@dimforge/rapier2d-compat');
-    unitBody.raw.setTranslation(new RAPIER.Vector2((server as any)._tileToPhysics(targetTile.x), (server as any)._tileToPhysics(targetTile.z)), true);
+    // Ground plane is (x, z); keep the body's height so it stays resting on the floor.
+    unitBody.position = {
+      x: (server as any)._tileToPhysics(targetTile.x),
+      y: unitBody.position.y,
+      z: (server as any)._tileToPhysics(targetTile.z),
+    };
 
     const meatType = 'M94GUBy6iN';
     server.engine.events.emit('item:spawn', [meatType, { x: targetTile.x * tilePx, y: targetTile.z * tilePx }]);

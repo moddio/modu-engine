@@ -15,7 +15,6 @@ interface OldGameData {
     sound?: Record<string, unknown>;
     [key: string]: unknown;
   };
-  physicsEngine?: string;
   frameRate?: number;
   defaultMaxPlayers?: number;
   mapBackgroundColor?: string;
@@ -85,7 +84,6 @@ export class GameMigrator {
 
   private static _migrateSettings(oldData: OldGameData): Record<string, unknown> {
     return {
-      physicsEngine: oldData.physicsEngine ?? 'rapier2d',
       frameRate: oldData.frameRate ?? 60,
       maxPlayers: oldData.defaultMaxPlayers ?? 32,
       mapBackgroundColor: oldData.mapBackgroundColor ?? '#222222',

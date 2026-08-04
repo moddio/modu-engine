@@ -407,19 +407,19 @@ export class GameServer {
       if (kind === 'impulse') body.applyImpulse(v);
       else body.applyForce(v);
 
-      // A Z component means "up". The physics world is rapier2d — there is no vertical
-      // axis for it to act on — so a 3D game's jump (`applyImpulseOnEntityXY` with
-      // `{x:0, y:0, z:300}`, guarded by a ground check) silently did nothing at all.
-      // Forward it as a UI command instead: the renderer owns the vertical arc, since
-      // height is purely visual here. Without this, jumping is unimplemented.
+      // A Z component means "up" in the authored data. The world has a vertical axis
+      // now, so it becomes a real impulse on Y rather than a `jumpEntity` UI command for
+      // the renderer to fake — which is why a unit can land on a crate and stay there.
       const vz = magOrVec && typeof magOrVec === 'object'
         ? Number((magOrVec as { z?: number }).z) || 0
         : 0;
       if (vz > 0) {
-        this._transport.broadcast({
-          type: MessageType.UICommand,
-          data: { command: 'jumpEntity', args: [eid, vz] },
-        });
+        // Authored jump values are in taro's pixel units, like every other velocity the
+        // scripting layer hands us, so divide by SCALE_RATIO before it means anything to
+        // the solver — applied raw, 300 is escape velocity. Multiplied by mass because
+        // this is an impulse and the caller is expressing a launch speed.
+        const launch = vz / GameServer.SCALE_RATIO;
+        body.applyImpulse(new Vec3(0, launch * body.mass, 0));
       }
     };
     this.engine.events.on('physics:applyImpulse', physicsApply('impulse'));
@@ -2209,8 +2209,8 @@ export class GameServer {
   /**
    * Coulomb friction between a prop and the floor it is resting on.
    *
-   * The physics world is rapier2d viewed from above: there is no floor and no gravity,
-   * so the *only* thing slowing a shoved prop was `linearDamping` from the game data.
+   * Historical note: the flat world had no floor and no gravity, so the only thing
+   * slowing a shoved prop was `linearDamping` from the game data.
    * Viscous damping is the wrong model for this — it is proportional to velocity, so it
    * decays asymptotically and a body never actually comes to rest. With the shipped
    * `linearDamping: 1`, one shove sent a 30kg car 7.5 tiles over 13 seconds. That is

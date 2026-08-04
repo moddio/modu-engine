@@ -3,7 +3,6 @@ import { GameMigrator } from '../../../engine/core/GameMigrator';
 
 function makeOldGameData() {
   return {
-    physicsEngine: 'planck',
     frameRate: 60,
     defaultMaxPlayers: 16,
     mapBackgroundColor: '#1a1a2e',
@@ -66,7 +65,6 @@ describe('GameMigrator', () => {
     const result = GameMigrator.migrate(makeOldGameData());
     expect(result.settings.frameRate).toBe(60);
     expect(result.settings.maxPlayers).toBe(16);
-    expect(result.settings.physicsEngine).toBe('planck');
   });
 
   it('migrates entities', () => {
