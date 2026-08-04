@@ -1,0 +1,11 @@
+{
+  "name": "condition branches",
+  "initialVars": { "x": { "value": 5, "type": "number" }, "out": { "value": "", "type": "string" } },
+  "actions": [
+    { "type": "condition",
+      "conditions": [ { "operator": ">" }, { "function": "getVariable", "variableName": "x" }, 3 ],
+      "then": [ { "type": "setVariable", "variableName": "out", "value": "big" } ],
+      "else": [ { "type": "setVariable", "variableName": "out", "value": "small" } ] },
+    { "type": "log", "value": { "function": "getVariable", "variableName": "out" } }
+  ]
+}

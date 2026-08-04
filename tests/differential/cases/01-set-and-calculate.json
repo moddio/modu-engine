@@ -1,0 +1,11 @@
+{
+  "name": "set and calculate",
+  "initialVars": { "a": { "value": 0, "type": "number" }, "b": { "value": 0, "type": "number" } },
+  "actions": [
+    { "type": "setVariable", "variableName": "a", "value": 7 },
+    { "type": "setVariable", "variableName": "b",
+      "value": { "function": "calculate", "items": [ { "operator": "*" },
+        { "function": "getVariable", "variableName": "a" }, 3 ] } },
+    { "type": "log", "value": { "function": "getVariable", "variableName": "b" } }
+  ]
+}

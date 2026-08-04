@@ -6,6 +6,8 @@ export type { CameraConfig } from './renderer/CameraController';
 export { AssetManager } from './renderer/AssetManager';
 export type { AssetSource } from './renderer/AssetManager';
 export { Camera, ObjectPool, SpatialIndex, EntityManager } from './renderer/index';
+export { MapTabController } from './MapTabController';
+export type { MapTabControllerDeps } from './MapTabController';
 export { EntityTypeRegistry } from '../core/game/EntityTypeRegistry';
 export { InputManager, Key, MobileControls } from './input/index';
 export { AudioManager } from './audio/index';

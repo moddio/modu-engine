@@ -73,4 +73,26 @@ describe('VariableStore', () => {
     vs.setGlobal('count', '5', 'number');
     expect(vs.getGlobal('count')).toBe('5');
   });
+
+  it('setGlobal preserves declared dataType on subsequent writes', () => {
+    vs.setGlobal('zone', { x: 0, y: 0, width: 10, height: 10 }, 'region');
+    vs.setGlobal('zone', { x: 5, y: 5, width: 10, height: 10 });
+    const entries = Array.from(vs.globalEntries('region'));
+    expect(entries.map((e) => e[0])).toContain('zone');
+  });
+
+  it('setEntityVar preserves declared dataType on subsequent writes', () => {
+    vs.setEntityVar('e1', 'target', 'unit-7', 'unit');
+    vs.setEntityVar('e1', 'target', 'unit-9');
+    const entries = Array.from(vs.entityEntries('e1', 'unit'));
+    expect(entries.map((e) => e[0])).toContain('target');
+  });
+
+  it('setPlayerVar preserves declared dataType on subsequent writes', () => {
+    vs.setPlayerVar('p1', 'home', { x: 0, y: 0, width: 5, height: 5 }, 'region');
+    vs.setPlayerVar('p1', 'home', { x: 1, y: 1, width: 5, height: 5 });
+    const entries = Array.from(vs.playerEntries('p1', 'region'));
+    expect(entries.map((e) => e[0])).toContain('home');
+  });
+
 });

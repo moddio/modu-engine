@@ -20,11 +20,17 @@ describe('Protocol Messages', () => {
   });
 
   describe('encodeTransform', () => {
-    it('encodes position and rotation to hex', () => {
+    it('encodes position and rotation to hex with sub-unit precision', () => {
       const encoded = encodeTransform({ x: 100, y: 200, rotation: 1.5708 });
-      expect(encoded.x).toBe('64');
-      expect(encoded.y).toBe('c8');
+      expect(encoded.x).toBe((100 * 1000).toString(16));
+      expect(encoded.y).toBe((200 * 1000).toString(16));
       expect(encoded.rotation).toBe(Math.round(1.5708 * 1000).toString(16));
+    });
+
+    it('preserves fractional world-unit positions', () => {
+      const decoded = decodeTransform(encodeTransform({ x: 12.345, y: -7.891, rotation: 0 }));
+      expect(decoded.x).toBeCloseTo(12.345, 3);
+      expect(decoded.y).toBeCloseTo(-7.891, 3);
     });
 
     it('encodes teleport flags', () => {
@@ -41,7 +47,11 @@ describe('Protocol Messages', () => {
 
   describe('decodeTransform', () => {
     it('decodes hex back to numbers', () => {
-      const decoded = decodeTransform({ x: '64', y: 'c8', rotation: '3e8' });
+      const decoded = decodeTransform({
+        x: (100 * 1000).toString(16),
+        y: (200 * 1000).toString(16),
+        rotation: '3e8',
+      });
       expect(decoded.x).toBe(100);
       expect(decoded.y).toBe(200);
       expect(decoded.rotation).toBe(1);
@@ -61,8 +71,8 @@ describe('Protocol Messages', () => {
       const payload = buildEntityCreatePayload('unit', 'u1', 100, 200, 0, { name: 'Test' });
       expect(payload.classId).toBe('unit');
       expect(payload.entityId).toBe('u1');
-      expect(payload.transform.x).toBe('64');
-      expect(payload.transform.y).toBe('c8');
+      expect(payload.transform.x).toBe((100 * 1000).toString(16));
+      expect(payload.transform.y).toBe((200 * 1000).toString(16));
       expect(payload.stats.name).toBe('Test');
     });
   });

@@ -47,6 +47,20 @@ describe('Engine', () => {
       expect(engine.findById('findme')).toBe(e);
     });
     it('findById returns null for missing', () => { expect(engine.findById('nope')).toBeNull(); });
+    it('findById falls back to tree walk when not in registry', async () => {
+      // GameServer / LocalGameSession construct entities directly and mount them
+      // without going through engine.spawn(). findById must still locate them.
+      const { Entity } = await import('../../../engine/core/ecs/Entity');
+      const e = new Entity('manual1');
+      e.mount(engine.root);
+      expect(engine.findById('manual1')).toBe(e);
+    });
+    it('findById tree walk reaches nested children', async () => {
+      const { Entity } = await import('../../../engine/core/ecs/Entity');
+      const parent = new Entity('p1'); parent.mount(engine.root);
+      const child = new Entity('c1'); child.mount(parent);
+      expect(engine.findById('c1')).toBe(child);
+    });
   });
 
   describe('systems', () => {

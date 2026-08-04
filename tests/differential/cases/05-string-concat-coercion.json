@@ -1,0 +1,9 @@
+{
+  "name": "string concat coercion",
+  "initialVars": { "s": { "value": "", "type": "string" } },
+  "actions": [
+    { "type": "setVariable", "variableName": "s",
+      "value": { "function": "concat", "textA": "n=", "textB": 5 } },
+    { "type": "log", "value": { "function": "getVariable", "variableName": "s" } }
+  ]
+}

@@ -1,6 +1,7 @@
 import { Engine } from '../core/Engine';
 import { Renderer } from './renderer/Renderer';
 import { CameraController, CameraConfig } from './renderer/CameraController';
+import { EntityManager } from './renderer/EntityManager';
 import { InputManager } from './input/InputManager';
 import { AudioManager } from './audio/AudioManager';
 import { AssetManager } from './renderer/AssetManager';
@@ -10,6 +11,7 @@ export class Client {
   readonly engine: Engine;
   readonly renderer: Renderer;
   readonly camera: CameraController;
+  readonly entityManager: EntityManager;
   readonly input: InputManager;
   readonly audio: AudioManager;
   readonly assets: AssetManager;
@@ -22,6 +24,8 @@ export class Client {
     this.engine = Engine.instance();
     this.renderer = new Renderer();
     this.camera = new CameraController(cameraConfig);
+    this.entityManager = new EntityManager();
+    this.renderer.scene.add(this.entityManager.group);
     this.input = new InputManager();
     this.audio = new AudioManager();
     this.assets = new AssetManager();

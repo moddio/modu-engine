@@ -38,7 +38,22 @@ export class Engine {
   }
 
   findById(id: string): Entity | null {
-    return this._entityRegistry.get(id) ?? null;
+    const fast = this._entityRegistry.get(id);
+    if (fast) return fast;
+    // GameServer / LocalGameSession construct entities with `new Unit/Player/Item(...)`
+    // and `mount(engine.root)` rather than `engine.spawn()`, so they never land in
+    // `_entityRegistry`. Fall back to a tree walk so script resolvers
+    // (getEntityAttribute, getOwner, getItemQuantity, …) actually find them.
+    const seen = new Set<Entity>();
+    const stack: Entity[] = [this.root];
+    while (stack.length) {
+      const e = stack.pop()!;
+      if (seen.has(e)) continue;
+      seen.add(e);
+      if (e.id === id) return e;
+      for (const c of e.children) stack.push(c);
+    }
+    return null;
   }
 
   addSystem(system: System): void { this._systems.set(system.name, system); }

@@ -11,6 +11,14 @@ export interface CameraConfig {
   far?: number;
   collisions?: boolean;
   pitchRange?: { min: number; max: number };  // degrees
+  /** Allow mouse-drag camera rotation (pitch/yaw). Defaults to true. */
+  rotatable?: boolean;
+  /** Allow scroll-wheel zoom. Defaults to true. */
+  zoomable?: boolean;
+  /** Capture pointer when canvas clicked. Defaults to true iff rotatable. */
+  pointerLock?: boolean;
+  /** Allow right-mouse-drag camera target panning. Defaults to true. */
+  pannable?: boolean;
 }
 
 export class CameraController {
@@ -35,6 +43,10 @@ export class CameraController {
   private _width = 800;
   private _height = 600;
   private _followTarget: THREE.Vector3 | null = null;
+  private _rotatable: boolean;
+  private _zoomable: boolean;
+  private _pointerLockEnabled: boolean;
+  private _pannable: boolean;
 
   constructor(config: CameraConfig = {}) {
     this._projectionMode = config.projectionMode ?? 'orthographic';
@@ -49,6 +61,11 @@ export class CameraController {
     this.azimuth = (config.defaultYaw ?? 0) * Math.PI / 180;
     this.distance = config.zoom ?? 1;
     this.trackingDelay = config.trackingDelay ?? 0;
+
+    this._rotatable = config.rotatable ?? true;
+    this._zoomable = config.zoomable ?? true;
+    this._pointerLockEnabled = config.pointerLock ?? this._rotatable;
+    this._pannable = config.pannable ?? true;
 
     this.elevation = Math.max(this._pitchMin, Math.min(this._pitchMax, this.elevation));
 
@@ -94,18 +111,30 @@ export class CameraController {
     this._followTarget = null;
   }
 
+  /** Read-only snapshot of the current follow target, or null if not following. */
+  get followTarget(): import('three').Vector3 | null {
+    return this._followTarget ? this._followTarget.clone() : null;
+  }
+
   /** Whether pointer lock is active */
   get isPointerLocked(): boolean { return this._pointerLocked; }
   private _pointerLocked = false;
+  private _isPanning = false;
 
-  /** Attach pointer lock + scroll zoom controls. Returns cleanup function. */
+  /**
+   * Attach pointer lock + scroll zoom controls. Listeners are always attached but
+   * their bodies check the live `_rotatable` / `_zoomable` / `_pointerLockEnabled`
+   * flags, so callers can toggle at runtime via `setControls(...)` (e.g. editor
+   * switching into a Map tab that wants free camera).
+   */
   attachControls(canvas: HTMLCanvasElement): () => void {
     const rotateSpeed = 0.0035; // radians per pixel of mouse movement
     const zoomSpeed = 0.5;
 
-    const onPointerDown = () => {
-      if (this._pointerLocked) return;
-      canvas.requestPointerLock();
+    const onClick = () => {
+      if (this._pointerLockEnabled && !this._pointerLocked) {
+        canvas.requestPointerLock();
+      }
     };
 
     const onPointerLockChange = () => {
@@ -113,18 +142,23 @@ export class CameraController {
     };
 
     const onMouseMove = (e: MouseEvent) => {
-      if (!this._pointerLocked) return;
+      if (!this._pointerLocked || !this._rotatable) return;
       this.azimuth -= e.movementX * rotateSpeed;
-      // Mouse up (negative movementY) → decrease elevation (look down toward ground)
-      // This matches taro engine behavior where mouse controls camera orbit, not FPS look
       this.elevation = Math.max(this._pitchMin, Math.min(this._pitchMax,
         this.elevation + e.movementY * rotateSpeed));
     };
 
     const onWheel = (e: WheelEvent) => {
+      if (!this._zoomable) return;
       e.preventDefault();
-      this.distance = Math.max(0.5, Math.min(30,
-        this.distance + (e.deltaY > 0 ? zoomSpeed : -zoomSpeed)));
+      // Multiplicative zoom — feels uniform at any base distance.
+      // Ortho: bigger distance = zoomed in (frustum = canvas/distance).
+      // Perspective: bigger distance = zoomed out (camera farther from target).
+      const ZOOM_FACTOR = 1.1;
+      const zoomingOut = e.deltaY > 0;
+      let factor = zoomingOut ? 1 / ZOOM_FACTOR : ZOOM_FACTOR;
+      if (this._projectionMode === 'perspective') factor = 1 / factor;
+      this.distance = Math.max(0.1, Math.min(1000, this.distance * factor));
     };
 
     const onKeyDown = (e: KeyboardEvent) => {
@@ -135,25 +169,93 @@ export class CameraController {
 
     const onCtx = (e: Event) => e.preventDefault();
 
-    // Listen on the canvas itself so only direct clicks on it trigger pointer lock.
-    // Overlays (editor, menus, HUD) sit above the canvas in the DOM and will
-    // naturally intercept clicks without triggering lock.
-    canvas.addEventListener('pointerdown', onPointerDown);
+    let panLastX = 0;
+    let panLastY = 0;
+
+    const onMouseDownPan = (e: MouseEvent) => {
+      if (e.button !== 2 || !this._pannable) return;
+      e.preventDefault();
+      this._isPanning = true;
+      panLastX = e.clientX;
+      panLastY = e.clientY;
+    };
+
+    const onMouseUpPan = (e: MouseEvent) => {
+      if (e.button === 2) this._isPanning = false;
+    };
+
+    const onMouseMovePan = (e: MouseEvent) => {
+      if (!this._isPanning) return;
+      const dx = e.clientX - panLastX;
+      const dy = e.clientY - panLastY;
+      panLastX = e.clientX;
+      panLastY = e.clientY;
+      this.applyPan(dx, dy);
+    };
+
+    canvas.addEventListener('click', onClick);
     document.addEventListener('pointerlockchange', onPointerLockChange);
     document.addEventListener('mousemove', onMouseMove);
     canvas.addEventListener('wheel', onWheel, { passive: false });
     document.addEventListener('keydown', onKeyDown);
     canvas.addEventListener('contextmenu', onCtx);
+    canvas.addEventListener('mousedown', onMouseDownPan);
+    window.addEventListener('mouseup', onMouseUpPan);
+    document.addEventListener('mousemove', onMouseMovePan);
 
     return () => {
-      canvas.removeEventListener('pointerdown', onPointerDown);
+      canvas.removeEventListener('click', onClick);
       document.removeEventListener('pointerlockchange', onPointerLockChange);
       document.removeEventListener('mousemove', onMouseMove);
       canvas.removeEventListener('wheel', onWheel);
       document.removeEventListener('keydown', onKeyDown);
       canvas.removeEventListener('contextmenu', onCtx);
+      canvas.removeEventListener('mousedown', onMouseDownPan);
+      window.removeEventListener('mouseup', onMouseUpPan);
+      document.removeEventListener('mousemove', onMouseMovePan);
       if (this._pointerLocked) document.exitPointerLock();
     };
+  }
+
+  /** Enable / disable interactive controls at runtime (e.g. for an editor "Map" tab). */
+  setControls(opts: { rotatable?: boolean; zoomable?: boolean; pointerLock?: boolean; pannable?: boolean }): void {
+    if (typeof opts.rotatable === 'boolean') this._rotatable = opts.rotatable;
+    if (typeof opts.zoomable === 'boolean') this._zoomable = opts.zoomable;
+    if (typeof opts.pointerLock === 'boolean') {
+      this._pointerLockEnabled = opts.pointerLock;
+      if (!this._pointerLockEnabled && this._pointerLocked) {
+        document.exitPointerLock();
+      }
+    }
+    if (typeof opts.pannable === 'boolean') {
+      this._pannable = opts.pannable;
+      if (!this._pannable) this._isPanning = false;
+    }
+  }
+
+  /**
+   * Translate the camera target by a screen-space drag delta in pixels.
+   * Pan is azimuth-rotated so the world tracks the cursor 1:1, computed from
+   * the actual world-per-pixel ratio of the current projection so feel is
+   * consistent at any zoom. No-op when `pannable` is false.
+   */
+  applyPan(dx: number, dy: number): void {
+    if (!this._pannable) return;
+    let worldPerPx: number;
+    if (this._projectionMode === 'orthographic') {
+      // Ortho frustum half-width = canvas_width / (2 * distance), so 1 px = 1/distance world units.
+      worldPerPx = 1 / this.distance;
+    } else {
+      // Perspective: at the look-at distance, vertical world span = 2 * actualDistance * tan(fov/2).
+      const halfFov = (this._fov * Math.PI / 180) / 2;
+      worldPerPx = (2 * this.distance * 3 * Math.tan(halfFov)) / this._height;
+    }
+    const cosAz = Math.cos(this.azimuth);
+    const sinAz = Math.sin(this.azimuth);
+    // Camera-right in XZ at azimuth=0 is +X; rotating by azimuth gives the screen-right basis.
+    // Drag-world-with-cursor convention: cursor right → target moves -right.
+    this.target.x -= dx * cosAz * worldPerPx + dy * sinAz * worldPerPx;
+    this.target.z -= -dx * sinAz * worldPerPx + dy * cosAz * worldPerPx;
   }
 
   resize(width: number, height: number): void {
@@ -181,6 +283,18 @@ export class CameraController {
     }
 
     this._updatePosition();
+
+    // Ortho frustum derives from `distance`; refresh each frame so scroll-zoom
+    // (which mutates `distance`) actually changes the projection.
+    if (this._projectionMode === 'orthographic') {
+      const hw = this._width / (2 * this.distance);
+      const hh = this._height / (2 * this.distance);
+      this._orthoCamera.left = -hw;
+      this._orthoCamera.right = hw;
+      this._orthoCamera.top = hh;
+      this._orthoCamera.bottom = -hh;
+      this._orthoCamera.updateProjectionMatrix();
+    }
 
     const cam = this.threeCamera;
     cam.position.copy(this.position);

@@ -34,12 +34,37 @@ export class RigidBody {
   get angularVelocity(): number { return this.raw.angvel(); }
   set angularVelocity(v: number) { this.raw.setAngvel(v, true); }
 
+  get linearDamping(): number { return this.raw.linearDamping(); }
+  set linearDamping(v: number) { this.raw.setLinearDamping(v); }
+
+  get angularDamping(): number { return this.raw.angularDamping(); }
+  set angularDamping(v: number) { this.raw.setAngularDamping(v); }
+
+  /** Total mass, including every attached collider. */
+  get mass(): number { return this.raw.mass(); }
+
+  /**
+   * Freeze or release the body's rotational degree of freedom.
+   *
+   * Locked is the right default for anything whose facing is written by game logic
+   * (units turn to face the cursor, items point along the swing arc) — physics spin
+   * would fight those writes every tick. Physical scenery is the opposite case: a
+   * shoved sofa has to be able to turn, so props are created unlocked.
+   */
+  lockRotation(locked: boolean): void {
+    this.raw.lockRotations(locked, true);
+  }
+
   applyForce(force: Vec2): void {
     this.raw.addForce(new RAPIER.Vector2(force.x, force.y), true);
   }
 
   applyImpulse(impulse: Vec2): void {
     this.raw.applyImpulse(new RAPIER.Vector2(impulse.x, impulse.y), true);
+  }
+
+  applyTorque(torque: number): void {
+    this.raw.addTorque(torque, true);
   }
 
   get isSleeping(): boolean { return this.raw.isSleeping(); }
@@ -55,6 +80,16 @@ export class RigidBody {
     if (def.friction !== undefined) shape.setFriction(def.friction);
     if (def.restitution !== undefined) shape.setRestitution(def.restitution);
     if (def.density !== undefined) shape.setDensity(def.density);
+    // An explicit mass wins over density. Rapier derives mass from density*area, so a
+    // fixture with density 0 yields a massless dynamic body that no contact can stop.
+    //
+    // Angular inertia does not need to be supplied alongside it: rapier derives it from
+    // the shape, and measures identical to the textbook m·(hw² + hh²)/3 for a cuboid.
+    // A backend that does *not* do this (Box2D's `b2MassData` wants the inertia filled
+    // in explicitly) has to compute it here, or every mass-overridden prop — which is
+    // all of them in a 3D export — ends up unable to spin. PhysicsConformance's
+    // "spins an explicit-mass body the way the torque points" is the guard for that.
+    if (def.mass !== undefined && def.mass > 0) shape.setMass(def.mass);
     shape.setActiveEvents(RAPIER.ActiveEvents.COLLISION_EVENTS);
 
     // Set collision groups: Rapier packs mask in upper 16 bits, category in lower 16 bits

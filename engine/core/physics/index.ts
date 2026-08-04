@@ -1,4 +1,4 @@
-export { PhysicsWorld } from './PhysicsWorld';
+export { PhysicsWorld, initPhysics } from './PhysicsWorld';
 export type { BodyDef, ColliderDef } from './PhysicsWorld';
 export { RigidBody } from './RigidBody';
 export { PhysicsWorld3d } from './PhysicsWorld3d';

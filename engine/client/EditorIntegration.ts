@@ -2,6 +2,8 @@ import { Engine } from '../core/Engine';
 import { GameLoader } from '../core/GameLoader';
 import { EventEmitter } from '../core/events/EventEmitter';
 import { DevMode } from '../../editor/DevMode';
+import { Client } from './Client';
+import { MapTabController } from './MapTabController';
 
 declare global {
   interface Window {
@@ -19,31 +21,41 @@ export interface ModuGlobal {
 }
 
 export class EditorIntegration {
-  private _engine: Engine;
+  private _client: Client;
   private _gameLoader: GameLoader;
   private _devMode: DevMode;
+  private _mapTabController: MapTabController;
 
-  constructor(engine: Engine, gameLoader: GameLoader) {
-    this._engine = engine;
+  constructor(client: Client, gameLoader: GameLoader) {
+    this._client = client;
     this._gameLoader = gameLoader;
     this._devMode = new DevMode();
+    this._mapTabController = new MapTabController({
+      devMode: this._devMode,
+      camera: client.camera,
+      entityManager: client.entityManager,
+    });
   }
 
   expose(): void {
     if (typeof window === 'undefined') return;
 
     window.modu = {
-      engine: this._engine,
+      engine: this._client.engine,
       gameData: this._gameLoader.gameData as Record<string, unknown> | null,
-      events: this._engine.events,
+      events: this._client.engine.events,
       editor: this._devMode,
       network: {
         send: (event: string, data: unknown) => {
-          this._engine.events.emit(event, data);
+          this._client.engine.events.emit(event, data);
         },
       },
     };
   }
 
   get devMode(): DevMode { return this._devMode; }
+
+  dispose(): void {
+    this._mapTabController.dispose();
+  }
 }

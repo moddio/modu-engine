@@ -117,4 +117,25 @@ describe('ConditionEvaluator', () => {
       ce.evaluate({ operator: 'NAND', operandA: true, operandB: true }, identity),
     ).toBe(false);
   });
+
+  it('== compares entity-like operands by _id (taro parity)', () => {
+    const a = { _id: 'u1', x: 1 };
+    const b = { _id: 'u1', x: 999 }; // different obj, same _id
+    expect(ce.evaluate({ operator: '==', operandA: a, operandB: b }, identity)).toBe(true);
+  });
+
+  it('== matches taro semantics: undefined coerces to false; primitives are JSON-stringified', () => {
+    // Taro's stringify is for region/object compares — '5' and 5 stringify to
+    // '"5"' and '5' (NOT equal). Same primitives still match.
+    expect(ce.evaluate({ operator: '==', operandA: '5', operandB: 5 }, identity)).toBe(false);
+    // undefined → false → JSON.stringify(false) = 'false' on both sides → equal.
+    expect(ce.evaluate({ operator: '==', operandA: undefined, operandB: false }, identity)).toBe(true);
+    expect(ce.evaluate({ operator: '==', operandA: 5, operandB: 5 }, identity)).toBe(true);
+    expect(ce.evaluate({ operator: '==', operandA: 'foo', operandB: 'foo' }, identity)).toBe(true);
+  });
+
+  it('== returns true for region-like values by reference identity', () => {
+    const r = { x: 0, y: 0, width: 10, height: 10 };
+    expect(ce.evaluate({ operator: '==', operandA: r, operandB: r }, identity)).toBe(true);
+  });
 });
