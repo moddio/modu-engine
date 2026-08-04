@@ -2038,11 +2038,14 @@ export class GameServer {
     const bodyDef = typeDef.body || typeDef.bodies?.default || typeDef.bodies?.dropped;
     if (!bodyDef || bodyDef.type === 'none' || bodyDef.type === 'spriteOnly') return;
 
-    // Position in physics coords = tile * 16 / 30
+    // Position in physics coords = tile * 16 / 30. `angle` arrives as a three.js yaw
+    // (that is what `entity.rotation` holds), so it is negated into the physics frame —
+    // see the handedness note in `_syncPhysicsToEntities`, which negates it back out.
+    // Without this an angled prop's collider sat mirrored against its own model.
     const body = this._physics.createBody({
       type: (bodyDef.type === 'static' ? 'static' : bodyDef.type === 'kinematic' ? 'kinematic' : 'dynamic') as any,
       position: new Vec2(this._tileToPhysics(x), this._tileToPhysics(z)),
-      angle,
+      angle: angle === 0 ? 0 : -angle,
     });
 
     // Damping. 3D body schema stores damping as {x,y,z} per-axis objects; legacy
@@ -2891,7 +2894,18 @@ export class GameServer {
       // tick. Props are created unlocked *and* seeded with the angle the initialize
       // script placed them at, so the same read gives their authored rotation until a
       // collision spins them.
-      entity.rotation = body.angle;
+      // …and negated, because `entity.rotation` is a three.js yaw while `body.angle` is
+      // a 2D physics angle, and the two have opposite handedness. Positions map
+      // (x, y) → (x, z), which reverses orientation once it lands in a right-handed
+      // Y-up frame: rotating by +θ in physics carries +x toward +z, while rotating a
+      // three.js object by +θ about +Y carries +x toward −z. Reading the angle across
+      // unconverted mirrored every physics-driven turn — shoving a box's top-left
+      // corner rightward spun it anticlockwise on screen instead of clockwise — and
+      // left every angled prop's collider sitting at the opposite angle to its model.
+      // `_createEntityBody` applies the same negation on the way in, so an authored
+      // angle still round-trips unchanged.
+      const angle = body.angle;
+      entity.rotation = angle === 0 ? 0 : -angle; // `-0` would fail an Object.is check
     }
   }
 

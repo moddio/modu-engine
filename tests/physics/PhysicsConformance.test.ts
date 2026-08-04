@@ -497,6 +497,27 @@ describe('physics conformance / ground friction', () => {
     expect(Math.abs(g.propEntity('a').rotation - start)).toBeGreaterThan(0.1);
   });
 
+  it('turns a shoved prop the way the shove points', async () => {
+    // `entity.rotation` is a three.js yaw; `body.angle` is a 2D physics angle. Positions
+    // map (x, y) → (x, z), which reverses orientation in a right-handed Y-up frame, so
+    // the two differ by a sign. Reading one straight into the other mirrors every
+    // physics-driven turn: shoving a box's top-left corner rightward — which has to
+    // swing it clockwise — spun it anticlockwise on screen.
+    const g = await bootAndTrack({ propBody: { linearDamping: 0, angularDamping: 0 }, props: [{ id: 'a', x: 10, y: 10 }] });
+    const body = g.propBody('a');
+    const before = g.propEntity('a').rotation;
+
+    // Impulse toward +x applied above the centre line (−z, the top edge on screen).
+    body.angularVelocity = 0;
+    body.linearVelocity = { x: 0, y: 0 };
+    body.applyImpulse({ x: tileToPhysics(6), y: 0 });
+    body.angularVelocity = 1; // physics-frame CCW, which must read as clockwise yaw
+    g.tick(4);
+
+    // A clockwise on-screen turn is a *decreasing* three.js yaw.
+    expect(g.propEntity('a').rotation).toBeLessThan(before);
+  });
+
   it('stops a large prop spinning more slowly than a small one', async () => {
     // Angular deceleration from a contact patch of radius R goes as μ·g/R, so a big
     // prop must keep its spin longer than a small one. A hardcoded radius makes a
@@ -571,7 +592,12 @@ describe('physics conformance / rotation ownership', () => {
     expect(g.propEntity('a').rotation).not.toBe(0);
   });
 
-  it('surfaces the physics angle as the entity rotation', async () => {
+  it('surfaces the physics angle as the entity rotation, negated into the render frame', async () => {
+    // The two are not the same number: `body.angle` is a 2D physics angle and
+    // `entity.rotation` is a three.js yaw, and they wind opposite ways. Physics turns
+    // +x toward +y (which is world +z); a three.js yaw about +Y turns +x toward −z.
+    // That is true whatever the camera does, so surfacing one as the other unconverted
+    // mirrors every physics-driven rotation.
     const g = await bootAndTrack({
       groundFriction: 0,
       propBody: { angularDamping: 0 },
@@ -580,7 +606,15 @@ describe('physics conformance / rotation ownership', () => {
     g.propBody('a').angularVelocity = 2;
     g.tick(10);
     const bodyAngle = g.propBody('a').angle;
-    expect(g.propEntity('a').rotation).toBeCloseTo(bodyAngle, 5);
+    expect(bodyAngle).not.toBeCloseTo(0, 3); // the spin actually happened
+    expect(g.propEntity('a').rotation).toBeCloseTo(-bodyAngle, 5);
+  });
+
+  it('round-trips an authored angle through the physics frame unchanged', async () => {
+    // The negation has to be applied on the way in as well as out, or fixing the spin
+    // direction would flip all the map's authored scenery instead.
+    const g = await bootAndTrack({ props: [{ id: 'a', x: 10, y: 10, rotationDeg: 30 }] });
+    expect(g.propEntity('a').rotation).toBeCloseTo((30 * Math.PI) / 180, 3);
   });
 
   it('keeps unit rotation locked so game logic owns facing', async () => {
