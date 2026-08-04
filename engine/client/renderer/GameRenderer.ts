@@ -44,12 +44,11 @@ export class GameRenderer {
    *  destroys it on the same tick); without this the placeholder appears at its broadcast
    *  position (top-left corner of the map for celleater) and never goes away. */
   private _pendingCreates = new Set<string>();
-  private _entityTargets = new Map<string, { x: number; z: number; ry: number }>(); // interpolation targets
+  private _entityTargets = new Map<string, { x: number; z: number; height: number; ry: number }>(); // interpolation targets
   /** Derives idle↔run per entity from the authoritative targets (never the lerped
    *  position, which is asymptotic and never reads as exactly stopped). */
   private _locomotion = new LocomotionTracker();
   private _animationMixers: any[] = [];
-  private _jumpingEntities = new Map<string, { velocity: number; baseY: number }>(); // Y-axis jump simulation
   /** Per-unit inventory mirror — mirrors the `inventory` + `currentSlot` server stats so that
    *  the renderer can resolve the currently-held item type for any unit (not just the local
    *  player). The local player's inventory is *also* mirrored into React state in GameClient
@@ -390,6 +389,7 @@ export class GameRenderer {
         if (!this._pendingCreates.delete(data.entityId)) return;
         const model = gltf.scene;
         model.position.set(data.x, floorY, data.y);
+        (model as any)._spawnFloorY = floorY;
         // Spawn facing the way the export authored it. The sprite branch has always
         // done this; the GLB branch did not, so every model started at yaw 0 and
         // relied entirely on the snapshot lerp to swing it into place — a visible
@@ -556,6 +556,7 @@ export class GameRenderer {
           (mesh as any)._yawAxis = 'z';
           // Sit just above the layer top (per body `z-index.layer`) to avoid z-fighting with tile face.
           mesh.position.set(data.x, floorY + 0.002, data.y);
+          (mesh as any)._spawnFloorY = floorY + 0.002;
           mesh.name = `entity_${data.entityId}`;
           // See createEntity (GLB branch) for why we stash this — bar/label
           // overlays use it to position themselves in screen space above the unit.
@@ -593,6 +594,7 @@ export class GameRenderer {
       // but don't add visible geometry.
       const obj = new THREE.Object3D();
       obj.position.set(data.x, floorY, data.y);
+      (obj as any)._spawnFloorY = floorY;
       obj.name = `entity_${data.entityId}`;
       this._scene.add(obj);
       this._entities.set(data.entityId, obj);
@@ -1114,9 +1116,9 @@ export class GameRenderer {
   }
 
   /** Update entity transform targets from server snapshot (interpolated in render loop) */
-  updateTransforms(transforms: Array<{ entityId: string; x: number; y: number; rotation: number }>): void {
+  updateTransforms(transforms: Array<{ entityId: string; x: number; y: number; height?: number; rotation: number }>): void {
     for (const t of transforms) {
-      this._entityTargets.set(t.entityId, { x: t.x, z: t.y, ry: t.rotation ?? 0 });
+      this._entityTargets.set(t.entityId, { x: t.x, z: t.y, height: t.height ?? 0, ry: t.rotation ?? 0 });
     }
   }
 
@@ -1246,9 +1248,6 @@ export class GameRenderer {
     if (stats.currentAnimation) {
       this.playAnimation(entityId, stats.currentAnimation);
     }
-    if (stats.jump) {
-      this.triggerJump(entityId);
-    }
     if (stats.useItem) {
       // Server broadcasts the tween *name* (`swingCW`, `swingCCW`, `swing360CW`,
       // `poke`, `recoil`); legacy boolean falls back to swingCW for safety.
@@ -1320,35 +1319,6 @@ export class GameRenderer {
     this._swingTweens.set(unitId, { startTime: performance.now(), ...params });
   }
 
-  /**
-   * Vertical motion is renderer-owned: the physics world is rapier2d, so a script's
-   * upward impulse has no axis to act on server-side and arrives here as a UI command.
-   * That makes `JUMP_GRAVITY` and the impulse→velocity mapping the only two free
-   * parameters, and they need to be calibrated together rather than picked.
-   *
-   * One world unit is one tile, and a unit's collider stands `scale.z = 1.88` tiles
-   * tall, so the character is a shade under two tiles. Given `apex = v²/(2g)` and
-   * `airtime = 2v/g`, the shipped impulse of 300 gives:
-   *
-   *     v = 300/25 = 12 tiles/s  →  apex 2.4 tiles, airtime 0.8 s
-   *
-   * i.e. the jump clears the character's own height with margin and hangs long enough
-   * to read. Gravity of 30 tiles/s² is ~3× earth, the usual platformer convention —
-   * earth gravity at this scale gives a floaty 1.2 s hang. The previous values
-   * (`impulse/60` with g = 15) produced a 0.83-tile apex: less than half the
-   * character's height, which is why the jump barely registered.
-   */
-  private static readonly JUMP_GRAVITY = 30;
-  private static readonly JUMP_IMPULSE_TO_VELOCITY = 1 / 25;
-
-  /** Trigger a visual jump arc on an entity. `impulse` is the script's Z magnitude. */
-  triggerJump(entityId: string, impulse = 300): void {
-    if (this._jumpingEntities.has(entityId)) return; // already jumping
-    const obj = this._entities.get(entityId);
-    if (!obj) return;
-    const velocity = Math.max(1, (Number(impulse) || 300) * GameRenderer.JUMP_IMPULSE_TO_VELOCITY);
-    this._jumpingEntities.set(entityId, { velocity, baseY: obj.position.y });
-  }
 
   /** Set camera to a specific position */
   followPosition(x: number, y: number): void {
@@ -1387,6 +1357,11 @@ export class GameRenderer {
       if (!obj) continue;
       obj.position.x += (target.x - obj.position.x) * lerpFactor;
       obj.position.z += (target.z - obj.position.z) * lerpFactor;
+      // Height is simulated now, not faked here. `height` is the entity's base above the
+      // floor, so it adds to the spawn Y the layer's z-index put the model at — a unit
+      // standing on a car is the server telling us so, not a local animation.
+      const baseY = (obj as any)._spawnFloorY ?? obj.position.y;
+      obj.position.y += (baseY + target.height - obj.position.y) * lerpFactor;
       // Rotation lerp. Sprites flattened with rotation.x = −π/2 yaw around their
       // local Z; GLB models yaw around world Y. Use `while` rather than a single
       // `if` so we fully normalise even after the value has drifted beyond 2π
@@ -1492,31 +1467,6 @@ export class GameRenderer {
       }
     }
 
-    // Simulate jump arcs (Y-axis visual bounce) — see triggerJump for the calibration.
-    const JUMP_GRAVITY = GameRenderer.JUMP_GRAVITY;
-    for (const [entityId, jump] of this._jumpingEntities) {
-      const obj = this._entities.get(entityId);
-      if (!obj) { this._jumpingEntities.delete(entityId); continue; }
-      // Integrate in fixed sub-steps. A single frame of dt was enough to swallow the
-      // whole arc on a slow frame — at 2 fps, `velocity 5 − 15·0.5` is already negative,
-      // so the entity "landed" before it ever rose and the jump was invisible.
-      let remaining = Math.min(dt, 0.25);
-      while (remaining > 0 && this._jumpingEntities.has(entityId)) {
-        const step = Math.min(remaining, 1 / 60);
-        remaining -= step;
-        jump.velocity -= JUMP_GRAVITY * step;
-        obj.position.y += jump.velocity * step;
-        if (obj.position.y <= jump.baseY) {
-          obj.position.y = jump.baseY;
-          this._jumpingEntities.delete(entityId);
-        }
-      }
-    }
-
-    // Update animation mixers
-    for (const mixer of this._animationMixers) {
-      mixer.update(dt);
-    }
 
     this._camera.update(dt * 1000);
     this._renderer.render(this._scene, this._camera.threeCamera);

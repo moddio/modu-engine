@@ -2192,6 +2192,9 @@ export class GameServer {
     else body.lockRotation(true);
 
 
+    // Sync reports the entity's *base*, not its centre, so a resting entity streams
+    // height 0 and the codec drops the field. Keep the offset that makes that possible.
+    (body as any)._halfHeightPhys = halfHeightPhys;
     this._entityBodies.set(entityId, body);
     // Reverse map for collision-event → entityId resolution.
     this._bodyToEntity.set(body.handle, entityId);
@@ -2767,7 +2770,10 @@ export class GameServer {
       if (!entity) continue;
       const pos = body.position;
       let x = this._physicsToTile(pos.x);
-      const height = this._physicsToTile(pos.y); // Y is up
+      // Feet, not centre: subtract the half-height the body was built with, so an entity
+      // standing on the floor reports 0 and the renderer can add it straight to the
+      // model's base without floating everything by half its own height.
+      const height = this._physicsToTile(pos.y - ((body as any)._halfHeightPhys ?? 0));
       let z = this._physicsToTile(pos.z);
 
       if (canClamp) {
@@ -2847,7 +2853,7 @@ export class GameServer {
       if (!Number.isFinite(x) || !Number.isFinite(z) || !Number.isFinite(r)) continue;
       transforms.push({
         entityId: id,
-        transform: encodeTransform({ x, y: z, rotation: r }),
+        transform: encodeTransform({ x, y: z, height: entity.position.y ?? 0, rotation: r }),
       });
     }
     if (transforms.length > 0) {

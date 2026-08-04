@@ -92,4 +92,17 @@ describe('Protocol Messages', () => {
       expect(result.stateId).toBe('walk');
     });
   });
+
+  it('round-trips height, and omits it entirely when the entity is on the floor', () => {
+    const airborne = decodeTransform(encodeTransform({ x: 12.5, y: 4.25, height: 1.875, rotation: 1.2 }));
+    expect(airborne.height).toBeCloseTo(1.875, 3);
+    expect(airborne.x).toBeCloseTo(12.5, 3);
+    expect(airborne.y).toBeCloseTo(4.25, 3);
+
+    // Nothing on the wire for a grounded entity — 69 props every tick makes a per-entity
+    // field expensive — but it still decodes as a number rather than undefined.
+    const grounded = encodeTransform({ x: 1, y: 2, height: 0, rotation: 0 });
+    expect(grounded.height).toBeUndefined();
+    expect(decodeTransform(grounded).height).toBe(0);
+  });
 });
