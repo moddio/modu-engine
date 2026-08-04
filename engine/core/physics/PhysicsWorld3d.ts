@@ -9,10 +9,15 @@ export interface BodyDef3d {
 }
 
 export interface ColliderDef3d {
-  shape: 'box' | 'sphere';
+  shape: 'box' | 'sphere' | 'capsule';
   halfExtents?: Vec3;  // for box
-  radius?: number;      // for sphere
+  radius?: number;      // for sphere and capsule
+  /** Capsule only: half the length of the cylindrical section, excluding the end caps. */
+  halfHeight?: number;
   isSensor?: boolean;
+  /** Collision group bits, same scheme as the 2D path (see CollisionFilter). */
+  category?: number;
+  mask?: number;
   friction?: number;
   restitution?: number;
   density?: number;

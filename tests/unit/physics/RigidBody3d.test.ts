@@ -89,4 +89,53 @@ describe('RigidBody3d', () => {
     world.step(16.67);
     expect(body.angularVelocity.y).toBeGreaterThan(0);
   });
+
+  it('round-trips damping and reports mass', () => {
+    const body = world.createBody({ type: 'dynamic', position: new Vec3(0, 0, 0) });
+    body.addCollider({ shape: 'box', halfExtents: new Vec3(0.5, 0.5, 0.5), density: 1 });
+    body.linearDamping = 2.5;
+    body.angularDamping = 0.75;
+    expect(body.linearDamping).toBeCloseTo(2.5, 5);
+    expect(body.angularDamping).toBeCloseTo(0.75, 5);
+    expect(body.mass).toBeGreaterThan(0);
+  });
+
+  it('locks rotation so game logic can own facing', () => {
+    const body = world.createBody({ type: 'dynamic', position: new Vec3(0, 0, 0) });
+    body.addCollider({ shape: 'box', halfExtents: new Vec3(0.5, 0.5, 0.5), density: 1 });
+    body.lockRotation(true);
+    body.angularVelocity = new Vec3(0, 5, 0);
+    world.step(50);
+    expect(body.angularVelocity.length()).toBeCloseTo(0, 5);
+  });
+
+  it('frees yaw while pinning pitch and roll, so a shoved prop spins instead of tipping', () => {
+    const body = world.createBody({ type: 'dynamic', position: new Vec3(0, 0, 0) });
+    body.addCollider({ shape: 'box', halfExtents: new Vec3(0.5, 0.5, 0.5), density: 1 });
+    body.lockRotationAxes(false, true, false);
+    body.angularVelocity = new Vec3(5, 5, 5);
+    world.step(50);
+    const w = body.angularVelocity;
+    expect(Math.abs(w.x)).toBeCloseTo(0, 5);
+    expect(Math.abs(w.z)).toBeCloseTo(0, 5);
+    expect(Math.abs(w.y)).toBeGreaterThan(0.1);
+  });
+
+  it('applies collision groups so filtered pairs pass through each other', () => {
+    // A unit-category body and a body masked to hit walls only must not collide.
+    const a = world.createBody({ type: 'dynamic', position: new Vec3(0, 0, 0) });
+    a.addCollider({ shape: 'box', halfExtents: new Vec3(0.5, 0.5, 0.5), density: 1, category: 0x0002, mask: 0x0001 });
+    const b = world.createBody({ type: 'dynamic', position: new Vec3(0.2, 0, 0) });
+    b.addCollider({ shape: 'box', halfExtents: new Vec3(0.5, 0.5, 0.5), density: 1, category: 0x0002, mask: 0x0001 });
+    for (let i = 0; i < 30; i++) world.step(16);
+    // Overlapping and interpenetrating: with no shared bits they never push apart.
+    expect(Math.abs(a.position.x - b.position.x)).toBeLessThan(0.9);
+  });
+
+  it('builds a capsule collider for units', () => {
+    const body = world.createBody({ type: 'dynamic', position: new Vec3(0, 0, 0) });
+    const col = body.addCollider({ shape: 'capsule', halfHeight: 0.6, radius: 0.2, density: 1 });
+    expect(col).toBeDefined();
+    expect(body.mass).toBeGreaterThan(0);
+  });
 });
