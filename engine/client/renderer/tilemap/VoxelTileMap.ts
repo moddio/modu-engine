@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { TilesetLookup, TilesetDef } from './TilesetLoader';
+import { TilesetLookup, TilesetDef, isTileBlank } from './TilesetLoader';
 import { buildChunkGeometry } from './TileChunk';
 
 const CHUNK_SIZE = 16;
@@ -44,6 +44,13 @@ export class VoxelTileMap {
   readonly group = new THREE.Group();
   private _meshes: THREE.Mesh[] = [];
   private _tilesetTextures = new Map<string, THREE.Texture>();
+  /** GIDs whose atlas tile is entirely transparent. Emitting voxel geometry for them
+   *  is pure cost and pure risk: nothing can ever be drawn, yet the quads still
+   *  rasterize, and at grazing angles UV interpolation drifts off the tile and samples
+   *  a neighbouring one. Braains3D's full-map "glass ceiling" layer is 1995 tiles of a
+   *  100%-transparent GID, which is what scattered grass-green and pavement speckles
+   *  across the sky whenever the camera dropped toward the horizon. */
+  private _blankGids = new Set<number>();
 
   async load(map: TiledMap): Promise<void> {
     const { width: mapW, height: mapH } = map;
@@ -85,6 +92,7 @@ export class VoxelTileMap {
         spacing,
         margin,
       });
+      this._collectBlankGids(tilesetDefs[tilesetDefs.length - 1], this._tilesetTextures.get(ts.image)?.image);
     }
 
     if (tilesetDefs.length === 0) return;
@@ -116,7 +124,8 @@ export class VoxelTileMap {
             for (let x = 0; x < chunkW; x++) {
               const mapX = cx * CHUNK_SIZE + x;
               const mapY = cy * CHUNK_SIZE + y;
-              chunkTiles.push(layer.data[mapY * mapW + mapX]);
+              const gid = layer.data[mapY * mapW + mapX];
+              chunkTiles.push(this._blankGids.has(gid) ? 0 : gid);
             }
           }
 
@@ -170,4 +179,43 @@ export class VoxelTileMap {
     this._tilesetTextures.clear();
     this.group.removeFromParent();
   }
+  /**
+   * Scan a tileset atlas once and record which tiles are fully transparent.
+   *
+   * Alpha 128 is the cut-off so this matches the chunk material's `alphaTest: 0.5`:
+   * a tile whose every texel would be discarded by the shader can never contribute a
+   * pixel, so it should not become geometry in the first place.
+   *
+   * Degrades silently. `getImageData` throws on a cross-origin atlas (modd.io serves
+   * tilesets from cache.modd.io), and there is no canvas at all under Node; in either
+   * case the set stays empty and every tile renders exactly as before.
+   */
+  private _collectBlankGids(def: TilesetDef | undefined, image: unknown): void {
+    if (!def || !image || typeof document === 'undefined') return;
+    try {
+      const canvas = document.createElement('canvas');
+      canvas.width = def.imagewidth;
+      canvas.height = def.imageheight;
+      const ctx = canvas.getContext('2d', { willReadFrequently: true });
+      if (!ctx) return;
+      ctx.drawImage(image as CanvasImageSource, 0, 0);
+
+      const margin = def.margin ?? 0;
+      const spacing = def.spacing ?? 0;
+      const rows = Math.floor((def.imageheight - 2 * margin + spacing) / (def.tileheight + spacing));
+      const count = def.tilecount || def.columns * rows;
+      for (let local = 0; local < count; local++) {
+        const col = local % def.columns;
+        const row = Math.floor(local / def.columns);
+        const x = margin + col * (def.tilewidth + spacing);
+        const y = margin + row * (def.tileheight + spacing);
+        if (x + def.tilewidth > def.imagewidth || y + def.tileheight > def.imageheight) continue;
+        const data = ctx.getImageData(x, y, def.tilewidth, def.tileheight).data;
+        if (isTileBlank(data)) this._blankGids.add(def.firstgid + local);
+      }
+    } catch {
+      // Cross-origin atlas or no 2D context — leave every tile renderable.
+    }
+  }
+
 }

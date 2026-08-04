@@ -51,4 +51,25 @@ describe('buildChunkGeometry', () => {
       expect(result.normals[i * 3 + 2]).toBe(0);
     }
   });
+
+  it('insets emitted UVs by half a texel so tiles cannot sample their neighbour', () => {
+    const inset = 0.5 / 288;
+    const uv = { u: 0, v: 0, uSize: 16 / 288, vSize: 16 / 288, uInset: inset, vInset: inset, tilesetIndex: 0 };
+    const geo = buildChunkGeometry([1], 1, 1, 1, 1, () => uv);
+    const us = geo.uvs.filter((_, i) => i % 2 === 0);
+    const vs = geo.uvs.filter((_, i) => i % 2 === 1);
+    // Every emitted coordinate sits strictly inside the tile's true rect.
+    expect(Math.min(...us)).toBeCloseTo(uv.u + inset, 6);
+    expect(Math.max(...us)).toBeCloseTo(uv.u + uv.uSize - inset, 6);
+    expect(Math.min(...vs)).toBeCloseTo(uv.v + inset, 6);
+    expect(Math.max(...vs)).toBeCloseTo(uv.v + uv.vSize - inset, 6);
+  });
+
+  it('falls back to the exact rect when no inset is supplied', () => {
+    const uv = { u: 0, v: 0, uSize: 0.25, vSize: 0.25, tilesetIndex: 0 };
+    const geo = buildChunkGeometry([1], 1, 1, 1, 1, () => uv);
+    const us = geo.uvs.filter((_, i) => i % 2 === 0);
+    expect(Math.min(...us)).toBeCloseTo(0, 6);
+    expect(Math.max(...us)).toBeCloseTo(0.25, 6);
+  });
 });
