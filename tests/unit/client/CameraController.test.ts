@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { CameraController, CameraConfig } from '../../../engine/client/renderer/CameraController';
+import { CAMERA_DISTANCE_MULTIPLIER } from '../../../engine/client/renderer/cameraFraming';
 
 describe('CameraController', () => {
   let camera: CameraController;
@@ -88,8 +89,11 @@ describe('CameraController', () => {
       camera.setZoom(10);
       camera.setTarget(0, 0, 0);
       camera.update(16);
-      // At 90° elevation, camera should be directly above target
-      expect(camera.position.y).toBeCloseTo(10, 1);
+      // At 90° elevation, camera should be directly above target. `zoom` is the taro
+      // zoom level, not a world distance — `cameraFraming` scales it by
+      // CAMERA_DISTANCE_MULTIPLIER to get the real one, so assert against that rather
+      // than a bare 10, which silently pinned the pre-multiplier behaviour.
+      expect(camera.position.y).toBeCloseTo(10 * CAMERA_DISTANCE_MULTIPLIER, 1);
       expect(Math.abs(camera.position.x)).toBeLessThan(0.01);
       expect(Math.abs(camera.position.z)).toBeLessThan(0.01);
     });

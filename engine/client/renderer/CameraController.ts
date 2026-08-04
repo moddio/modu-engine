@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { CAMERA_DISTANCE_MULTIPLIER } from './cameraFraming';
 
 export interface CameraConfig {
   projectionMode?: 'perspective' | 'orthographic';
@@ -308,7 +309,9 @@ export class CameraController {
     const sinAz = Math.sin(this.azimuth);
 
     // Taro zoom maps to camera distance. zoom=1 is close, zoom=3 is medium, zoom=10 is far.
-    const actualDistance = this.distance * 3;
+    // The same multiplier is what `cameraFraming` inverts to turn a taro zoom into a
+    // visible world span, so it has to come from one place or the two drift apart.
+    const actualDistance = this.distance * CAMERA_DISTANCE_MULTIPLIER;
 
     this.position.set(
       this.target.x + actualDistance * cosEl * sinAz,
